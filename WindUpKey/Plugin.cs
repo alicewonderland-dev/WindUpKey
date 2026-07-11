@@ -25,6 +25,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IContextMenu ContextMenu { get; private set; } = null!;
     [PluginService] internal static IGameInteropProvider GameInterop { get; private set; } = null!;
     [PluginService] internal static IObjectTable ObjectTable { get; private set; } = null!;
+    [PluginService] internal static ICondition Condition { get; private set; } = null!;
 
     public Configuration Configuration { get; }
     private readonly WindowSystem _windowSystem = new("WindUpKey");
@@ -49,7 +50,7 @@ public sealed class Plugin : IDalamudPlugin
             Log.Warning(ex, "WindUpKey config migrate/save failed; continuing with defaults where possible");
         }
 
-        _lockController = new LockController(GameInterop, Log);
+        _lockController = new LockController(GameInterop, Condition, ObjectTable, Log);
         _timer = new WindTimerService(Configuration, _lockController);
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
@@ -65,7 +66,7 @@ public sealed class Plugin : IDalamudPlugin
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open Wind-Up Key config. /windup <safeword> uses your configured safeword.",
+            HelpMessage = "Open Wind-Up Key config. /windup <safeword> uses your safeword. /windup unlock clears Hardcore.",
         });
 
         PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
@@ -112,6 +113,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         _relay.Tick();
         _timer.Tick();
+        _lockController.Tick();
     }
 
     private void OnLogin() => _relay.Start();
@@ -124,6 +126,20 @@ public sealed class Plugin : IDalamudPlugin
         if (string.IsNullOrEmpty(trimmed))
         {
             OpenConfig();
+            return;
+        }
+
+        if (string.Equals(trimmed, "unlock", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!Configuration.HardcoreMode)
+            {
+                ChatGui.Print("[Wind-Up Key] Hardcore is already off.");
+                return;
+            }
+
+            Configuration.HardcoreMode = false;
+            Configuration.Save();
+            ChatGui.Print("[Wind-Up Key] Hardcore cleared. You can change role again.");
             return;
         }
 

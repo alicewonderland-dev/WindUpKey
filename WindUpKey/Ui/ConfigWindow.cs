@@ -38,6 +38,11 @@ public sealed class ConfigWindow : Window, IDisposable
 
         DrawConnection();
 
+#if WINDUP_TESTING
+        ImGui.Spacing();
+        ImGui.TextDisabled("TEST BUILD: Unwind / Add wind in doll settings; right-click yourself for Wind Up (Self Test).");
+#endif
+
         if (_config.IsWinder)
         {
             ImGui.Spacing();
@@ -53,6 +58,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
         DrawDollSettings();
     }
+
 
     private void DrawRoleSetup()
     {
@@ -73,9 +79,13 @@ public sealed class ConfigWindow : Window, IDisposable
 
         if (ImGui.Button("I am a Doll", new Vector2(200, 0)))
         {
+            var grantStarterWind = !_config.HasCompletedInitialSetup;
             _config.Role = PlayerRole.Doll;
+            _config.HasCompletedInitialSetup = true;
             _config.Save();
             _timer.Tick();
+            if (grantStarterWind)
+                _timer.AddHours(24);
         }
 
         ImGui.TextDisabled("You can be wound by others, and can wind other dolls. Timer, whitelist, and safeword apply.");
@@ -84,7 +94,8 @@ public sealed class ConfigWindow : Window, IDisposable
         if (ImGui.Button("I am a Winder", new Vector2(200, 0)))
         {
             _config.Role = PlayerRole.Winder;
-            _timer.ClearDollRestrictions();
+            _config.HasCompletedInitialSetup = true;
+            _timer.SuspendDollRestrictions();
             _config.Save();
         }
 
@@ -123,6 +134,18 @@ public sealed class ConfigWindow : Window, IDisposable
             _config.MaxWindHours = Math.Clamp(maxHours, 1, 168);
 
         ImGui.TextDisabled("Remaining time is never shown to you (the doll).");
+
+#if WINDUP_TESTING
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Testing");
+        ImGui.Separator();
+        ImGui.TextDisabled("Testing build only: adjust timer without a remote wind.");
+        if (ImGui.Button("Unwind"))
+            _timer.UnwindForTesting();
+        ImGui.SameLine();
+        if (ImGui.Button("Add 1h wind"))
+            _timer.AddHours(1);
+#endif
 
         ImGui.Spacing();
         ImGui.TextUnformatted("Consent");
@@ -186,6 +209,7 @@ public sealed class ConfigWindow : Window, IDisposable
         if (_config.HardcoreMode)
         {
             ImGui.TextWrapped("Hardcore is on. You are locked as a Doll and cannot switch to Winder.");
+            ImGui.TextDisabled("Use /windup unlock to clear Hardcore.");
         }
         else
         {
@@ -221,6 +245,7 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.SameLine();
             if (ImGui.Button("Change role…"))
             {
+                _timer.SuspendDollRestrictions();
                 _config.Role = PlayerRole.Unset;
                 _config.Save();
             }

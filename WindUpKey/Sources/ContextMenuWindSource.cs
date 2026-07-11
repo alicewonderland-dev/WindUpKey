@@ -65,12 +65,19 @@ public sealed class ContextMenuWindSource : IWindUpSource
         if (!TryGetPlayerIdentity(target, out var identity))
             return;
 
+#if WINDUP_TESTING
+        // Testing build: allow winding yourself (same path as winding another player).
+        var selfTarget = string.Equals(identity, _relay.LocalIdentity, StringComparison.OrdinalIgnoreCase);
+        var menuTitle = selfTarget ? "Wind Up (Self Test)" : "Wind Up";
+#else
         if (string.Equals(identity, _relay.LocalIdentity, StringComparison.OrdinalIgnoreCase))
             return;
+        const string menuTitle = "Wind Up";
+#endif
 
         args.AddMenuItem(new MenuItem
         {
-            Name = "Wind Up",
+            Name = menuTitle,
             IsSubmenu = true,
             UseDefaultPrefix = true,
             OnClicked = clicked =>
@@ -90,7 +97,7 @@ public sealed class ContextMenuWindSource : IWindUpSource
                     });
                 }
 
-                clicked.OpenSubmenu("Wind Up", items);
+                clicked.OpenSubmenu(menuTitle, items);
             },
         });
     }

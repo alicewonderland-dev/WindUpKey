@@ -1,11 +1,30 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.1.0.0</Version>
+    <Version>0.1.1.0</Version>
     <Description></Description>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Configurations>Debug;Release;Testing</Configurations>
   </PropertyGroup>
+
+  <!-- Debug + Testing: unwind UI and self-wind context menu. Release is the public build. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug' Or '$(Configuration)' == 'Testing'">
+    <DefineConstants>$(DefineConstants);WINDUP_TESTING</DefineConstants>
+  </PropertyGroup>
+
+  <!-- Testing channel must be a higher version than Release for Dalamud to serve it. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Testing'">
+    <Version>0.1.2.0</Version>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\WindUpKey.Protocol\WindUpKey.Protocol.csproj" />
   </ItemGroup>
+
+  <!-- Swap in the testing-branded manifest for Testing packs (same InternalName). -->
+  <Target Name="UseTestingManifest" AfterTargets="Build" Condition="'$(Configuration)' == 'Testing'">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\WindUpKey.Testing.json"
+          DestinationFiles="$(OutputPath)WindUpKey.json"
+          OverwriteReadOnlyFiles="true" />
+  </Target>
 </Project>

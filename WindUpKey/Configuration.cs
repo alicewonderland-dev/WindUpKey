@@ -7,7 +7,7 @@ namespace WindUpKey;
 [Serializable]
 public class Configuration : IPluginConfiguration
 {
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 
     public int Version { get; set; } = CurrentVersion;
 
@@ -18,6 +18,9 @@ public class Configuration : IPluginConfiguration
 
     /// <summary>Unset until first-launch role prompt.</summary>
     public PlayerRole Role { get; set; } = PlayerRole.Unset;
+
+    /// <summary>True after the first Doll/Winder choice. Starter wind is only granted before this.</summary>
+    public bool HasCompletedInitialSetup { get; set; }
 
     /// <summary>When true, role is locked to Doll and cannot switch to Winder.</summary>
     public bool HardcoreMode { get; set; }
@@ -57,6 +60,10 @@ public class Configuration : IPluginConfiguration
 
         if (HardcoreMode)
             Role = PlayerRole.Doll;
+
+        // Existing installs already past first role choice must not get a free starter wind.
+        if (Version < 4 && Role != PlayerRole.Unset)
+            HasCompletedInitialSetup = true;
 
         // Always force compiled-in relay endpoint so users cannot drift or see/edit it.
         ApplyRelayDefaults();

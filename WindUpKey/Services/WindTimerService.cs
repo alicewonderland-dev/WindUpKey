@@ -69,15 +69,25 @@ public sealed class WindTimerService
         SyncLockState();
     }
 
-    /// <summary>Call when switching to Winder (or Unset): drop doll timer and unlock movement once.</summary>
-    public void ClearDollRestrictions()
+#if WINDUP_TESTING
+    /// <summary>Testing: set remaining time to zero (locks the doll). Does not print remaining time.</summary>
+    public void UnwindForTesting()
     {
-        if (_config.ExpiryUtc is not null)
-        {
-            _config.ExpiryUtc = null;
-            _config.Save();
-        }
+        if (!_config.IsDoll)
+            return;
 
+        _config.ExpiryUtc = null;
+        _config.Save();
+        SyncLockState();
+    }
+#endif
+
+    /// <summary>
+    /// Call when leaving Doll (Winder or role picker): unlock movement once.
+    /// Keeps ExpiryUtc so returning as Doll restores remaining wind time.
+    /// </summary>
+    public void SuspendDollRestrictions()
+    {
         _wasLocked = false;
         _lock.SetLocked(false);
     }

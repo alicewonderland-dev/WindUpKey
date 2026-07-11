@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -272,35 +271,17 @@ public sealed class RelayClient : IDisposable
         CloseSocket();
         _config.ApplyRelayDefaults();
 
-        Exception? lastError = null;
-        foreach (var baseUrl in CandidateUrls())
-        {
-            var safeHost = SafeHost(baseUrl);
-            try
-            {
-                _lastStatus = $"Connecting ({safeHost})…";
-                _log.Information("WindUpKey connect attempt host={Host}", safeHost);
-                var uri = BuildUri(baseUrl);
-                _socket = new ClientWebSocket();
-                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeoutCts.CancelAfter(baseUrl.StartsWith("ws://", StringComparison.OrdinalIgnoreCase)
-                    ? TimeSpan.FromSeconds(2)
-                    : TimeSpan.FromSeconds(15));
-                await _socket.ConnectAsync(uri, timeoutCts.Token).ConfigureAwait(false);
-                _log.Information("WindUpKey WebSocket open host={Host} state={State}", safeHost, _socket.State);
-                lastError = null;
-                break;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
-            {
-                lastError = ex;
-                _log.Warning(ex, "WindUpKey connect failed host={Host}", safeHost);
-                CloseSocket();
-            }
-        }
+        var baseUrl = _config.RelayUrl;
+        var safeHost = SafeHost(baseUrl);
+        _lastStatus = $"Connecting ({safeHost})…";
+        _log.Information("WindUpKey connect attempt host={Host}", safeHost);
 
-        if (_socket is not { State: WebSocketState.Open })
-            throw lastError ?? new InvalidOperationException("Unable to open WebSocket");
+        var uri = BuildUri(baseUrl);
+        _socket = new ClientWebSocket();
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
+        await _socket.ConnectAsync(uri, timeoutCts.Token).ConfigureAwait(false);
+        _log.Information("WindUpKey WebSocket open host={Host} state={State}", safeHost, _socket.State);
 
         var register = new RegisterPayload
         {
@@ -309,12 +290,6 @@ public sealed class RelayClient : IDisposable
         };
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.Register, register), ct).ConfigureAwait(false);
         _log.Information("WindUpKey registered on relay as {Identity}", identity);
-    }
-
-    private static IEnumerable<string> CandidateUrls()
-    {
-        yield return RelayDefaults.LocalRelayUrl;
-        yield return RelayDefaults.RelayUrl;
     }
 
     private static string SafeHost(string baseUrl)
