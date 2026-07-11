@@ -17,7 +17,11 @@ Dalamud plugin. Connection settings are built into the plugin.
 
 ### Testing build
 
-Enable **Get plugin testing builds** in Dalamud Experimental settings to receive the testing channel (`WindUpKey-Testing.zip`). That build includes Unwind / Add 1h wind in settings and self-wind from your own context menu.
+1. Enable **Get plugin testing builds** in Dalamud Experimental settings.
+2. In the plugin installer, open **Wind-Up Key** and opt in to its testing builds (required for non-exclusive plugins).
+3. Update / reinstall so the plugin name shows **Wind-Up Key (Testing)** (version 0.1.2.0).
+
+That build includes Unwind / Add 1h wind in settings and self-wind from your own context menu.
 
 ## Develop / pack
 
