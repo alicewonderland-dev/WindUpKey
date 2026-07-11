@@ -3,4 +3,11 @@ obj/
 bin/
 *.user
 
+# Local relay host (not published; keep on disk only)
+WindUpRelay/
+WindUpRelay.Host/
+Start-WindUpHost.bat
+deploy/HOSTING.md
+
+# Pack output
 deploy/dist/
