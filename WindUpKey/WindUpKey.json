@@ -1,10 +1,10 @@
 {
-  "Author": "WindUpKey",
+  "Author": "WonderlandDev",
   "Name": "Wind-Up Key",
   "InternalName": "WindUpKey",
   "AssemblyVersion": "0.1.0.0",
-  "Punchline": "Wind-up doll key RP — others wind you from the context menu.",
-  "Description": "Other players with the plugin can wind your key from the context menu. When time runs out, movement and teleport are locked. Remaining time is shown only to the person who wound you. Connection settings are built in; you only configure whitelist, safeword, and max wind time.",
+  "Punchline": "Become the wind-up doll of your dreams, or wind dolls up.",
+  "Description": "",
   "ApplicableVersion": "any",
   "DalamudApiLevel": 15,
   "Tags": [

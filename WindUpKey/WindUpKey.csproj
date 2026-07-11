@@ -1,7 +1,7 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
     <Version>0.1.0.0</Version>
-    <Description>Wind-up doll key RP: others wind your key via a relay; empty timer locks movement and teleport.</Description>
+    <Description></Description>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
