@@ -2,7 +2,7 @@
   {
     "Author": "WonderlandDev",
     "Name": "Wind-Up Key",
-    "Description": "",
+    "Description": "A (hopefully) simple plugin. Dolls need winding, and winders can wind up dolls.",
     "InternalName": "WindUpKey",
     "AssemblyVersion": "0.1.0.0",
     "TestingAssemblyVersion": "0.1.0.0",
