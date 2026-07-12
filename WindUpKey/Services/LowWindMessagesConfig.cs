@@ -22,7 +22,7 @@ public sealed class LowWindMessagesConfig
         "Your key is running low. Seek winding soon, before your steps grow stiff.";
 
     public const string DefaultLow =
-        "Your winding is nearly spent. Find someone to wind you before you seize up.";
+        "Your winding is nearly spent. Find someone to re-wind you before you seize up.";
 
     public const string DefaultExpired =
         "Your winding has run out. Your springs seize - you can go no further without being rewound.";
@@ -127,7 +127,7 @@ public sealed class LowWindMessagesConfig
         {
             Comment =
                 "Low-wind RP chat lines for dolls. Edit and save; changes apply on the next warning. " +
-                "Do not include exact remaining time. Blank fields use the built-in default.",
+                "Blank fields use the built-in default.",
             High = DefaultHigh,
             Mid = DefaultMid,
             Low = DefaultLow,
