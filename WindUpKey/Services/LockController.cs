@@ -343,14 +343,14 @@ public sealed unsafe class LockController : IDisposable
             return;
         }
 
-        // Groundsit sets InThatPosition; if they stood up, put them back.
+        // Groundsit / playdead sets InThatPosition; if they stood up, put them back.
         if (_condition[ConditionFlag.InThatPosition] || _condition[ConditionFlag.Emoting])
             return;
 
         if (_objectTable.LocalPlayer is null)
             return;
 
-        if (_commands.TryExecute(GameCommandRunner.SitGround))
+        if (_commands.TryExecute(_commands.GetLockEmoteCommand()))
             _resitCooldownFrames = 90; // ~1.5s at 60fps — avoid command spam while standing anim plays
     }
 

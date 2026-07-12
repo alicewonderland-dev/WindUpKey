@@ -1,6 +1,7 @@
 using System;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
+using WindUpKey.Protocol;
 
 namespace WindUpKey.Services;
 
@@ -55,8 +56,11 @@ public sealed class WindTimerService
         _loginSitAttempts = 0;
     }
 
-    /// <summary>Extend the timer by hours (doll only). Returns remaining span for the remote winder.</summary>
-    public TimeSpan AddHours(double hours)
+    /// <summary>
+    /// Extend the timer by hours (doll only). Returns remaining span for the remote winder.
+    /// <paramref name="winderIdentity"/> is optional Name@World (or name) of who wound them.
+    /// </summary>
+    public TimeSpan AddHours(double hours, string? winderIdentity = null)
     {
         if (!_config.IsDoll)
             return TimeSpan.Zero;
@@ -71,11 +75,30 @@ public sealed class WindTimerService
         if (proposed > maxExpiry)
             proposed = maxExpiry;
 
+        var actualAdded = proposed - currentExpiry;
         _config.ExpiryUtc = proposed;
         _config.Save();
         SyncLockState();
         _lowWind.OnWindChanged();
+        if (actualAdded > TimeSpan.Zero)
+            _lowWind.OnWoundReceived(actualAdded, TryWinderDisplayName(winderIdentity));
         return RemainingForWinder();
+    }
+
+    private static string? TryWinderDisplayName(string? identity)
+    {
+        if (string.IsNullOrWhiteSpace(identity))
+            return null;
+
+        if (PlayerIdentity.TryParse(identity, out var name, out _))
+            return name;
+
+        var trimmed = identity.Trim();
+        var at = trimmed.LastIndexOf('@');
+        if (at > 0)
+            return trimmed[..at].Trim();
+
+        return trimmed.Length > 0 ? trimmed : null;
     }
 
     public TimeSpan RemainingForWinder()
@@ -121,7 +144,7 @@ public sealed class WindTimerService
             return;
         }
 
-        if (_commands.TryExecute(GameCommandRunner.SitGround))
+        if (_commands.TryExecute(_commands.GetLockEmoteCommand()))
             _pendingLoginSit = false;
         else if (_loginSitAttempts >= 1800)
             _pendingLoginSit = false;
@@ -139,8 +162,11 @@ public sealed class WindTimerService
     /// <summary>Debug: set remaining time to zero (locks the doll). Does not print remaining time.</summary>
     public void UnwindForTesting() => ClearWind();
 
-    /// <summary>Clear remaining wind (locks the doll). Used by partner unwind permission.</summary>
-    public void ClearWind()
+    /// <summary>
+    /// Clear remaining wind (locks the doll). Used by partner unwind permission.
+    /// <paramref name="winderIdentity"/> is optional Name@World (or name) of who unwound them.
+    /// </summary>
+    public void ClearWind(string? winderIdentity = null)
     {
         if (!_config.IsDoll)
             return;
@@ -148,7 +174,7 @@ public sealed class WindTimerService
         _config.ExpiryUtc = null;
         _config.Save();
         SyncLockState();
-        _lowWind.OnCleared();
+        _lowWind.OnCleared(TryWinderDisplayName(winderIdentity));
     }
 
     /// <summary>
@@ -175,7 +201,7 @@ public sealed class WindTimerService
         _lock.SetLocked(locked);
 
         if (becameLocked && _config.AutoGroundSit && _objects.LocalPlayer is not null)
-            _commands.Execute(GameCommandRunner.SitGround);
+            _commands.Execute(_commands.GetLockEmoteCommand());
     }
 
     public static string FormatRemaining(TimeSpan remaining)

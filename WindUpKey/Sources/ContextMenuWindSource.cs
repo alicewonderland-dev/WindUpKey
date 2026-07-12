@@ -65,7 +65,7 @@ public sealed class ContextMenuWindSource : IWindUpSource
         if (!TryGetPlayerIdentity(target, out var identity))
             return;
 
-        if (_config.DebugMode)
+        if (_config.IsDebugEnabled)
         {
             // Debug: self allowed when paired with your own key (same menu as any other pair).
             var selfTarget = string.Equals(identity, _relay.LocalIdentity, StringComparison.OrdinalIgnoreCase);

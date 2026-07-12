@@ -32,14 +32,20 @@ public sealed class LowWindWarningService
     private readonly Configuration _config;
     private readonly IChatGui _chat;
     private readonly LowWindMessagesConfig _messages;
+    private readonly SoundEffectService _sounds;
     private readonly Random _rng = new();
     private TimeSpan? _lastRemaining;
 
-    public LowWindWarningService(Configuration config, IChatGui chat, LowWindMessagesConfig messages)
+    public LowWindWarningService(
+        Configuration config,
+        IChatGui chat,
+        LowWindMessagesConfig messages,
+        SoundEffectService sounds)
     {
         _config = config;
         _chat = chat;
         _messages = messages;
+        _sounds = sounds;
     }
 
     /// <summary>Call each framework tick. Fires only on a downward cross of a random trigger.</summary>
@@ -47,10 +53,13 @@ public sealed class LowWindWarningService
     {
         if (!TryGetRemaining(out var remaining))
         {
-            // Natural expiry: had wind last tick, now empty.
-            // Explicit ClearWind clears _lastRemaining first so this path does not double-echo.
-            if (_lastRemaining is { } prev && prev > TimeSpan.Zero)
+            // Natural expiry: doll timer hit zero. Leaving Doll (role change) also makes
+            // TryGetRemaining false — do not treat that as unwind/expiry.
+            if (_config.IsDoll && _lastRemaining is { } prev && prev > TimeSpan.Zero)
+            {
                 PrintMessage(_messages.Expired);
+                _sounds.PlayExpire();
+            }
 
             _lastRemaining = null;
             return;
@@ -139,7 +148,7 @@ public sealed class LowWindWarningService
         return DateTimeOffset.UtcNow - last > LoginResendCooldown;
     }
 
-    /// <summary>After AddHours: re-arm / mark past silently — never print.</summary>
+    /// <summary>After AddHours: re-arm / mark past silently — never print remaining.</summary>
     public void OnWindChanged()
     {
         if (!_config.IsDoll)
@@ -155,14 +164,52 @@ public sealed class LowWindWarningService
         _lastRemaining = remaining;
     }
 
-    /// <summary>After ClearWind: echo that winding is spent, then reset flags and triggers.</summary>
-    public void OnCleared()
+    /// <summary>
+    /// After a wind that actually extended the timer: print a vague RP line by hours added
+    /// (not remaining). Uses the winder's character name when known. No-op if nothing was added.
+    /// </summary>
+    public void OnWoundReceived(TimeSpan hoursAdded, string? winderName = null)
+    {
+        if (!_config.IsDoll || hoursAdded <= TimeSpan.Zero)
+            return;
+
+        var name = string.IsNullOrWhiteSpace(winderName) ? null : winderName.Trim();
+        var hours = hoursAdded.TotalHours;
+        string message;
+        if (hours < 3)
+            message = name is null ? _messages.WindLight : FormatNamed(_messages.WindLightNamed, name);
+        else if (hours < 9)
+            message = name is null ? _messages.WindMedium : FormatNamed(_messages.WindMediumNamed, name);
+        else if (hours < 18)
+            message = name is null ? _messages.WindDeep : FormatNamed(_messages.WindDeepNamed, name);
+        else
+            message = name is null ? _messages.WindFull : FormatNamed(_messages.WindFullNamed, name);
+
+        PrintMessage(message);
+        _sounds.PlayWind(hoursAdded);
+    }
+
+    private static string FormatNamed(string template, string name) =>
+        template.Replace("{name}", name, StringComparison.Ordinal);
+
+    /// <summary>
+    /// After ClearWind (partner/debug unwind): echo that the key was drawn back, then reset.
+    /// Natural timer expiry still uses <see cref="LowWindMessagesConfig.Expired"/> via Tick.
+    /// </summary>
+    public void OnCleared(string? winderName = null)
     {
         // Clear tracking first so a re-entrant Tick (e.g. from chat/config save) cannot also echo.
         var shouldEcho = _config.IsDoll && _lastRemaining is { } prev && prev > TimeSpan.Zero;
         ClearAll();
-        if (shouldEcho)
-            PrintMessage(_messages.Expired);
+        if (!shouldEcho)
+            return;
+
+        var name = string.IsNullOrWhiteSpace(winderName) ? null : winderName.Trim();
+        var message = name is null
+            ? _messages.Unwind
+            : FormatNamed(_messages.UnwindNamed, name);
+        PrintMessage(message);
+        _sounds.PlayUnwind();
     }
 
     /// <summary>Debug: print the alert message that would apply now, plus remaining time.</summary>
@@ -170,13 +217,13 @@ public sealed class LowWindWarningService
     {
         if (!_config.IsDoll)
         {
-            _chat.Print("[Wind-Up Key] Check: not a doll — no low-wind alert.");
+            PluginChat.Print(_chat, "Check: not a doll — no low-wind alert.", PluginChat.Grey);
             return;
         }
 
         if (!TryGetRemaining(out var remaining))
         {
-            _chat.Print("[Wind-Up Key] Check: timer empty — no low-wind alert.");
+            PluginChat.Print(_chat, "Check: timer empty — no low-wind alert.", PluginChat.Grey);
             return;
         }
 
@@ -191,8 +238,8 @@ public sealed class LowWindWarningService
         else
             message = _messages.High;
 
-        _chat.Print($"[Wind-Up Key] Check: {message}");
-        _chat.Print($"[Wind-Up Key] Check: remaining {remainingDisplay}.");
+        PluginChat.Print(_chat, $"Check: {message}");
+        PluginChat.Print(_chat, $"Check: remaining {remainingDisplay}.", PluginChat.Grey);
     }
 
     /// <summary>Debug: print trigger/fired/crossed state for each low-wind band.</summary>
@@ -200,26 +247,28 @@ public sealed class LowWindWarningService
     {
         if (!_config.IsDoll)
         {
-            _chat.Print("[Wind-Up Key] Debug: not a doll — no low-wind triggers.");
+            PluginChat.Print(_chat, "Debug: not a doll — no low-wind triggers.", PluginChat.Grey);
             return;
         }
 
         if (!TryGetRemaining(out var remaining))
         {
-            _chat.Print("[Wind-Up Key] Debug: timer empty — no low-wind triggers.");
+            PluginChat.Print(_chat, "Debug: timer empty — no low-wind triggers.", PluginChat.Grey);
             return;
         }
 
         EnsureAllTriggers();
 
         var fired = _config.LowWindWarningsFired;
-        _chat.Print(
-            $"[Wind-Up Key] Debug: triggers high={FormatTrigger(GetHighTrigger())} " +
+        PluginChat.Print(
+            _chat,
+            $"Debug: triggers high={FormatTrigger(GetHighTrigger())} " +
             $"(fired={(fired & FlagHigh) != 0}, crossed={remaining <= GetHighTrigger()}), " +
             $"mid={FormatTrigger(GetMidTrigger())} " +
             $"(fired={(fired & FlagMid) != 0}, crossed={remaining <= GetMidTrigger()}), " +
             $"low={FormatTrigger(GetLowTrigger())} " +
-            $"(fired={(fired & FlagLow) != 0}, crossed={remaining <= GetLowTrigger()}).");
+            $"(fired={(fired & FlagLow) != 0}, crossed={remaining <= GetLowTrigger()}).",
+            PluginChat.Grey);
     }
 
     private static string FormatTrigger(TimeSpan trigger) =>
@@ -371,7 +420,8 @@ public sealed class LowWindWarningService
 
     private void PrintMessage(string body)
     {
-        _chat.Print($"[Wind-Up Key] {body}");
+        // Brand tag is pink; body stays default unless the RP line uses <c:name> tags.
+        PluginChat.Print(_chat, body);
         _config.LowWindLastWarningUtc = DateTimeOffset.UtcNow;
         _config.Save();
     }

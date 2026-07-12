@@ -9,7 +9,10 @@ namespace WindUpKey;
 [Serializable]
 public class Configuration : IPluginConfiguration
 {
-    public const int CurrentVersion = 5;
+    public const int CurrentVersion = 6;
+
+    /// <summary>Orphan profile from pre-v6 flat config until the first logged-in ContentId claims it.</summary>
+    public const string PendingProfileKey = "pending";
 
     public int Version { get; set; } = CurrentVersion;
 
@@ -17,6 +20,12 @@ public class Configuration : IPluginConfiguration
 
     /// <summary>Shared relay token. Never log this value.</summary>
     public string RelayToken { get; set; } = RelayDefaults.RelayToken;
+
+    /// <summary>Per-character state keyed by ContentId hex. Active fields below mirror the active entry.</summary>
+    public Dictionary<string, CharacterProfile> Profiles { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>ContentId hex of the profile currently loaded into the flat active fields.</summary>
+    public string ActiveContentId { get; set; } = string.Empty;
 
     /// <summary>Unset until first-launch role prompt.</summary>
     public PlayerRole Role { get; set; } = PlayerRole.Unset;
@@ -27,21 +36,61 @@ public class Configuration : IPluginConfiguration
     /// <summary>When true, role is locked to Doll and cannot switch to Winder.</summary>
     public bool HardcoreMode { get; set; }
 
+    /// <summary>When Hardcore was last successfully cleared via /windup unlock (per character).</summary>
+    public DateTimeOffset? HardcoreLastClearedUtc { get; set; }
+
+    /// <summary>
+    /// Pairing keys that may enable debug/testing features
+    /// (Alice Selena@Sargatanas, Scotti Pixie@Sargatanas).
+    /// </summary>
+    public static readonly string[] DebugOwnerPairingKeys = ["WZ9T4UEC", "DDHJMLL0"];
+
     /// <summary>When true, unlocks debug/testing features (self-wind, unwind UI, /windup check, /windup debug).</summary>
     public bool DebugMode { get; set; }
 
+    /// <summary>True when the local pairing key is a debug owner.</summary>
+    public bool IsDebugOwner => IsDebugOwnerKey(PairingKey);
+
+    /// <summary>Debug features require both the toggle and an owner pairing key.</summary>
+    public bool IsDebugEnabled => DebugMode && IsDebugOwner;
+
+    public static bool IsDebugOwnerKey(string? pairingKey)
+    {
+        if (string.IsNullOrEmpty(pairingKey))
+            return false;
+        foreach (var key in DebugOwnerPairingKeys)
+        {
+            if (string.Equals(pairingKey, key, StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
+
     public double MaxWindHours { get; set; } = 72;
 
-    /// <summary>Stable 8-character A–Z0–9 key for mutual pairing.</summary>
+    /// <summary>
+    /// Stable 8-character A–Z0–9 key for mutual pairing.
+    /// Derived from a one-way hash of the local Name@World (see <see cref="PairingKeyUtil.FromIdentity"/>).
+    /// </summary>
     public string PairingKey { get; set; } = string.Empty;
+
+    /// <summary>Last Name@World used to derive <see cref="PairingKey"/> (local only).</summary>
+    public string LastKnownIdentity { get; set; } = string.Empty;
 
     public List<PairedPartner> PairedPartners { get; set; } = [];
 
     /// <summary>Partner keys submitted locally that are not yet mutual.</summary>
     public List<string> PendingPartnerKeys { get; set; } = [];
 
-    /// <summary>When true, run /groundsit on unwind / login / re-enforce.</summary>
+    /// <summary>Outbound key-rotation announces waiting for an online peer.</summary>
+    public List<PendingKeyRotation> PendingKeyRotations { get; set; } = [];
+
+    /// <summary>When true, run lock emote (/playdead if unlocked, else /groundsit) on unwind / login / re-enforce.</summary>
     public bool AutoGroundSit { get; set; } = true;
+
+    /// <summary>When true, play bundled wind-up / wind-down sound effects.</summary>
+    public bool SoundEffectsEnabled { get; set; } = true;
 
     public bool SafewordEnabled { get; set; }
 
@@ -75,10 +124,17 @@ public class Configuration : IPluginConfiguration
     public bool IsWinder => Role == PlayerRole.Winder;
     public bool HasChosenRole => Role is PlayerRole.Doll or PlayerRole.Winder;
 
+    public static string FormatContentId(ulong contentId) => contentId.ToString("X16");
+
     public void Migrate()
     {
         if (Version < 1)
             Version = 1;
+
+        Profiles ??= new Dictionary<string, CharacterProfile>(StringComparer.Ordinal);
+        PairedPartners ??= [];
+        PendingPartnerKeys ??= [];
+        PendingKeyRotations ??= [];
 
         if (MaxWindHours <= 0)
             MaxWindHours = 72;
@@ -86,11 +142,11 @@ public class Configuration : IPluginConfiguration
         // Whole hours only (also cleans up older fractional configs).
         SafewordHours = Math.Clamp(Math.Round(SafewordHours), 1, 24);
 
-        PairedPartners ??= [];
-        PendingPartnerKeys ??= [];
-
         if (HardcoreMode)
+        {
             Role = PlayerRole.Doll;
+            SafewordEnabled = false;
+        }
 
         // Existing installs already past first role choice must not get a free starter wind.
         if (Version < 4 && Role != PlayerRole.Unset)
@@ -102,25 +158,180 @@ public class Configuration : IPluginConfiguration
             // Drop legacy whitelist fields if deserialized into ignored extras; lists start fresh.
         }
 
+        // Pairing key is derived from Name@World on login; do not invent a random one here.
         if (!PairingKeyUtil.IsValid(PairingKey))
-            PairingKey = PairingKeyUtil.Generate();
+            PairingKey = string.Empty;
 
-        PendingPartnerKeys = PendingPartnerKeys
-            .Select(PairingKeyUtil.Normalize)
-            .Where(PairingKeyUtil.IsValid)
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
+        NormalizePendingKeys();
+        NormalizePendingRotations();
+        StripLegacySelfTestingIdentity();
 
-        // Older testing builds stored a fake "Self (testing)" identity on the local self-pair.
-        foreach (var partner in PairedPartners)
+        // v6: move flat character state into Profiles; claim on first login ContentId.
+        if (Version < 6)
         {
-            if (string.Equals(partner.Identity, "Self (testing)", StringComparison.OrdinalIgnoreCase))
-                partner.Identity = string.Empty;
+            if (Profiles.Count == 0)
+                Profiles[PendingProfileKey] = CaptureActiveAsProfile();
+            else if (!string.IsNullOrEmpty(ActiveContentId) && Profiles.ContainsKey(ActiveContentId))
+                FlushActiveToProfiles();
         }
 
         // Always force compiled-in relay endpoint so users cannot drift or see/edit it.
         ApplyRelayDefaults();
         Version = CurrentVersion;
+    }
+
+    /// <summary>
+    /// Switches the active working set to the given ContentId profile.
+    /// Returns true when the active character changed (callers should clear presence / reconnect).
+    /// </summary>
+    public bool ActivateCharacter(ulong contentId)
+    {
+        if (contentId == 0)
+            return false;
+
+        var id = FormatContentId(contentId);
+        if (string.Equals(ActiveContentId, id, StringComparison.Ordinal))
+            return false;
+
+        if (!string.IsNullOrEmpty(ActiveContentId))
+            FlushActiveToProfiles();
+
+        ClaimPendingProfile(id);
+
+        if (!Profiles.TryGetValue(id, out var profile))
+        {
+            profile = new CharacterProfile();
+            Profiles[id] = profile;
+        }
+
+        ActiveContentId = id;
+        ApplyProfile(profile);
+        return true;
+    }
+
+    public void FlushActiveToProfiles()
+    {
+        if (string.IsNullOrEmpty(ActiveContentId))
+            return;
+
+        Profiles[ActiveContentId] = CaptureActiveAsProfile();
+    }
+
+    public CharacterProfile CaptureActiveAsProfile()
+    {
+        NormalizePendingKeys();
+        NormalizePendingRotations();
+        return new CharacterProfile
+        {
+            PairingKey = PairingKey,
+            LastKnownIdentity = LastKnownIdentity ?? string.Empty,
+            PairedPartners = PairedPartners.ToList(),
+            PendingPartnerKeys = PendingPartnerKeys.ToList(),
+            PendingKeyRotations = PendingKeyRotations
+                .Select(r => new PendingKeyRotation
+                {
+                    PartnerKey = r.PartnerKey,
+                    OldKey = r.OldKey,
+                    NewKey = r.NewKey,
+                    Identity = r.Identity,
+                })
+                .ToList(),
+            Role = Role,
+            HasCompletedInitialSetup = HasCompletedInitialSetup,
+            HardcoreMode = HardcoreMode,
+            HardcoreLastClearedUtc = HardcoreLastClearedUtc,
+            DebugMode = DebugMode,
+            MaxWindHours = MaxWindHours,
+            SafewordEnabled = SafewordEnabled,
+            Safeword = Safeword,
+            SafewordHours = SafewordHours,
+            ExpiryUtc = ExpiryUtc,
+            LowWindWarningsFired = LowWindWarningsFired,
+            LowWindTriggerHighSeconds = LowWindTriggerHighSeconds,
+            LowWindTriggerMidSeconds = LowWindTriggerMidSeconds,
+            LowWindTriggerLowSeconds = LowWindTriggerLowSeconds,
+            LowWindLastWarningUtc = LowWindLastWarningUtc,
+        };
+    }
+
+    public void ApplyProfile(CharacterProfile profile)
+    {
+        PairingKey = profile.PairingKey ?? string.Empty;
+        LastKnownIdentity = profile.LastKnownIdentity ?? string.Empty;
+        PairedPartners = profile.PairedPartners ?? [];
+        PendingPartnerKeys = profile.PendingPartnerKeys ?? [];
+        PendingKeyRotations = profile.PendingKeyRotations ?? [];
+        Role = profile.Role;
+        HasCompletedInitialSetup = profile.HasCompletedInitialSetup;
+        HardcoreMode = profile.HardcoreMode;
+        HardcoreLastClearedUtc = profile.HardcoreLastClearedUtc;
+        DebugMode = profile.DebugMode;
+        MaxWindHours = profile.MaxWindHours > 0 ? profile.MaxWindHours : 72;
+        SafewordEnabled = profile.SafewordEnabled;
+        Safeword = string.IsNullOrEmpty(profile.Safeword) ? "safeword" : profile.Safeword;
+        SafewordHours = Math.Clamp(Math.Round(profile.SafewordHours <= 0 ? 1 : profile.SafewordHours), 1, 24);
+        ExpiryUtc = profile.ExpiryUtc;
+        LowWindWarningsFired = profile.LowWindWarningsFired;
+        LowWindTriggerHighSeconds = profile.LowWindTriggerHighSeconds;
+        LowWindTriggerMidSeconds = profile.LowWindTriggerMidSeconds;
+        LowWindTriggerLowSeconds = profile.LowWindTriggerLowSeconds;
+        LowWindLastWarningUtc = profile.LowWindLastWarningUtc;
+
+        if (HardcoreMode)
+        {
+            Role = PlayerRole.Doll;
+            SafewordEnabled = false;
+        }
+
+        NormalizePendingKeys();
+        NormalizePendingRotations();
+        StripLegacySelfTestingIdentity();
+    }
+
+    private void ClaimPendingProfile(string contentId)
+    {
+        if (Profiles.ContainsKey(contentId))
+            return;
+        if (!Profiles.TryGetValue(PendingProfileKey, out var orphan))
+            return;
+
+        Profiles[contentId] = orphan;
+        Profiles.Remove(PendingProfileKey);
+    }
+
+    private void NormalizePendingKeys()
+    {
+        PendingPartnerKeys = (PendingPartnerKeys ?? [])
+            .Select(PairingKeyUtil.Normalize)
+            .Where(PairingKeyUtil.IsValid)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private void NormalizePendingRotations()
+    {
+        PendingKeyRotations = (PendingKeyRotations ?? [])
+            .Where(r =>
+                PairingKeyUtil.IsValid(PairingKeyUtil.Normalize(r.PartnerKey))
+                && PairingKeyUtil.IsValid(PairingKeyUtil.Normalize(r.OldKey))
+                && PairingKeyUtil.IsValid(PairingKeyUtil.Normalize(r.NewKey)))
+            .Select(r => new PendingKeyRotation
+            {
+                PartnerKey = PairingKeyUtil.Normalize(r.PartnerKey),
+                OldKey = PairingKeyUtil.Normalize(r.OldKey),
+                NewKey = PairingKeyUtil.Normalize(r.NewKey),
+                Identity = r.Identity?.Trim() ?? string.Empty,
+            })
+            .ToList();
+    }
+
+    private void StripLegacySelfTestingIdentity()
+    {
+        foreach (var partner in PairedPartners)
+        {
+            if (string.Equals(partner.Identity, "Self (testing)", StringComparison.OrdinalIgnoreCase))
+                partner.Identity = string.Empty;
+        }
     }
 
     public void ApplyRelayDefaults()
@@ -150,9 +361,52 @@ public class Configuration : IPluginConfiguration
 
     public bool IsPairedByKey(string pairingKey) => FindPairByKey(pairingKey) is not null;
 
+    /// <summary>Updates a partner's stored key in place (consent preserved).</summary>
+    public bool TryReplacePartnerKey(string oldKeyRaw, string newKeyRaw)
+    {
+        var oldKey = PairingKeyUtil.Normalize(oldKeyRaw);
+        var newKey = PairingKeyUtil.Normalize(newKeyRaw);
+        if (!PairingKeyUtil.IsValid(oldKey) || !PairingKeyUtil.IsValid(newKey))
+            return false;
+        if (string.Equals(oldKey, newKey, StringComparison.Ordinal))
+            return true;
+
+        var pair = FindPairByKey(oldKey);
+        if (pair is null)
+            return false;
+
+        if (FindPairByKey(newKey) is not null
+            && !string.Equals(PairingKeyUtil.Normalize(pair.PartnerKey), newKey, StringComparison.Ordinal))
+            return false;
+
+        pair.PartnerKey = newKey;
+        PendingPartnerKeys.RemoveAll(k => string.Equals(k, oldKey, StringComparison.Ordinal));
+        return true;
+    }
+
+    public void EnqueueKeyRotation(string partnerKey, string oldKey, string newKey, string identity)
+    {
+        var peer = PairingKeyUtil.Normalize(partnerKey);
+        var oldK = PairingKeyUtil.Normalize(oldKey);
+        var newK = PairingKeyUtil.Normalize(newKey);
+        if (!PairingKeyUtil.IsValid(peer) || !PairingKeyUtil.IsValid(oldK) || !PairingKeyUtil.IsValid(newK))
+            return;
+
+        PendingKeyRotations.RemoveAll(r =>
+            string.Equals(r.PartnerKey, peer, StringComparison.Ordinal));
+        PendingKeyRotations.Add(new PendingKeyRotation
+        {
+            PartnerKey = peer,
+            OldKey = oldK,
+            NewKey = newK,
+            Identity = identity?.Trim() ?? string.Empty,
+        });
+    }
+
     public void Save()
     {
         ApplyRelayDefaults();
+        FlushActiveToProfiles();
         Plugin.PluginInterface.SavePluginConfig(this);
     }
 }

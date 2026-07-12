@@ -15,6 +15,9 @@ namespace WindUpKey;
 public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/windup";
+    private const string HardcoreUnlockConfirmation =
+        "I am a very dumb doll who got stuck in hardcore";
+    private static readonly TimeSpan HardcoreReUnlockCooldown = TimeSpan.FromHours(72);
 
     [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
     [PluginService] internal static IClientState ClientState { get; private set; } = null!;
@@ -36,6 +39,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly LowWindWarningService _lowWind;
     private readonly ConsentService _consent;
     private readonly IWindNotifier _notifier;
+    private readonly SoundEffectService _sounds;
     private readonly RelayClient _relay;
     private readonly List<IWindUpSource> _sources = [];
 
@@ -55,11 +59,15 @@ public sealed class Plugin : IDalamudPlugin
         var commands = new GameCommandRunner(Log);
         _lockController = new LockController(GameInterop, ClientState, Condition, ObjectTable, commands, Configuration, Log);
         var lowWindMessages = new LowWindMessagesConfig(PluginInterface.GetPluginConfigDirectory(), Log);
-        _lowWind = new LowWindWarningService(Configuration, ChatGui, lowWindMessages);
+        var soundsDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(PluginInterface.AssemblyLocation.FullName) ?? ".",
+            "Sounds");
+        _sounds = new SoundEffectService(Configuration, Log, soundsDir);
+        _lowWind = new LowWindWarningService(Configuration, ChatGui, lowWindMessages, _sounds);
         _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition, _lowWind);
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
-        _relay = new RelayClient(Configuration, ClientState, ObjectTable, Log, _consent, _timer, _notifier);
+        _relay = new RelayClient(Configuration, ClientState, ObjectTable, Log, ChatGui, _consent, _timer, _notifier, _sounds);
 
         _configWindow = new ConfigWindow(Configuration, _relay, _timer, TargetManager, lowWindMessages.FilePath);
         _windowSystem.AddWindow(_configWindow);
@@ -72,7 +80,7 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
             HelpMessage =
-                "Open Wind-Up Key config. /windup safeword <word> uses your safeword. /windup unlock clears Hardcore. /windup check and /windup debug (debug mode) show low-wind status.",
+                "Open Wind-Up Key config.\n/windup safeword <word> uses your safeword.\n/windup unlock clears Hardcore (confirmation required).",
         });
 
         PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
@@ -114,6 +122,7 @@ public sealed class Plugin : IDalamudPlugin
         _sources.Clear();
 
         _relay.Dispose();
+        _sounds.Dispose();
         _lockController.Dispose();
         _windowSystem.RemoveAllWindows();
         _configWindow.Dispose();
@@ -155,21 +164,42 @@ public sealed class Plugin : IDalamudPlugin
         {
             if (!Configuration.HardcoreMode)
             {
-                ChatGui.Print("[Wind-Up Key] Hardcore is already off.");
+                PluginChat.Print(ChatGui, "Hardcore is already off.", PluginChat.Grey);
+                return;
+            }
+
+            if (!string.Equals(rest, HardcoreUnlockConfirmation, StringComparison.Ordinal))
+            {
+                PluginChat.Print(
+                    ChatGui,
+                    "To clear Hardcore, use: /windup unlock I am a very dumb doll who got stuck in hardcore",
+                    PluginChat.White);
+                return;
+            }
+
+            // Confirmed clear attempt — 72h lockout blocks without the success echo.
+            if (Configuration.HardcoreLastClearedUtc is { } lastCleared
+                && DateTimeOffset.UtcNow - lastCleared < HardcoreReUnlockCooldown)
+            {
+                PluginChat.Print(
+                    ChatGui,
+                    "You are a very, very dumb doll who got stuck in hardcore... multiple times! Hardcore is locked for 3 days.",
+                    PluginChat.Purple);
                 return;
             }
 
             Configuration.HardcoreMode = false;
+            Configuration.HardcoreLastClearedUtc = DateTimeOffset.UtcNow;
             Configuration.Save();
-            ChatGui.Print("[Wind-Up Key] Hardcore cleared. You can change role again.");
+            PluginChat.Print(ChatGui, "Hardcore cleared. You can change role again.", PluginChat.Green);
             return;
         }
 
         if (string.Equals(verb, "check", StringComparison.OrdinalIgnoreCase))
         {
-            if (!Configuration.DebugMode)
+            if (!Configuration.IsDebugEnabled)
             {
-                ChatGui.PrintError("[Wind-Up Key] Enable debug mode in config to use /windup check.");
+                PluginChat.PrintError(ChatGui, "Enable debug mode in config to use /windup check.");
                 return;
             }
 
@@ -179,9 +209,9 @@ public sealed class Plugin : IDalamudPlugin
 
         if (string.Equals(verb, "debug", StringComparison.OrdinalIgnoreCase))
         {
-            if (!Configuration.DebugMode)
+            if (!Configuration.IsDebugEnabled)
             {
-                ChatGui.PrintError("[Wind-Up Key] Enable debug mode in config to use /windup debug.");
+                PluginChat.PrintError(ChatGui, "Enable debug mode in config to use /windup debug.");
                 return;
             }
 
@@ -193,34 +223,40 @@ public sealed class Plugin : IDalamudPlugin
         {
             if (string.IsNullOrEmpty(rest))
             {
-                ChatGui.PrintError("[Wind-Up Key] Usage: /windup safeword <word>");
+                PluginChat.PrintError(ChatGui, "Usage: /windup safeword <word>");
                 return;
             }
 
             if (!Configuration.IsDoll)
             {
-                ChatGui.PrintError("[Wind-Up Key] Safeword is only available in Doll mode.");
+                PluginChat.PrintError(ChatGui, "Safeword is only available in Doll mode.");
                 return;
             }
 
             if (!Configuration.SafewordEnabled)
             {
-                ChatGui.PrintError("[Wind-Up Key] Safeword is disabled in config.");
+                PluginChat.PrintError(ChatGui, "Safeword is disabled in config.");
+                return;
+            }
+
+            if (Configuration.HardcoreMode)
+            {
+                PluginChat.PrintError(ChatGui, "Safeword is disabled while Hardcore is on.");
                 return;
             }
 
             if (!string.Equals(rest, Configuration.Safeword, StringComparison.Ordinal))
             {
-                ChatGui.PrintError("[Wind-Up Key] Incorrect safeword.");
+                PluginChat.PrintError(ChatGui, "Incorrect safeword.");
                 return;
             }
 
             _timer.AddHours(Configuration.SafewordHours);
             // Confirmation only — never print remaining time to the doll.
-            ChatGui.Print("[Wind-Up Key] Safeword used.");
+            PluginChat.Print(ChatGui, "Safeword used.", PluginChat.Green);
             return;
         }
 
-        ChatGui.PrintError("[Wind-Up Key] Unknown command. Try /windup, /windup safeword <word>, or /windup unlock.");
+        PluginChat.PrintError(ChatGui, "Unknown command. Try /windup, /windup safeword <word>, or /windup unlock.");
     }
 }

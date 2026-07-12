@@ -7,8 +7,9 @@ using Dalamud.Plugin.Services;
 namespace WindUpKey.Services;
 
 /// <summary>
-/// User-editable low-wind RP chat lines. Stored as JSON in the plugin config folder
-/// (<c>LowWindMessages.config</c>). Missing/blank fields fall back to built-in defaults.
+/// User-editable doll RP chat lines (low-wind warnings and wind-received echoes).
+/// Stored as JSON in the plugin config folder (<c>LowWindMessages.config</c>).
+/// Missing/blank fields fall back to built-in defaults.
 /// Reloads automatically when the file changes on disk.
 /// </summary>
 public sealed class LowWindMessagesConfig
@@ -26,6 +27,36 @@ public sealed class LowWindMessagesConfig
 
     public const string DefaultExpired =
         "Your winding has run out. Your springs seize - you can go no further without being rewound.";
+
+    public const string DefaultWindLight =
+        "Your key is given a light turn. Your springs catch a little more life.";
+
+    public const string DefaultWindMedium =
+        "Your key turns steadily in its lock. Winding works through your gears.";
+
+    public const string DefaultWindDeep =
+        "Your key turns long and deliberate. Springs fill; motion comes easier.";
+
+    public const string DefaultWindFull =
+        "Your key is wound thoroughly. The spring feels tense, and you feel full of energy.";
+
+    public const string DefaultWindLightNamed =
+        "{name} gives your key a light turn. Your springs catch a little more life.";
+
+    public const string DefaultWindMediumNamed =
+        "{name} turns your key steadily in its lock. Winding works through your gears.";
+
+    public const string DefaultWindDeepNamed =
+        "{name} gives your key several turns. Springs fill; motion comes easier.";
+
+    public const string DefaultWindFullNamed =
+        "{name} winds your key thoroughly. The spring feels tense, and you feel full of energy.";
+
+    public const string DefaultUnwind =
+        "Your key is pulled out. Your springs go slack before the key is reinserted - you can go no further without being rewound.";
+
+    public const string DefaultUnwindNamed =
+        "{name} pulls your key out. Your springs go slack before the key is reinserted - you can go no further without being rewound.";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -55,6 +86,16 @@ public sealed class LowWindMessagesConfig
     public string Mid => Resolve(EnsureLoaded().Mid, DefaultMid);
     public string Low => Resolve(EnsureLoaded().Low, DefaultLow);
     public string Expired => Resolve(EnsureLoaded().Expired, DefaultExpired);
+    public string WindLight => Resolve(EnsureLoaded().WindLight, DefaultWindLight);
+    public string WindMedium => Resolve(EnsureLoaded().WindMedium, DefaultWindMedium);
+    public string WindDeep => Resolve(EnsureLoaded().WindDeep, DefaultWindDeep);
+    public string WindFull => Resolve(EnsureLoaded().WindFull, DefaultWindFull);
+    public string WindLightNamed => Resolve(EnsureLoaded().WindLightNamed, DefaultWindLightNamed);
+    public string WindMediumNamed => Resolve(EnsureLoaded().WindMediumNamed, DefaultWindMediumNamed);
+    public string WindDeepNamed => Resolve(EnsureLoaded().WindDeepNamed, DefaultWindDeepNamed);
+    public string WindFullNamed => Resolve(EnsureLoaded().WindFullNamed, DefaultWindFullNamed);
+    public string Unwind => Resolve(EnsureLoaded().Unwind, DefaultUnwind);
+    public string UnwindNamed => Resolve(EnsureLoaded().UnwindNamed, DefaultUnwindNamed);
 
     private MessagesFile EnsureLoaded()
     {
@@ -122,16 +163,39 @@ public sealed class LowWindMessagesConfig
         public string? Mid { get; set; }
         public string? Low { get; set; }
         public string? Expired { get; set; }
+        public string? WindLight { get; set; }
+        public string? WindMedium { get; set; }
+        public string? WindDeep { get; set; }
+        public string? WindFull { get; set; }
+        public string? WindLightNamed { get; set; }
+        public string? WindMediumNamed { get; set; }
+        public string? WindDeepNamed { get; set; }
+        public string? WindFullNamed { get; set; }
+        public string? Unwind { get; set; }
+        public string? UnwindNamed { get; set; }
 
         public static MessagesFile CreateDefaults() => new()
         {
             Comment =
-                "Low-wind RP chat lines for dolls. Edit and save; changes apply on the next warning. " +
-                "Blank fields use the built-in default.",
+                "Doll RP chat lines. Color tags: <c:pink>text</c> (also red, orange, yellow, green, blue, purple, grey, white). " +
+                "Untagged text uses the default chat color; only [Wind-Up Key] is pink by default. " +
+                "low-wind: high/mid/low/expired. " +
+                "wind-received: windLight/Medium/Deep/Full (+ *Named with {name}). " +
+                "unwind / unwindNamed: partner removed your key. Blank = built-in default.",
             High = DefaultHigh,
             Mid = DefaultMid,
             Low = DefaultLow,
             Expired = DefaultExpired,
+            WindLight = DefaultWindLight,
+            WindMedium = DefaultWindMedium,
+            WindDeep = DefaultWindDeep,
+            WindFull = DefaultWindFull,
+            WindLightNamed = DefaultWindLightNamed,
+            WindMediumNamed = DefaultWindMediumNamed,
+            WindDeepNamed = DefaultWindDeepNamed,
+            WindFullNamed = DefaultWindFullNamed,
+            Unwind = DefaultUnwind,
+            UnwindNamed = DefaultUnwindNamed,
         };
     }
 }

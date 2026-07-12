@@ -14,11 +14,11 @@ public sealed class ChatWindNotifier(Dalamud.Plugin.Services.IChatGui chat) : IW
     public void NotifyWinderRemaining(string targetIdentity, TimeSpan remaining)
     {
         var display = WindTimerService.FormatRemaining(remaining);
-        chat.Print($"[Wind-Up Key] {targetIdentity} now has {display} remaining.");
+        PluginChat.Print(chat, $"{targetIdentity} now has {display} remaining.", PluginChat.Blue);
     }
 
     public void NotifyWinderError(string message)
     {
-        chat.PrintError($"[Wind-Up Key] {message}");
+        PluginChat.PrintError(chat, message);
     }
 }

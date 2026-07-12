@@ -5,7 +5,7 @@
 
 param(
     [ValidateSet('Release', 'Testing', 'Both')]
-    [string]$Channel = 'Both'
+    [string]$Channel = 'Release'
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,12 +51,21 @@ function Pack-Channel {
         }
     }
 
+    $iconPath = Join-Path $outDir "images\icon.png"
+    if (-not (Test-Path $iconPath)) {
+        throw "Missing build output: $iconPath"
+    }
+
     if (Test-Path $stageDir) { Remove-Item $stageDir -Recurse -Force }
     New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
     foreach ($name in $required) {
         Copy-Item (Join-Path $outDir $name) (Join-Path $stageDir $name) -Force
     }
+
+    $stageImages = Join-Path $stageDir "images"
+    New-Item -ItemType Directory -Path $stageImages -Force | Out-Null
+    Copy-Item $iconPath (Join-Path $stageImages "icon.png") -Force
 
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
     Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $zipPath -Force

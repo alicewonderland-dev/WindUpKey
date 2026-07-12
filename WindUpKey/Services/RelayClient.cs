@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Plugin.Services;
+using FFXIVClientStructs.FFXIV.Client.UI.Info;
 using WindUpKey.Protocol;
 
 namespace WindUpKey.Services;
@@ -32,9 +33,11 @@ public sealed class RelayClient : IDisposable
     private readonly IClientState _clientState;
     private readonly IObjectTable _objectTable;
     private readonly IPluginLog _log;
+    private readonly IChatGui _chat;
     private readonly ConsentService _consent;
     private readonly WindTimerService _timer;
     private readonly IWindNotifier _notifier;
+    private readonly SoundEffectService _sounds;
 
     private ClientWebSocket? _socket;
     private CancellationTokenSource? _loopCts;
@@ -48,6 +51,10 @@ public sealed class RelayClient : IDisposable
     private readonly Dictionary<string, PartnerPresence> _presenceByKey = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> _presenceLastQueryUtc = new(StringComparer.Ordinal);
 
+    /// <summary>Pending wind requestId → hours sent (winder SFX on windResult).</summary>
+    private readonly object _pendingWindLock = new();
+    private readonly Dictionary<string, double> _pendingWindHoursByRequestId = new(StringComparer.Ordinal);
+
     // Written on framework thread, read by background loop — never touch Dalamud APIs off-thread.
     private volatile bool _loggedIn;
     private volatile string? _cachedIdentity;
@@ -58,17 +65,21 @@ public sealed class RelayClient : IDisposable
         IClientState clientState,
         IObjectTable objectTable,
         IPluginLog log,
+        IChatGui chat,
         ConsentService consent,
         WindTimerService timer,
-        IWindNotifier notifier)
+        IWindNotifier notifier,
+        SoundEffectService sounds)
     {
         _config = config;
         _clientState = clientState;
         _objectTable = objectTable;
         _log = log;
+        _chat = chat;
         _consent = consent;
         _timer = timer;
         _notifier = notifier;
+        _sounds = sounds;
     }
 
     public bool IsConnected => _socket?.State == WebSocketState.Open;
@@ -86,7 +97,7 @@ public sealed class RelayClient : IDisposable
         if (!PairingKeyUtil.IsValid(key))
             return PartnerPresence.Unknown;
 
-        if (_config.DebugMode
+        if (_config.IsDebugEnabled
             && string.Equals(key, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
             return IsConnected ? PartnerPresence.Online : PartnerPresence.Offline;
 
@@ -101,7 +112,7 @@ public sealed class RelayClient : IDisposable
         if (!PairingKeyUtil.IsValid(key))
             return;
 
-        if (_config.DebugMode
+        if (_config.IsDebugEnabled
             && string.Equals(key, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
             return;
 
@@ -125,7 +136,7 @@ public sealed class RelayClient : IDisposable
         if (!PairingKeyUtil.IsValid(toKey) || !IsConnected || !PairingKeyUtil.IsValid(_config.PairingKey))
             return;
 
-        if (_config.DebugMode
+        if (_config.IsDebugEnabled
             && string.Equals(toKey, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
             return;
 
@@ -156,6 +167,28 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
+        if (_loggedIn)
+        {
+            try
+            {
+                var contentId = TryReadLocalContentId();
+                if (contentId != 0 && _config.ActivateCharacter(contentId))
+                {
+                    ClearAllPresence();
+                    _config.Save();
+                    _log.Information("WindUpKey active character profile={ContentId}", _config.ActiveContentId);
+                    if (IsConnected)
+                        CloseSocket();
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Warning(ex, "WindUpKey Tick: ActivateCharacter failed");
+            }
+        }
+
+        SyncPairingKeyFromIdentity();
+
         if (Interlocked.Increment(ref _tickLogCounter) % 300 == 1)
         {
             _log.Debug(
@@ -165,6 +198,73 @@ public sealed class RelayClient : IDisposable
                 _cachedIdentity ?? "(none)",
                 IsConnected,
                 _lastStatus ?? "(null)");
+        }
+    }
+
+    /// <summary>
+    /// Keeps <see cref="Configuration.PairingKey"/> equal to the identity-derived code.
+    /// Safe to call on the framework thread (may Save).
+    /// </summary>
+    private void SyncPairingKeyFromIdentity()
+    {
+        if (_cachedIdentity is null)
+            return;
+
+        var derived = PairingKeyUtil.FromIdentity(_cachedIdentity);
+        if (!PairingKeyUtil.IsValid(derived))
+            return;
+
+        _config.LastKnownIdentity = _cachedIdentity;
+
+        if (string.Equals(_config.PairingKey, derived, StringComparison.Ordinal))
+            return;
+
+        var previous = _config.PairingKey;
+        _config.PairingKey = derived;
+
+        if (PairingKeyUtil.IsValid(previous))
+        {
+            MigrateSelfPairKey(previous, derived);
+            EnqueueRotationsForPartners(previous, derived, _cachedIdentity);
+            PluginChat.Print(
+                _chat,
+                $"Pairing key changed to {derived} (was {previous}). " +
+                "Paired partners will be notified when online; they can also update your key manually.",
+                PluginChat.Yellow);
+        }
+
+        _config.Save();
+        _log.Information(
+            "WindUpKey pairing key synced from identity (was {Previous})",
+            PairingKeyUtil.IsValid(previous) ? previous : "(none)");
+
+        // Re-register if we were already online under a different key.
+        if (IsConnected)
+            CloseSocket();
+    }
+
+    private void MigrateSelfPairKey(string oldKey, string newKey)
+    {
+        var selfPair = _config.FindPairByKey(oldKey);
+        if (selfPair is null)
+            return;
+        if (string.Equals(PairingKeyUtil.Normalize(selfPair.PartnerKey), newKey, StringComparison.Ordinal))
+            return;
+        selfPair.PartnerKey = newKey;
+    }
+
+    private void EnqueueRotationsForPartners(string oldKey, string newKey, string identity)
+    {
+        foreach (var partner in _config.PairedPartners.ToArray())
+        {
+            var peer = PairingKeyUtil.Normalize(partner.PartnerKey);
+            if (!PairingKeyUtil.IsValid(peer))
+                continue;
+            if (string.Equals(peer, newKey, StringComparison.Ordinal)
+                || string.Equals(peer, oldKey, StringComparison.Ordinal))
+                continue;
+
+            _config.EnqueueKeyRotation(peer, oldKey, newKey, identity);
         }
     }
 
@@ -226,7 +326,7 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
-        if (_config.DebugMode)
+        if (_config.IsDebugEnabled)
         {
             var self = string.Equals(
                 PlayerIdentity.Normalize(targetIdentity),
@@ -284,6 +384,7 @@ public sealed class RelayClient : IDisposable
             Hours = hours,
         };
 
+        RememberPendingWind(payload.RequestId, hours);
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.Wind, payload), CancellationToken.None);
     }
 
@@ -295,7 +396,7 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
-        if (_config.DebugMode)
+        if (_config.IsDebugEnabled)
         {
             var self = string.Equals(
                 PlayerIdentity.Normalize(targetIdentity),
@@ -366,7 +467,7 @@ public sealed class RelayClient : IDisposable
 
         if (string.Equals(theirKey, _config.PairingKey, StringComparison.Ordinal))
         {
-            if (_config.DebugMode)
+            if (_config.IsDebugEnabled)
             {
                 // Local self-pair for debug — no relay handshake (relay rejects MyKey == TheirKey).
                 if (_config.FindPairByKey(theirKey) is null)
@@ -456,6 +557,12 @@ public sealed class RelayClient : IDisposable
         return PlayerIdentity.Format(name, world);
     }
 
+    private static unsafe ulong TryReadLocalContentId()
+    {
+        var info = InfoModule.Instance();
+        return info is null ? 0UL : info->GetLocalContentId();
+    }
+
     private async Task RunLoopAsync(CancellationToken ct)
     {
         _log.Debug("WindUpKey RunLoopAsync begin");
@@ -516,11 +623,18 @@ public sealed class RelayClient : IDisposable
     {
         CloseSocket();
         _config.ApplyRelayDefaults();
-        if (!PairingKeyUtil.IsValid(_config.PairingKey))
+
+        // Identity is required by RunLoopAsync before connect; derive without Save (off framework thread).
+        var identity = _cachedIdentity;
+        if (identity is not null)
         {
-            // Do not Save() here — this runs off the framework thread.
-            _config.PairingKey = PairingKeyUtil.Generate();
+            var derived = PairingKeyUtil.FromIdentity(identity);
+            if (PairingKeyUtil.IsValid(derived))
+                _config.PairingKey = derived;
         }
+
+        if (!PairingKeyUtil.IsValid(_config.PairingKey))
+            throw new InvalidOperationException("Pairing key unavailable before register.");
 
         var baseUrl = _config.RelayUrl;
         var safeHost = SafeHost(baseUrl);
@@ -552,6 +666,10 @@ public sealed class RelayClient : IDisposable
                 TheirKey = key,
             }), ct).ConfigureAwait(false);
         }
+
+        // Presence-driven keyRotated flush (send when peer answers online).
+        foreach (var pending in _config.PendingKeyRotations.ToArray())
+            await RequestPresenceAsync(pending.PartnerKey).ConfigureAwait(false);
     }
 
     private static string SafeHost(string baseUrl)
@@ -634,6 +752,9 @@ public sealed class RelayClient : IDisposable
             case MessageTypes.PresenceResult:
                 HandlePresenceResult(envelope);
                 break;
+            case MessageTypes.KeyRotated:
+                HandleKeyRotated(envelope);
+                break;
             case MessageTypes.Ping:
                 await SendEnvelopeAsync(Envelope.Create(MessageTypes.Pong, new { }), ct).ConfigureAwait(false);
                 break;
@@ -654,11 +775,11 @@ public sealed class RelayClient : IDisposable
         var fromSelf = string.Equals(fromKey, _config.PairingKey, StringComparison.Ordinal);
 
         // Stealth: unpaired senders get no reply (do not prove we are online).
-        if (!(_config.DebugMode && fromSelf) && !_consent.IsPairedByKey(fromKey))
+        if (!(_config.IsDebugEnabled && fromSelf) && !_consent.IsPairedByKey(fromKey))
             return;
 
         // Self-wind (debug) still requires Can wind me on the self-key pair.
-        var allowed = ((_config.DebugMode && fromSelf) || _config.IsDoll)
+        var allowed = ((_config.IsDebugEnabled && fromSelf) || _config.IsDoll)
                       && _consent.CanReceiveWindFromKey(fromKey);
 
         if (!allowed)
@@ -673,7 +794,14 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
-        var remaining = _timer.AddHours(payload.Hours);
+        var pair = _config.FindPairByKey(fromKey);
+        var winderIdentity = pair is { Identity: { Length: > 0 } }
+            ? pair.Identity
+            : fromSelf
+                ? _cachedIdentity
+                : null;
+
+        var remaining = _timer.AddHours(payload.Hours, winderIdentity);
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.WindResult, new WindResultPayload
         {
             RequestId = payload.RequestId,
@@ -693,10 +821,10 @@ public sealed class RelayClient : IDisposable
         var fromKey = PairingKeyUtil.Normalize(payload.From);
         var fromSelf = string.Equals(fromKey, _config.PairingKey, StringComparison.Ordinal);
 
-        if (!(_config.DebugMode && fromSelf) && !_consent.IsPairedByKey(fromKey))
+        if (!(_config.IsDebugEnabled && fromSelf) && !_consent.IsPairedByKey(fromKey))
             return;
 
-        var allowed = ((_config.DebugMode && fromSelf) || _config.IsDoll)
+        var allowed = ((_config.IsDebugEnabled && fromSelf) || _config.IsDoll)
                       && _consent.CanReceiveUnwindFromKey(fromKey);
 
         if (!allowed)
@@ -711,7 +839,14 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
-        _timer.ClearWind();
+        var pair = _config.FindPairByKey(fromKey);
+        var winderIdentity = pair is { Identity: { Length: > 0 } }
+            ? pair.Identity
+            : fromSelf
+                ? _cachedIdentity
+                : null;
+
+        _timer.ClearWind(winderIdentity);
         var remaining = _timer.RemainingForWinder();
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.WindResult, new WindResultPayload
         {
@@ -729,12 +864,20 @@ public sealed class RelayClient : IDisposable
         if (payload is null)
             return;
 
-        // Remaining readout is winder-only — never surface it on a doll (incl. self-unwind testing).
-        if (_config.IsDoll)
+        var fromKey = PairingKeyUtil.Normalize(payload.From);
+        var aboutSelf = string.Equals(fromKey, _config.PairingKey, StringComparison.Ordinal);
+        var hadPendingWind = TryTakePendingWind(payload.RequestId, out var windHours);
+
+        // Dolls must not learn their own remaining time. Debug self-wind is the exception so
+        // the UI/testing path can still show winder-style feedback.
+        if (_config.IsDoll && aboutSelf && !_config.IsDebugEnabled)
             return;
 
+        // Winder hears wind-up; doll about-self already played via OnWoundReceived.
+        if (hadPendingWind && !(_config.IsDoll && aboutSelf))
+            _sounds.PlayWind(TimeSpan.FromHours(windHours));
+
         var remaining = TimeSpan.FromSeconds(Math.Max(0, payload.RemainingSeconds));
-        var fromKey = PairingKeyUtil.Normalize(payload.From);
         var pair = _config.FindPairByKey(fromKey);
         var label = pair is { Identity: { Length: > 0 } }
             ? pair.Identity
@@ -748,13 +891,20 @@ public sealed class RelayClient : IDisposable
         if (payload is null)
             return;
 
+        if (!string.IsNullOrEmpty(payload.RequestId))
+            TryTakePendingWind(payload.RequestId, out _);
+
         if (payload.Code == ErrorCodes.PairKeyCollision)
         {
-            _config.PairingKey = PairingKeyUtil.Generate();
-            _log.Warning("WindUpKey pairing key collision — regenerated key, reconnecting");
+            // Key is identity-derived and must stay stable; another session (or stale socket) holds it.
+            _log.Warning("WindUpKey pairing key in use — reconnecting without changing key");
             CloseSocket();
             return;
         }
+
+        // keyRotated offline (no requestId) — keep PendingKeyRotations and retry on presence.
+        if (payload.Code == ErrorCodes.TargetOffline && string.IsNullOrEmpty(payload.RequestId))
+            return;
 
         if (payload.Code is ErrorCodes.PairFailed)
         {
@@ -764,6 +914,26 @@ public sealed class RelayClient : IDisposable
 
         _notifier.NotifyWinderError(GenericWindFailure);
         await Task.CompletedTask.ConfigureAwait(false);
+    }
+
+    private void RememberPendingWind(string requestId, double hours)
+    {
+        lock (_pendingWindLock)
+            _pendingWindHoursByRequestId[requestId] = hours;
+    }
+
+    private bool TryTakePendingWind(string? requestId, out double hours)
+    {
+        hours = 0;
+        if (string.IsNullOrEmpty(requestId))
+            return false;
+
+        lock (_pendingWindLock)
+        {
+            if (!_pendingWindHoursByRequestId.Remove(requestId, out hours))
+                return false;
+            return true;
+        }
     }
 
     private void HandlePairEstablished(Envelope envelope)
@@ -836,6 +1006,100 @@ public sealed class RelayClient : IDisposable
 
         if (payload.StillPaired == false)
             SilentRemovePartner(peerKey);
+        else if (payload.Online)
+            _ = TrySendPendingKeyRotationAsync(peerKey, CancellationToken.None);
+    }
+
+    private void HandleKeyRotated(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<KeyRotatedPayload>();
+        if (payload is null)
+            return;
+
+        var oldKey = PairingKeyUtil.Normalize(payload.OldKey);
+        var newKey = PairingKeyUtil.Normalize(payload.NewKey);
+        if (!PairingKeyUtil.IsValid(oldKey) || !PairingKeyUtil.IsValid(newKey))
+            return;
+
+        // Trust only when OldKey matches an existing pair (blocks forged rotations).
+        var pair = _config.FindPairByKey(oldKey);
+        if (pair is null)
+        {
+            _log.Information("WindUpKey ignored keyRotated: oldKey={Old} not paired", oldKey);
+            return;
+        }
+
+        if (!string.Equals(oldKey, newKey, StringComparison.Ordinal))
+        {
+            if (_config.FindPairByKey(newKey) is not null
+                && !string.Equals(PairingKeyUtil.Normalize(pair.PartnerKey), newKey, StringComparison.Ordinal))
+            {
+                _log.Warning("WindUpKey keyRotated refused: newKey={New} already paired", newKey);
+                return;
+            }
+
+            pair.PartnerKey = newKey;
+            ClearPresence(oldKey);
+        }
+
+        if (!string.IsNullOrWhiteSpace(payload.Identity))
+            pair.Identity = PlayerIdentity.Normalize(payload.Identity);
+
+        _config.Save();
+        _log.Information("WindUpKey partner key rotated {Old} -> {New}", oldKey, newKey);
+
+        var label = string.IsNullOrWhiteSpace(pair.Identity) ? newKey : pair.Identity;
+        PluginChat.Print(_chat, $"Partner key updated for {label}.", PluginChat.Green);
+    }
+
+    /// <summary>Updates a partner's pairing key in place (manual rename/transfer fallback).</summary>
+    public bool ReplacePartnerKey(string oldKeyRaw, string newKeyRaw)
+    {
+        var oldKey = PairingKeyUtil.Normalize(oldKeyRaw);
+        if (!_config.TryReplacePartnerKey(oldKeyRaw, newKeyRaw))
+            return false;
+
+        var newKey = PairingKeyUtil.Normalize(newKeyRaw);
+        if (!string.Equals(oldKey, newKey, StringComparison.Ordinal))
+            ClearPresence(oldKey);
+
+        _config.Save();
+        return true;
+    }
+
+    private async Task TrySendPendingKeyRotationAsync(string partnerKey, CancellationToken ct)
+    {
+        var peer = PairingKeyUtil.Normalize(partnerKey);
+        if (!PairingKeyUtil.IsValid(peer) || !IsConnected || !PairingKeyUtil.IsValid(_config.PairingKey))
+            return;
+
+        var pending = _config.PendingKeyRotations.FirstOrDefault(r =>
+            string.Equals(r.PartnerKey, peer, StringComparison.Ordinal));
+        if (pending is null)
+            return;
+
+        // Only announce under the new key we registered with.
+        if (!string.Equals(pending.NewKey, _config.PairingKey, StringComparison.Ordinal))
+            return;
+
+        if (GetPartnerPresence(peer) != PartnerPresence.Online)
+            return;
+
+        var payload = new KeyRotatedPayload
+        {
+            From = _config.PairingKey,
+            To = peer,
+            OldKey = pending.OldKey,
+            NewKey = pending.NewKey,
+            Identity = string.IsNullOrWhiteSpace(pending.Identity) ? null : pending.Identity,
+        };
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.KeyRotated, payload), ct).ConfigureAwait(false);
+
+        _config.PendingKeyRotations.RemoveAll(r =>
+            string.Equals(r.PartnerKey, peer, StringComparison.Ordinal));
+        _config.Save();
+        _log.Information("WindUpKey sent keyRotated to {Peer} ({Old} -> {New})", peer, pending.OldKey, pending.NewKey);
     }
 
     private void SilentRemovePartner(string peerKey)
@@ -860,6 +1124,15 @@ public sealed class RelayClient : IDisposable
         {
             _presenceByKey.Remove(peerKey);
             _presenceLastQueryUtc.Remove(peerKey);
+        }
+    }
+
+    private void ClearAllPresence()
+    {
+        lock (_presenceLock)
+        {
+            _presenceByKey.Clear();
+            _presenceLastQueryUtc.Clear();
         }
     }
 

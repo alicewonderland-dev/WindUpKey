@@ -1,6 +1,6 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.1.3.2</Version>
+    <Version>0.1.4.0</Version>
     <Description></Description>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -9,11 +9,17 @@
 
   <!-- Testing channel must be a higher version than Release for Dalamud to serve it. -->
   <PropertyGroup Condition="'$(Configuration)' == 'Testing'">
-    <Version>0.1.4.0</Version>
+    <Version>0.1.4.1</Version>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\WindUpKey.Protocol\WindUpKey.Protocol.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Sounds\**\*.wav" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Dalamud loads local/DevPlugin icons from images/icon.png next to the DLL. -->
+    <Content Include="..\key.png" Link="images\icon.png" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- Swap in the testing-branded manifest for Testing packs (same InternalName). -->

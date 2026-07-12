@@ -123,6 +123,31 @@ public sealed class PresenceResultPayload
     public bool? StillPaired { get; set; }
 }
 
+/// <summary>
+/// Announces that the sender's pairing key changed after a Name@World change.
+/// Recipients trust only when <see cref="OldKey"/> matches an existing pair.
+/// </summary>
+public sealed class KeyRotatedPayload
+{
+    /// <summary>Sender's new pairing key (set/overwritten by relay).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Partner pairing key to notify.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    [JsonPropertyName("oldKey")]
+    public string OldKey { get; set; } = string.Empty;
+
+    [JsonPropertyName("newKey")]
+    public string NewKey { get; set; } = string.Empty;
+
+    /// <summary>Optional new Name@World for the partner's local label only.</summary>
+    [JsonPropertyName("identity")]
+    public string? Identity { get; set; }
+}
+
 public sealed class ErrorPayload
 {
     [JsonPropertyName("requestId")]
