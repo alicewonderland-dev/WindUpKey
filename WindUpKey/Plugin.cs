@@ -72,7 +72,7 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
             HelpMessage =
-                "Open Wind-Up Key config. /windup <safeword> uses your safeword. /windup unlock clears Hardcore. /windup check (debug mode) shows low-wind alert status.",
+                "Open Wind-Up Key config. /windup safeword <word> uses your safeword. /windup unlock clears Hardcore. /windup check and /windup debug (debug mode) show low-wind status.",
         });
 
         PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
@@ -147,7 +147,11 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (string.Equals(trimmed, "unlock", StringComparison.OrdinalIgnoreCase))
+        var space = trimmed.IndexOf(' ');
+        var verb = space < 0 ? trimmed : trimmed[..space];
+        var rest = space < 0 ? string.Empty : trimmed[(space + 1)..].Trim();
+
+        if (string.Equals(verb, "unlock", StringComparison.OrdinalIgnoreCase))
         {
             if (!Configuration.HardcoreMode)
             {
@@ -161,7 +165,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (string.Equals(trimmed, "check", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(verb, "check", StringComparison.OrdinalIgnoreCase))
         {
             if (!Configuration.DebugMode)
             {
@@ -173,26 +177,50 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (!Configuration.IsDoll)
+        if (string.Equals(verb, "debug", StringComparison.OrdinalIgnoreCase))
         {
-            ChatGui.PrintError("[Wind-Up Key] Safeword is only available in Doll mode.");
+            if (!Configuration.DebugMode)
+            {
+                ChatGui.PrintError("[Wind-Up Key] Enable debug mode in config to use /windup debug.");
+                return;
+            }
+
+            _lowWind.PrintDebugStatus();
             return;
         }
 
-        if (!Configuration.SafewordEnabled)
+        if (string.Equals(verb, "safeword", StringComparison.OrdinalIgnoreCase))
         {
-            ChatGui.PrintError("[Wind-Up Key] Safeword is disabled in config.");
+            if (string.IsNullOrEmpty(rest))
+            {
+                ChatGui.PrintError("[Wind-Up Key] Usage: /windup safeword <word>");
+                return;
+            }
+
+            if (!Configuration.IsDoll)
+            {
+                ChatGui.PrintError("[Wind-Up Key] Safeword is only available in Doll mode.");
+                return;
+            }
+
+            if (!Configuration.SafewordEnabled)
+            {
+                ChatGui.PrintError("[Wind-Up Key] Safeword is disabled in config.");
+                return;
+            }
+
+            if (!string.Equals(rest, Configuration.Safeword, StringComparison.Ordinal))
+            {
+                ChatGui.PrintError("[Wind-Up Key] Incorrect safeword.");
+                return;
+            }
+
+            _timer.AddHours(Configuration.SafewordHours);
+            // Confirmation only — never print remaining time to the doll.
+            ChatGui.Print("[Wind-Up Key] Safeword used.");
             return;
         }
 
-        if (!string.Equals(trimmed, Configuration.Safeword, StringComparison.Ordinal))
-        {
-            ChatGui.PrintError("[Wind-Up Key] Incorrect safeword.");
-            return;
-        }
-
-        _timer.AddHours(Configuration.SafewordHours);
-        // Confirmation only — never print remaining time to the doll.
-        ChatGui.Print("[Wind-Up Key] Safeword used.");
+        ChatGui.PrintError("[Wind-Up Key] Unknown command. Try /windup, /windup safeword <word>, or /windup unlock.");
     }
 }

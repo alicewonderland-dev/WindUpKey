@@ -165,7 +165,7 @@ public sealed class LowWindWarningService
             PrintMessage(_messages.Expired);
     }
 
-    /// <summary>Debug: print the alert that would apply now (by band), plus trigger/fired debug.</summary>
+    /// <summary>Debug: print the alert message that would apply now, plus remaining time.</summary>
     public void PrintCheckStatus()
     {
         if (!_config.IsDoll)
@@ -180,44 +180,41 @@ public sealed class LowWindWarningService
             return;
         }
 
-        EnsureAllTriggers();
-
         var remainingDisplay = WindTimerService.FormatRemaining(remaining);
+        string message;
         if (remaining > HighMax)
+            message = "(none yet)";
+        else if (remaining <= LowMax)
+            message = _messages.Low;
+        else if (remaining <= MidMax)
+            message = _messages.Mid;
+        else
+            message = _messages.High;
+
+        _chat.Print($"[Wind-Up Key] Check: {message}");
+        _chat.Print($"[Wind-Up Key] Check: remaining {remainingDisplay}.");
+    }
+
+    /// <summary>Debug: print trigger/fired/crossed state for each low-wind band.</summary>
+    public void PrintDebugStatus()
+    {
+        if (!_config.IsDoll)
         {
-            _chat.Print($"[Wind-Up Key] Check: no alert applicable yet (remaining {remainingDisplay}).");
-            PrintTriggerDebug(remaining);
+            _chat.Print("[Wind-Up Key] Debug: not a doll — no low-wind triggers.");
             return;
         }
 
-        string tier;
-        string message;
-        if (remaining <= LowMax)
+        if (!TryGetRemaining(out var remaining))
         {
-            tier = "low (45m–2h)";
-            message = _messages.Low;
-        }
-        else if (remaining <= MidMax)
-        {
-            tier = "mid (6–12h)";
-            message = _messages.Mid;
-        }
-        else
-        {
-            tier = "high (20–28h)";
-            message = _messages.High;
+            _chat.Print("[Wind-Up Key] Debug: timer empty — no low-wind triggers.");
+            return;
         }
 
-        _chat.Print($"[Wind-Up Key] Check: {tier} alert would be — {message}");
-        _chat.Print($"[Wind-Up Key] Check: remaining {remainingDisplay}.");
-        PrintTriggerDebug(remaining);
-    }
+        EnsureAllTriggers();
 
-    private void PrintTriggerDebug(TimeSpan remaining)
-    {
         var fired = _config.LowWindWarningsFired;
         _chat.Print(
-            $"[Wind-Up Key] Check: triggers high={FormatTrigger(GetHighTrigger())} " +
+            $"[Wind-Up Key] Debug: triggers high={FormatTrigger(GetHighTrigger())} " +
             $"(fired={(fired & FlagHigh) != 0}, crossed={remaining <= GetHighTrigger()}), " +
             $"mid={FormatTrigger(GetMidTrigger())} " +
             $"(fired={(fired & FlagMid) != 0}, crossed={remaining <= GetMidTrigger()}), " +

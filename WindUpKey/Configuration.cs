@@ -27,7 +27,7 @@ public class Configuration : IPluginConfiguration
     /// <summary>When true, role is locked to Doll and cannot switch to Winder.</summary>
     public bool HardcoreMode { get; set; }
 
-    /// <summary>When true, unlocks debug/testing features (self-wind, unwind UI, /windup check).</summary>
+    /// <summary>When true, unlocks debug/testing features (self-wind, unwind UI, /windup check, /windup debug).</summary>
     public bool DebugMode { get; set; }
 
     public double MaxWindHours { get; set; } = 72;

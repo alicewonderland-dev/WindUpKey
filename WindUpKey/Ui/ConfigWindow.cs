@@ -83,9 +83,14 @@ public sealed class ConfigWindow : Window, IDisposable
     {
         if (_config.HardcoreMode)
         {
+            var grantStarterWind = !_config.HasCompletedInitialSetup;
             _config.Role = PlayerRole.Doll;
+            _config.HasCompletedInitialSetup = true;
             _config.Save();
-            _timer.Tick();
+            if (grantStarterWind)
+                _timer.AddHours(24);
+            else
+                _timer.Tick();
             return;
         }
 
@@ -99,9 +104,11 @@ public sealed class ConfigWindow : Window, IDisposable
             _config.Role = PlayerRole.Doll;
             _config.HasCompletedInitialSetup = true;
             _config.Save();
-            _timer.Tick();
+            // Grant wind before syncing lock — Tick() first would lock+sit, then unlock.
             if (grantStarterWind)
                 _timer.AddHours(24);
+            else
+                _timer.Tick();
         }
 
         ImGui.Spacing();
@@ -170,13 +177,6 @@ public sealed class ConfigWindow : Window, IDisposable
         if (ImGui.Button("Save"))
             _config.Save();
 
-        ImGui.SameLine();
-        if (ImGui.Button(_config.DebugMode ? "Disable debug mode" : "Enable debug mode"))
-        {
-            _config.DebugMode = !_config.DebugMode;
-            _config.Save();
-        }
-
         if (!_config.HardcoreMode)
         {
             ImGui.SameLine();
@@ -191,6 +191,15 @@ public sealed class ConfigWindow : Window, IDisposable
         else
         {
             ImGui.TextWrapped("Hardcore is on. You are locked as a Doll and cannot switch to Winder.");
+        }
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Debug");
+        ImGui.Separator();
+        if (ImGui.Button(_config.DebugMode ? "Disable debug mode" : "Enable debug mode"))
+        {
+            _config.DebugMode = !_config.DebugMode;
+            _config.Save();
         }
     }
 
@@ -407,7 +416,7 @@ public sealed class ConfigWindow : Window, IDisposable
             _config.SafewordEnabled = safewordOn;
 
         var safeword = _config.Safeword;
-        if (ImGui.InputText("Safeword command arg", ref safeword, 64))
+        if (ImGui.InputText("Safeword (/windup safeword …)", ref safeword, 64))
             _config.Safeword = safeword;
 
         var safewordHours = (int)Math.Round(_config.SafewordHours);
@@ -454,7 +463,7 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.Spacing();
         ImGui.TextUnformatted("Debug tools");
         ImGui.Separator();
-        ImGui.TextWrapped("Self-wind from your context menu works when paired with your own key. /windup check prints low-wind alert status.");
+        ImGui.TextWrapped("Self-wind from your context menu works when paired with your own key. /windup check prints the current low-wind message and remaining time. /windup debug prints trigger and fired state.");
 
         if (!_config.IsDoll)
             return;

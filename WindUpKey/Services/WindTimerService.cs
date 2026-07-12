@@ -164,6 +164,9 @@ public sealed class WindTimerService
     private void SyncLockState()
     {
         var locked = IsLocked;
+        if (!locked)
+            _pendingLoginSit = false;
+
         if (locked == _wasLocked)
             return;
 
