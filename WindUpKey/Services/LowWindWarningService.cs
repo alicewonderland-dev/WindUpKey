@@ -4,102 +4,121 @@ using Dalamud.Plugin.Services;
 namespace WindUpKey.Services;
 
 /// <summary>
-/// Doll-only vague low-wind echo at 24h / 8h / 1h remaining (and on login when already low).
-/// Never prints exact remaining time.
+/// Doll-only vague low-wind echo at random remaining times within
+/// 20–28h / 6–12h / 45m–2h windows (plus login reminder by band).
+/// Never prints exact remaining time; never warns as a result of adding wind.
+/// Also echoes when winding expires or is cleared.
 /// </summary>
 public sealed class LowWindWarningService
 {
-    private const int Flag24h = 1 << 0;
-    private const int Flag8h = 1 << 1;
-    private const int Flag1h = 1 << 2;
+    private const int FlagHigh = 1 << 0;
+    private const int FlagMid = 1 << 1;
+    private const int FlagLow = 1 << 2;
 
-    private static readonly TimeSpan Threshold24h = TimeSpan.FromHours(24);
-    private static readonly TimeSpan Threshold8h = TimeSpan.FromHours(8);
-    private static readonly TimeSpan Threshold1h = TimeSpan.FromHours(1);
+    private static readonly TimeSpan HighMin = TimeSpan.FromHours(20);
+    private static readonly TimeSpan HighMax = TimeSpan.FromHours(28);
+    private static readonly TimeSpan MidMin = TimeSpan.FromHours(6);
+    private static readonly TimeSpan MidMax = TimeSpan.FromHours(12);
+    private static readonly TimeSpan LowMin = TimeSpan.FromMinutes(45);
+    private static readonly TimeSpan LowMax = TimeSpan.FromHours(2);
 
     private readonly Configuration _config;
     private readonly IChatGui _chat;
+    private readonly LowWindMessagesConfig _messages;
+    private readonly Random _rng = new();
+    private TimeSpan? _lastRemaining;
 
-    public LowWindWarningService(Configuration config, IChatGui chat)
+    public LowWindWarningService(Configuration config, IChatGui chat, LowWindMessagesConfig messages)
     {
         _config = config;
         _chat = chat;
+        _messages = messages;
     }
 
-    /// <summary>Call each framework tick. Fires any newly crossed thresholds once each.</summary>
+    /// <summary>Call each framework tick. Fires only on a downward cross of a random trigger.</summary>
     public void Tick()
     {
         if (!TryGetRemaining(out var remaining))
+        {
+            // Natural expiry: had wind last tick, now empty.
+            if (_lastRemaining is { } prev && prev > TimeSpan.Zero)
+                PrintMessage(_messages.Expired);
+
+            _lastRemaining = null;
             return;
+        }
+
+        EnsureAllTriggers();
+
+        // First observation after empty/load, or time was added: re-arm silently, never print.
+        if (_lastRemaining is not { } prevRemaining || remaining > prevRemaining)
+        {
+            ApplyWindExtension(remaining);
+            _lastRemaining = remaining;
+            return;
+        }
 
         var fired = _config.LowWindWarningsFired;
         var changed = false;
 
-        // Mild → urgent so a large jump (e.g. AFK) still delivers each tier once.
-        if (remaining <= Threshold24h && (fired & Flag24h) == 0)
-        {
-            PrintMessage(Message24h);
-            fired |= Flag24h;
+        // Mild → urgent so a large downward jump still delivers each newly crossed tier once.
+        if (TryFire(remaining, prevRemaining, FlagHigh, GetHighTrigger(), _messages.High, ref fired))
             changed = true;
-        }
-
-        if (remaining <= Threshold8h && (fired & Flag8h) == 0)
-        {
-            PrintMessage(Message8h);
-            fired |= Flag8h;
+        if (TryFire(remaining, prevRemaining, FlagMid, GetMidTrigger(), _messages.Mid, ref fired))
             changed = true;
-        }
-
-        if (remaining <= Threshold1h && (fired & Flag1h) == 0)
-        {
-            PrintMessage(Message1h);
-            fired |= Flag1h;
+        if (TryFire(remaining, prevRemaining, FlagLow, GetLowTrigger(), _messages.Low, ref fired))
             changed = true;
-        }
 
         if (changed)
         {
             _config.LowWindWarningsFired = fired;
             _config.Save();
         }
+
+        _lastRemaining = remaining;
     }
 
     /// <summary>
-    /// On login (or load while logged in): one message for the most urgent crossed tier;
-    /// mark all crossed tiers fired so Tick does not re-spam.
+    /// On login (or load while logged in): one message by band max (not the secret trigger);
+    /// mark past tiers fired so Tick does not re-spam.
     /// </summary>
     public void OnLoggedIn()
     {
-        if (!TryGetRemaining(out var remaining) || remaining > Threshold24h)
+        if (!TryGetRemaining(out var remaining) || remaining > HighMax)
             return;
 
-        var fired = _config.LowWindWarningsFired;
+        EnsureAllTriggers();
+
         string message;
-        if (remaining <= Threshold1h)
+        var fired = _config.LowWindWarningsFired;
+        if (remaining <= LowMax)
         {
-            message = Message1h;
-            fired |= Flag24h | Flag8h | Flag1h;
+            message = _messages.Low;
+            fired |= FlagHigh | FlagMid | FlagLow;
         }
-        else if (remaining <= Threshold8h)
+        else if (remaining <= MidMax)
         {
-            message = Message8h;
-            fired |= Flag24h | Flag8h;
+            message = _messages.Mid;
+            fired |= FlagHigh | FlagMid;
         }
         else
         {
-            message = Message24h;
-            fired |= Flag24h;
+            message = _messages.High;
+            fired |= FlagHigh;
         }
 
         PrintMessage(message);
-        if (fired == _config.LowWindWarningsFired)
-            return;
 
-        _config.LowWindWarningsFired = fired;
-        _config.Save();
+        if (fired != _config.LowWindWarningsFired)
+        {
+            _config.LowWindWarningsFired = fired;
+            _config.Save();
+        }
+
+        _lastRemaining = remaining;
     }
 
-    /// <summary>After AddHours: clear warning bits for thresholds now strictly above remaining.</summary>
+    /// <summary>After AddHours: re-arm / mark past silently — never print.</summary>
     public void OnWindChanged()
     {
         if (!_config.IsDoll)
@@ -107,15 +126,157 @@ public sealed class LowWindWarningService
 
         if (!TryGetRemaining(out var remaining))
         {
-            ClearAllFlags();
+            ClearAll();
             return;
         }
 
-        ClearFlagsAbove(remaining);
+        ApplyWindExtension(remaining);
+        _lastRemaining = remaining;
     }
 
-    /// <summary>After ClearWind: reset all low-wind warning flags.</summary>
-    public void OnCleared() => ClearAllFlags();
+    /// <summary>After ClearWind: echo that winding is spent, then reset flags and triggers.</summary>
+    public void OnCleared()
+    {
+        // Partner/testing unwind — same “wind hit zero” beat if we were tracking remaining.
+        if (_config.IsDoll && _lastRemaining is { } prev && prev > TimeSpan.Zero)
+            PrintMessage(_messages.Expired);
+
+        ClearAll();
+    }
+
+#if WINDUP_TESTING
+    /// <summary>Testing: print the alert that would apply now (by band), plus trigger/fired debug.</summary>
+    public void PrintCheckStatus()
+    {
+        if (!_config.IsDoll)
+        {
+            _chat.Print("[Wind-Up Key] Check: not a doll — no low-wind alert.");
+            return;
+        }
+
+        if (!TryGetRemaining(out var remaining))
+        {
+            _chat.Print("[Wind-Up Key] Check: timer empty — no low-wind alert.");
+            return;
+        }
+
+        EnsureAllTriggers();
+
+        var remainingDisplay = WindTimerService.FormatRemaining(remaining);
+        if (remaining > HighMax)
+        {
+            _chat.Print($"[Wind-Up Key] Check: no alert applicable yet (remaining {remainingDisplay}).");
+            PrintTriggerDebug(remaining);
+            return;
+        }
+
+        string tier;
+        string message;
+        if (remaining <= LowMax)
+        {
+            tier = "low (45m–2h)";
+            message = _messages.Low;
+        }
+        else if (remaining <= MidMax)
+        {
+            tier = "mid (6–12h)";
+            message = _messages.Mid;
+        }
+        else
+        {
+            tier = "high (20–28h)";
+            message = _messages.High;
+        }
+
+        _chat.Print($"[Wind-Up Key] Check: {tier} alert would be — {message}");
+        _chat.Print($"[Wind-Up Key] Check: remaining {remainingDisplay}.");
+        PrintTriggerDebug(remaining);
+    }
+
+    private void PrintTriggerDebug(TimeSpan remaining)
+    {
+        var fired = _config.LowWindWarningsFired;
+        _chat.Print(
+            $"[Wind-Up Key] Check: triggers high={FormatTrigger(GetHighTrigger())} " +
+            $"(fired={(fired & FlagHigh) != 0}, crossed={remaining <= GetHighTrigger()}), " +
+            $"mid={FormatTrigger(GetMidTrigger())} " +
+            $"(fired={(fired & FlagMid) != 0}, crossed={remaining <= GetMidTrigger()}), " +
+            $"low={FormatTrigger(GetLowTrigger())} " +
+            $"(fired={(fired & FlagLow) != 0}, crossed={remaining <= GetLowTrigger()}).");
+    }
+
+    private static string FormatTrigger(TimeSpan trigger) =>
+        WindTimerService.FormatRemaining(trigger);
+#endif
+
+    private void ApplyWindExtension(TimeSpan remaining)
+    {
+        var fired = _config.LowWindWarningsFired;
+        var triggersChanged = false;
+
+        // Above band max: clear fired and re-roll so the tier can warn again later.
+        if (remaining > HighMax)
+        {
+            fired &= ~FlagHigh;
+            RollHigh();
+            triggersChanged = true;
+        }
+
+        if (remaining > MidMax)
+        {
+            fired &= ~FlagMid;
+            RollMid();
+            triggersChanged = true;
+        }
+
+        if (remaining > LowMax)
+        {
+            fired &= ~FlagLow;
+            RollLow();
+            triggersChanged = true;
+        }
+
+        EnsureAllTriggers();
+
+        // Still at or below the current trigger: mark fired silently (no downward cross after wind).
+        if (remaining <= GetHighTrigger())
+            fired |= FlagHigh;
+        if (remaining <= GetMidTrigger())
+            fired |= FlagMid;
+        if (remaining <= GetLowTrigger())
+            fired |= FlagLow;
+
+        var firedChanged = fired != _config.LowWindWarningsFired;
+        if (firedChanged)
+            _config.LowWindWarningsFired = fired;
+
+        if (firedChanged || triggersChanged)
+            _config.Save();
+    }
+
+    /// <summary>Fire only when remaining crosses the trigger from above (prev &gt; trigger &gt;= remaining).</summary>
+    private bool TryFire(
+        TimeSpan remaining,
+        TimeSpan previous,
+        int flag,
+        TimeSpan trigger,
+        string message,
+        ref int fired)
+    {
+        if ((fired & flag) != 0 || remaining > trigger)
+            return false;
+
+        // Already at/below trigger last tick, or appeared here via wind — do not print.
+        if (previous <= trigger)
+        {
+            fired |= flag;
+            return true; // persist silent mark, but no message
+        }
+
+        PrintMessage(message);
+        fired |= flag;
+        return true;
+    }
 
     private bool TryGetRemaining(out TimeSpan remaining)
     {
@@ -130,43 +291,68 @@ public sealed class LowWindWarningService
         return remaining > TimeSpan.Zero;
     }
 
-    private void ClearFlagsAbove(TimeSpan remaining)
+    private void EnsureAllTriggers()
     {
-        var fired = _config.LowWindWarningsFired;
-        var next = fired;
+        var changed = false;
+        if (_config.LowWindTriggerHighSeconds <= 0)
+        {
+            RollHigh();
+            changed = true;
+        }
 
-        if (remaining > Threshold24h)
-            next &= ~Flag24h;
-        if (remaining > Threshold8h)
-            next &= ~Flag8h;
-        if (remaining > Threshold1h)
-            next &= ~Flag1h;
+        if (_config.LowWindTriggerMidSeconds <= 0)
+        {
+            RollMid();
+            changed = true;
+        }
 
-        if (next == fired)
-            return;
+        if (_config.LowWindTriggerLowSeconds <= 0)
+        {
+            RollLow();
+            changed = true;
+        }
 
-        _config.LowWindWarningsFired = next;
-        _config.Save();
+        if (changed)
+            _config.Save();
     }
 
-    private void ClearAllFlags()
+    private void RollHigh() =>
+        _config.LowWindTriggerHighSeconds = RollSeconds(HighMin, HighMax);
+
+    private void RollMid() =>
+        _config.LowWindTriggerMidSeconds = RollSeconds(MidMin, MidMax);
+
+    private void RollLow() =>
+        _config.LowWindTriggerLowSeconds = RollSeconds(LowMin, LowMax);
+
+    private double RollSeconds(TimeSpan min, TimeSpan max)
     {
-        if (_config.LowWindWarningsFired == 0)
+        var minSec = min.TotalSeconds;
+        var maxSec = max.TotalSeconds;
+        return minSec + (_rng.NextDouble() * (maxSec - minSec));
+    }
+
+    private TimeSpan GetHighTrigger() => TimeSpan.FromSeconds(_config.LowWindTriggerHighSeconds);
+    private TimeSpan GetMidTrigger() => TimeSpan.FromSeconds(_config.LowWindTriggerMidSeconds);
+    private TimeSpan GetLowTrigger() => TimeSpan.FromSeconds(_config.LowWindTriggerLowSeconds);
+
+    private void ClearAll()
+    {
+        _lastRemaining = null;
+        var any = _config.LowWindWarningsFired != 0
+                  || _config.LowWindTriggerHighSeconds != 0
+                  || _config.LowWindTriggerMidSeconds != 0
+                  || _config.LowWindTriggerLowSeconds != 0;
+        if (!any)
             return;
 
         _config.LowWindWarningsFired = 0;
+        _config.LowWindTriggerHighSeconds = 0;
+        _config.LowWindTriggerMidSeconds = 0;
+        _config.LowWindTriggerLowSeconds = 0;
         _config.Save();
     }
 
     private void PrintMessage(string body) =>
         _chat.Print($"[Wind-Up Key] {body}");
-
-    private const string Message24h =
-        "Your springs feel a little less taut — your winding is beginning to ebb.";
-
-    private const string Message8h =
-        "Your key is running low. Seek winding soon, before your steps grow stiff.";
-
-    private const string Message1h =
-        "Your winding is nearly spent. Find a winder before you seize up.";
 }

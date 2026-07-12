@@ -52,9 +52,18 @@ public class Configuration : IPluginConfiguration
 
     /// <summary>
     /// Bitmask of low-wind echo warnings already sent this wind cycle.
-    /// Bit 0 = 24h, bit 1 = 8h, bit 2 = 1h. Cleared when winding pushes above a threshold.
+    /// Bit 0 = high (20–28h), bit 1 = mid (6–12h), bit 2 = low (45m–2h).
     /// </summary>
     public int LowWindWarningsFired { get; set; }
+
+    /// <summary>Rolled remaining-seconds trigger for the high band (20–28h). 0 = unset.</summary>
+    public double LowWindTriggerHighSeconds { get; set; }
+
+    /// <summary>Rolled remaining-seconds trigger for the mid band (6–12h). 0 = unset.</summary>
+    public double LowWindTriggerMidSeconds { get; set; }
+
+    /// <summary>Rolled remaining-seconds trigger for the low band (45m–2h). 0 = unset.</summary>
+    public double LowWindTriggerLowSeconds { get; set; }
 
     public bool IsDoll => Role == PlayerRole.Doll;
     public bool IsWinder => Role == PlayerRole.Winder;

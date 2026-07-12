@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Objects.SubKinds;
@@ -15,6 +16,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly RelayClient _relay;
     private readonly WindTimerService _timer;
     private readonly ITargetManager _targets;
+    private readonly string _lowWindMessagesPath;
     private string _pairKeyDraft = string.Empty;
     private bool _hardcoreConfirm;
 
@@ -22,13 +24,15 @@ public sealed class ConfigWindow : Window, IDisposable
         Configuration config,
         RelayClient relay,
         WindTimerService timer,
-        ITargetManager targets)
+        ITargetManager targets,
+        string lowWindMessagesPath)
         : base("Wind-Up Key###WindUpKeyConfig")
     {
         _config = config;
         _relay = relay;
         _timer = timer;
         _targets = targets;
+        _lowWindMessagesPath = lowWindMessagesPath;
         Size = new Vector2(520, 480);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
@@ -145,6 +149,23 @@ public sealed class ConfigWindow : Window, IDisposable
                 _config.AutoGroundSit = autoSit;
                 _config.Save();
             }
+
+            ImGui.Spacing();
+            if (ImGui.Button("Open messages file"))
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = _lowWindMessagesPath,
+                        UseShellExecute = true,
+                    });
+                }
+                catch
+                {
+                    // Ignore launch failures.
+                }
+            }
         }
 
         ImGui.Spacing();
@@ -154,7 +175,7 @@ public sealed class ConfigWindow : Window, IDisposable
         if (!_config.HardcoreMode)
         {
             ImGui.SameLine();
-            if (ImGui.Button("Change role…"))
+            if (ImGui.Button("Change role"))
             {
                 if (_config.IsDoll)
                     _timer.SuspendDollRestrictions();

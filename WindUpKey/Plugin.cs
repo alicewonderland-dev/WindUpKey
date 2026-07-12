@@ -54,13 +54,14 @@ public sealed class Plugin : IDalamudPlugin
 
         var commands = new GameCommandRunner(Log);
         _lockController = new LockController(GameInterop, Condition, ObjectTable, commands, Configuration, Log);
-        _lowWind = new LowWindWarningService(Configuration, ChatGui);
+        var lowWindMessages = new LowWindMessagesConfig(PluginInterface.GetPluginConfigDirectory(), Log);
+        _lowWind = new LowWindWarningService(Configuration, ChatGui, lowWindMessages);
         _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition, _lowWind);
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
         _relay = new RelayClient(Configuration, ClientState, ObjectTable, Log, _consent, _timer, _notifier);
 
-        _configWindow = new ConfigWindow(Configuration, _relay, _timer, TargetManager);
+        _configWindow = new ConfigWindow(Configuration, _relay, _timer, TargetManager, lowWindMessages.FilePath);
         _windowSystem.AddWindow(_configWindow);
 
         var contextMenuSource = new ContextMenuWindSource(ContextMenu, ClientState, Configuration, _relay, Log);
@@ -70,7 +71,12 @@ public sealed class Plugin : IDalamudPlugin
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open Wind-Up Key config. /windup <safeword> uses your safeword. /windup unlock clears Hardcore.",
+            HelpMessage =
+#if WINDUP_TESTING
+                "Open Wind-Up Key config. /windup <safeword> uses your safeword. /windup unlock clears Hardcore. /windup check shows low-wind alert status.",
+#else
+                "Open Wind-Up Key config. /windup <safeword> uses your safeword. /windup unlock clears Hardcore.",
+#endif
         });
 
         PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
@@ -158,6 +164,14 @@ public sealed class Plugin : IDalamudPlugin
             ChatGui.Print("[Wind-Up Key] Hardcore cleared. You can change role again.");
             return;
         }
+
+#if WINDUP_TESTING
+        if (string.Equals(trimmed, "check", StringComparison.OrdinalIgnoreCase))
+        {
+            _lowWind.PrintCheckStatus();
+            return;
+        }
+#endif
 
         if (!Configuration.IsDoll)
         {
