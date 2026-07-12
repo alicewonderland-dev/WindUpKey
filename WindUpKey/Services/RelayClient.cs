@@ -29,6 +29,12 @@ public sealed class RelayClient : IDisposable
     public const string GenericPairFailure = "Pairing could not be completed.";
     private static readonly TimeSpan PresenceThrottle = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// How long the relay must stay unreachable (while logged in with identity) before
+    /// unwound movement/teleport locks are suspended as a safety fallback.
+    /// </summary>
+    public static readonly TimeSpan MovementLockSafetyGrace = TimeSpan.FromSeconds(60);
+
     private readonly Configuration _config;
     private readonly IClientState _clientState;
     private readonly IObjectTable _objectTable;
@@ -46,6 +52,7 @@ public sealed class RelayClient : IDisposable
     private int _reconnectDelayMs = 1000;
     private string? _lastStatus;
     private int _running;
+    private DateTimeOffset? _unreachableSinceUtc;
 
     private readonly object _presenceLock = new();
     private readonly Dictionary<string, PartnerPresence> _presenceByKey = new(StringComparer.Ordinal);
@@ -86,6 +93,14 @@ public sealed class RelayClient : IDisposable
 
     /// <summary>Short offline hint for the config UI. Never includes URL or token.</summary>
     public string? LastStatus => _lastStatus;
+
+    /// <summary>
+    /// True when the plugin has been unable to reach the relay long enough that
+    /// unwound movement/teleport blocking should be suspended until reconnect.
+    /// </summary>
+    public bool ShouldSuspendMovementLocks =>
+        _unreachableSinceUtc is { } since
+        && DateTimeOffset.UtcNow - since >= MovementLockSafetyGrace;
 
     /// <summary>Latest identity sampled on the framework thread.</summary>
     public string? LocalIdentity => _cachedIdentity;
@@ -164,6 +179,7 @@ public sealed class RelayClient : IDisposable
             _loggedIn = false;
             _cachedIdentity = null;
             _lastStatus = "Error reading character state (see dalamud.log).";
+            UpdateUnreachableTracking();
             return;
         }
 
@@ -188,6 +204,7 @@ public sealed class RelayClient : IDisposable
         }
 
         SyncPairingKeyFromIdentity();
+        UpdateUnreachableTracking();
 
         if (Interlocked.Increment(ref _tickLogCounter) % 300 == 1)
         {
@@ -199,6 +216,27 @@ public sealed class RelayClient : IDisposable
                 IsConnected,
                 _lastStatus ?? "(null)");
         }
+    }
+
+    /// <summary>
+    /// Counts continuous "should be connected but isn't" time for the movement-lock safety fallback.
+    /// Title screen / missing identity do not count — those are not a failed host connection.
+    /// </summary>
+    private void UpdateUnreachableTracking()
+    {
+        if (!_loggedIn || _cachedIdentity is null)
+        {
+            _unreachableSinceUtc = null;
+            return;
+        }
+
+        if (IsConnected)
+        {
+            _unreachableSinceUtc = null;
+            return;
+        }
+
+        _unreachableSinceUtc ??= DateTimeOffset.UtcNow;
     }
 
     /// <summary>

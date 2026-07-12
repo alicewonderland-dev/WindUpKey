@@ -64,7 +64,7 @@ public sealed class Plugin : IDalamudPlugin
             "Sounds");
         _sounds = new SoundEffectService(Configuration, Log, soundsDir);
         _lowWind = new LowWindWarningService(Configuration, ChatGui, lowWindMessages, _sounds);
-        _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition, _lowWind);
+        _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition, _lowWind, ChatGui);
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
         _relay = new RelayClient(Configuration, ClientState, ObjectTable, Log, ChatGui, _consent, _timer, _notifier, _sounds);
@@ -133,6 +133,7 @@ public sealed class Plugin : IDalamudPlugin
     private void OnFrameworkUpdate(IFramework framework)
     {
         _relay.Tick();
+        _timer.SetRelaySafetyBypass(_relay.ShouldSuspendMovementLocks);
         _timer.Tick();
         _lowWind.Tick();
         _lockController.Tick();

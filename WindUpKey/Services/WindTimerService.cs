@@ -17,9 +17,12 @@ public sealed class WindTimerService
     private readonly IObjectTable _objects;
     private readonly ICondition _condition;
     private readonly LowWindWarningService _lowWind;
+    private readonly IChatGui _chat;
     private bool _wasLocked;
     private bool _pendingLoginSit;
     private int _loginSitAttempts;
+    private bool _relaySafetyBypass;
+    private bool _relaySafetyBypassAnnounced;
 
     public WindTimerService(
         Configuration config,
@@ -27,7 +30,8 @@ public sealed class WindTimerService
         GameCommandRunner commands,
         IObjectTable objects,
         ICondition condition,
-        LowWindWarningService lowWind)
+        LowWindWarningService lowWind,
+        IChatGui chat)
     {
         _config = config;
         _lock = lockController;
@@ -35,6 +39,7 @@ public sealed class WindTimerService
         _objects = objects;
         _condition = condition;
         _lowWind = lowWind;
+        _chat = chat;
         // Only dolls start from timer state; winders are unlocked at role switch, not every tick.
         _wasLocked = config.IsDoll && IsTimerEmpty;
         _lock.SetLocked(_wasLocked);
@@ -44,7 +49,38 @@ public sealed class WindTimerService
     public bool IsTimerEmpty =>
         _config.ExpiryUtc is null || _config.ExpiryUtc.Value <= DateTimeOffset.UtcNow;
 
-    public bool IsLocked => _config.IsDoll && IsTimerEmpty;
+    /// <summary>
+    /// Movement/teleport lock policy. False while the relay safety bypass is active
+    /// (host unreachable) even if the timer is empty — ExpiryUtc is left unchanged.
+    /// </summary>
+    public bool IsLocked => _config.IsDoll && IsTimerEmpty && !_relaySafetyBypass;
+
+    /// <summary>
+    /// Called from the composition root each framework tick before <see cref="Tick"/>.
+    /// When true, suspends unwound movement/teleport blocking until the relay is reachable again.
+    /// </summary>
+    public void SetRelaySafetyBypass(bool bypass)
+    {
+        if (bypass == _relaySafetyBypass)
+            return;
+
+        _relaySafetyBypass = bypass;
+        if (!bypass)
+        {
+            _relaySafetyBypassAnnounced = false;
+            return;
+        }
+
+        // Only announce when this would have locked the doll (timer empty).
+        if (!_relaySafetyBypassAnnounced && _config.IsDoll && IsTimerEmpty)
+        {
+            _relaySafetyBypassAnnounced = true;
+            PluginChat.Print(
+                _chat,
+                "Host unreachable — movement unlocked until the relay reconnects.",
+                PluginChat.Yellow);
+        }
+    }
 
     /// <summary>Call on login (or plugin load while already logged in). Sits if currently unwound.</summary>
     public void OnLoggedIn()
