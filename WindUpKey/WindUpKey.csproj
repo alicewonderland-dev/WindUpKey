@@ -7,11 +7,6 @@
     <Configurations>Debug;Release;Testing</Configurations>
   </PropertyGroup>
 
-  <!-- Debug + Testing: unwind UI and self-wind context menu. Release is the public build. -->
-  <PropertyGroup Condition="'$(Configuration)' == 'Debug' Or '$(Configuration)' == 'Testing'">
-    <DefineConstants>$(DefineConstants);WINDUP_TESTING</DefineConstants>
-  </PropertyGroup>
-
   <!-- Testing channel must be a higher version than Release for Dalamud to serve it. -->
   <PropertyGroup Condition="'$(Configuration)' == 'Testing'">
     <Version>0.1.4.0</Version>

@@ -72,11 +72,7 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
             HelpMessage =
-#if WINDUP_TESTING
-                "Open Wind-Up Key config. /windup <safeword> uses your safeword. /windup unlock clears Hardcore. /windup check shows low-wind alert status.",
-#else
-                "Open Wind-Up Key config. /windup <safeword> uses your safeword. /windup unlock clears Hardcore.",
-#endif
+                "Open Wind-Up Key config. /windup <safeword> uses your safeword. /windup unlock clears Hardcore. /windup check (debug mode) shows low-wind alert status.",
         });
 
         PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
@@ -165,13 +161,17 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-#if WINDUP_TESTING
         if (string.Equals(trimmed, "check", StringComparison.OrdinalIgnoreCase))
         {
+            if (!Configuration.DebugMode)
+            {
+                ChatGui.PrintError("[Wind-Up Key] Enable debug mode in config to use /windup check.");
+                return;
+            }
+
             _lowWind.PrintCheckStatus();
             return;
         }
-#endif
 
         if (!Configuration.IsDoll)
         {

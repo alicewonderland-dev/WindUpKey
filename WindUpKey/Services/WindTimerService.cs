@@ -136,10 +136,8 @@ public sealed class WindTimerService
                && !_condition[ConditionFlag.BetweenAreas51];
     }
 
-#if WINDUP_TESTING
-    /// <summary>Testing: set remaining time to zero (locks the doll). Does not print remaining time.</summary>
+    /// <summary>Debug: set remaining time to zero (locks the doll). Does not print remaining time.</summary>
     public void UnwindForTesting() => ClearWind();
-#endif
 
     /// <summary>Clear remaining wind (locks the doll). Used by partner unwind permission.</summary>
     public void ClearWind()

@@ -165,8 +165,7 @@ public sealed class LowWindWarningService
             PrintMessage(_messages.Expired);
     }
 
-#if WINDUP_TESTING
-    /// <summary>Testing: print the alert that would apply now (by band), plus trigger/fired debug.</summary>
+    /// <summary>Debug: print the alert that would apply now (by band), plus trigger/fired debug.</summary>
     public void PrintCheckStatus()
     {
         if (!_config.IsDoll)
@@ -228,7 +227,6 @@ public sealed class LowWindWarningService
 
     private static string FormatTrigger(TimeSpan trigger) =>
         WindTimerService.FormatRemaining(trigger);
-#endif
 
     private void ApplyWindExtension(TimeSpan remaining)
     {

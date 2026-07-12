@@ -70,13 +70,11 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.EndTabItem();
         }
 
-#if WINDUP_TESTING
-        if (ImGui.BeginTabItem("Testing"))
+        if (_config.DebugMode && ImGui.BeginTabItem("Debug"))
         {
-            DrawTestingTab();
+            DrawDebugTab();
             ImGui.EndTabItem();
         }
-#endif
 
         ImGui.EndTabBar();
     }
@@ -171,6 +169,13 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.Spacing();
         if (ImGui.Button("Save"))
             _config.Save();
+
+        ImGui.SameLine();
+        if (ImGui.Button(_config.DebugMode ? "Disable debug mode" : "Enable debug mode"))
+        {
+            _config.DebugMode = !_config.DebugMode;
+            _config.Save();
+        }
 
         if (!_config.HardcoreMode)
         {
@@ -444,19 +449,21 @@ public sealed class ConfigWindow : Window, IDisposable
             _config.Save();
     }
 
-#if WINDUP_TESTING
-    private void DrawTestingTab()
+    private void DrawDebugTab()
     {
         ImGui.Spacing();
+        ImGui.TextUnformatted("Debug tools");
+        ImGui.Separator();
+        ImGui.TextWrapped("Self-wind from your context menu works when paired with your own key. /windup check prints low-wind alert status.");
 
         if (!_config.IsDoll)
             return;
 
+        ImGui.Spacing();
         if (ImGui.Button("Unwind"))
             _timer.UnwindForTesting();
         ImGui.SameLine();
         if (ImGui.Button("Add 1h wind"))
             _timer.AddHours(1);
     }
-#endif
 }

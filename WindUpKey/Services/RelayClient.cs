@@ -86,10 +86,9 @@ public sealed class RelayClient : IDisposable
         if (!PairingKeyUtil.IsValid(key))
             return PartnerPresence.Unknown;
 
-#if WINDUP_TESTING
-        if (string.Equals(key, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
+        if (_config.DebugMode
+            && string.Equals(key, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
             return IsConnected ? PartnerPresence.Online : PartnerPresence.Offline;
-#endif
 
         lock (_presenceLock)
             return _presenceByKey.TryGetValue(key, out var status) ? status : PartnerPresence.Unknown;
@@ -102,10 +101,9 @@ public sealed class RelayClient : IDisposable
         if (!PairingKeyUtil.IsValid(key))
             return;
 
-#if WINDUP_TESTING
-        if (string.Equals(key, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
+        if (_config.DebugMode
+            && string.Equals(key, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
             return;
-#endif
 
         if (!IsConnected)
             return;
@@ -127,10 +125,9 @@ public sealed class RelayClient : IDisposable
         if (!PairingKeyUtil.IsValid(toKey) || !IsConnected || !PairingKeyUtil.IsValid(_config.PairingKey))
             return;
 
-#if WINDUP_TESTING
-        if (string.Equals(toKey, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
+        if (_config.DebugMode
+            && string.Equals(toKey, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
             return;
-#endif
 
         var payload = new PresenceQueryPayload
         {
@@ -229,17 +226,18 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
-#if WINDUP_TESTING
-        var self = string.Equals(
-            PlayerIdentity.Normalize(targetIdentity),
-            PlayerIdentity.Normalize(_cachedIdentity),
-            StringComparison.OrdinalIgnoreCase);
-        if (self)
+        if (_config.DebugMode)
         {
-            await SendWindByKeyAsync(_config.PairingKey, hours).ConfigureAwait(false);
-            return;
+            var self = string.Equals(
+                PlayerIdentity.Normalize(targetIdentity),
+                PlayerIdentity.Normalize(_cachedIdentity),
+                StringComparison.OrdinalIgnoreCase);
+            if (self)
+            {
+                await SendWindByKeyAsync(_config.PairingKey, hours).ConfigureAwait(false);
+                return;
+            }
         }
-#endif
 
         var pair = _config.FindPair(targetIdentity);
         if (pair is null || !PairingKeyUtil.IsValid(pair.PartnerKey))
@@ -297,17 +295,18 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
-#if WINDUP_TESTING
-        var self = string.Equals(
-            PlayerIdentity.Normalize(targetIdentity),
-            PlayerIdentity.Normalize(_cachedIdentity),
-            StringComparison.OrdinalIgnoreCase);
-        if (self)
+        if (_config.DebugMode)
         {
-            await SendUnwindByKeyAsync(_config.PairingKey).ConfigureAwait(false);
-            return;
+            var self = string.Equals(
+                PlayerIdentity.Normalize(targetIdentity),
+                PlayerIdentity.Normalize(_cachedIdentity),
+                StringComparison.OrdinalIgnoreCase);
+            if (self)
+            {
+                await SendUnwindByKeyAsync(_config.PairingKey).ConfigureAwait(false);
+                return;
+            }
         }
-#endif
 
         var pair = _config.FindPair(targetIdentity);
         if (pair is null || !PairingKeyUtil.IsValid(pair.PartnerKey))
@@ -365,31 +364,29 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
-#if WINDUP_TESTING
-        // Local self-pair for testing — no relay handshake (relay rejects MyKey == TheirKey).
         if (string.Equals(theirKey, _config.PairingKey, StringComparison.Ordinal))
         {
-            if (_config.FindPairByKey(theirKey) is null)
+            if (_config.DebugMode)
             {
-                _config.PairedPartners.Add(new PairedPartner
+                // Local self-pair for debug — no relay handshake (relay rejects MyKey == TheirKey).
+                if (_config.FindPairByKey(theirKey) is null)
                 {
-                    Identity = string.Empty,
-                    PartnerKey = theirKey,
-                    CanWindMe = false,
-                });
-                _config.Save();
-                _log.Information("WindUpKey paired with key={Key}", theirKey);
+                    _config.PairedPartners.Add(new PairedPartner
+                    {
+                        Identity = string.Empty,
+                        PartnerKey = theirKey,
+                        CanWindMe = false,
+                    });
+                    _config.Save();
+                    _log.Information("WindUpKey paired with key={Key}", theirKey);
+                }
+
+                return;
             }
 
-            return;
-        }
-#else
-        if (string.Equals(theirKey, _config.PairingKey, StringComparison.Ordinal))
-        {
             _notifier.NotifyWinderError(GenericPairFailure);
             return;
         }
-#endif
 
         if (!IsConnected)
         {
@@ -657,20 +654,12 @@ public sealed class RelayClient : IDisposable
         var fromSelf = string.Equals(fromKey, _config.PairingKey, StringComparison.Ordinal);
 
         // Stealth: unpaired senders get no reply (do not prove we are online).
-#if WINDUP_TESTING
-        if (!fromSelf && !_consent.IsPairedByKey(fromKey))
+        if (!(_config.DebugMode && fromSelf) && !_consent.IsPairedByKey(fromKey))
             return;
-#else
-        if (!_consent.IsPairedByKey(fromKey))
-            return;
-#endif
 
-#if WINDUP_TESTING
-        // Self-wind still requires Can wind me on the self-key pair.
-        var allowed = (fromSelf || _config.IsDoll) && _consent.CanReceiveWindFromKey(fromKey);
-#else
-        var allowed = _config.IsDoll && _consent.CanReceiveWindFromKey(fromKey);
-#endif
+        // Self-wind (debug) still requires Can wind me on the self-key pair.
+        var allowed = ((_config.DebugMode && fromSelf) || _config.IsDoll)
+                      && _consent.CanReceiveWindFromKey(fromKey);
 
         if (!allowed)
         {
@@ -704,19 +693,11 @@ public sealed class RelayClient : IDisposable
         var fromKey = PairingKeyUtil.Normalize(payload.From);
         var fromSelf = string.Equals(fromKey, _config.PairingKey, StringComparison.Ordinal);
 
-#if WINDUP_TESTING
-        if (!fromSelf && !_consent.IsPairedByKey(fromKey))
+        if (!(_config.DebugMode && fromSelf) && !_consent.IsPairedByKey(fromKey))
             return;
-#else
-        if (!_consent.IsPairedByKey(fromKey))
-            return;
-#endif
 
-#if WINDUP_TESTING
-        var allowed = (fromSelf || _config.IsDoll) && _consent.CanReceiveUnwindFromKey(fromKey);
-#else
-        var allowed = _config.IsDoll && _consent.CanReceiveUnwindFromKey(fromKey);
-#endif
+        var allowed = ((_config.DebugMode && fromSelf) || _config.IsDoll)
+                      && _consent.CanReceiveUnwindFromKey(fromKey);
 
         if (!allowed)
         {

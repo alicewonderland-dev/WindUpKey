@@ -65,24 +65,27 @@ public sealed class ContextMenuWindSource : IWindUpSource
         if (!TryGetPlayerIdentity(target, out var identity))
             return;
 
-#if WINDUP_TESTING
-        // Testing: self allowed when paired with your own key (same menu as any other pair).
-        var selfTarget = string.Equals(identity, _relay.LocalIdentity, StringComparison.OrdinalIgnoreCase);
-        if (selfTarget)
+        if (_config.DebugMode)
         {
-            if (!_config.IsPairedByKey(_config.PairingKey) && !_config.IsPaired(identity))
+            // Debug: self allowed when paired with your own key (same menu as any other pair).
+            var selfTarget = string.Equals(identity, _relay.LocalIdentity, StringComparison.OrdinalIgnoreCase);
+            if (selfTarget)
+            {
+                if (!_config.IsPairedByKey(_config.PairingKey) && !_config.IsPaired(identity))
+                    return;
+            }
+            else if (!_config.IsPaired(identity))
+            {
+                return;
+            }
+        }
+        else
+        {
+            if (string.Equals(identity, _relay.LocalIdentity, StringComparison.OrdinalIgnoreCase))
+                return;
+            if (!_config.IsPaired(identity))
                 return;
         }
-        else if (!_config.IsPaired(identity))
-        {
-            return;
-        }
-#else
-        if (string.Equals(identity, _relay.LocalIdentity, StringComparison.OrdinalIgnoreCase))
-            return;
-        if (!_config.IsPaired(identity))
-            return;
-#endif
 
         const string menuTitle = "Wind Up";
 
