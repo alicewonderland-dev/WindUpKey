@@ -10,7 +10,8 @@ namespace WindUpKey.Services;
 
 /// <summary>
 /// Patch-fragile hooks live only here. When locked (and not in an instance):
-/// suppress walk/fly/turn input, hard-freeze facing (blocks LMB+RMB turn), block jump (incl. spacebar), and block teleport/return.
+/// suppress walk/fly/turn input (before game processes it — keeps groundsit), hard-freeze facing,
+/// block jump (incl. spacebar), block teleport/return, and re-apply groundsit if stood up.
 /// </summary>
 public sealed unsafe class LockController : IDisposable
 {
@@ -23,11 +24,14 @@ public sealed unsafe class LockController : IDisposable
     private readonly IGameInteropProvider _interop;
     private readonly ICondition _condition;
     private readonly IObjectTable _objectTable;
+    private readonly GameCommandRunner _commands;
+    private readonly Configuration _config;
 
     private bool _locked;
     private float _frozenRotation;
     private bool _hasFrozenRotation;
     private bool _applyingFrozenRotation;
+    private int _resitCooldownFrames;
 
     private Hook<RMIWalkDelegate>? _rmiWalkHook;
     private Hook<RMIFlyDelegate>? _rmiFlyHook;
@@ -66,11 +70,15 @@ public sealed unsafe class LockController : IDisposable
         IGameInteropProvider interop,
         ICondition condition,
         IObjectTable objectTable,
+        GameCommandRunner commands,
+        Configuration config,
         IPluginLog log)
     {
         _interop = interop;
         _condition = condition;
         _objectTable = objectTable;
+        _commands = commands;
+        _config = config;
         _log = log;
         TryInstallHooks();
     }
@@ -78,19 +86,24 @@ public sealed unsafe class LockController : IDisposable
     public void SetLocked(bool locked)
     {
         if (!locked)
+        {
             _hasFrozenRotation = false;
+            _resitCooldownFrames = 0;
+        }
+
         _locked = locked;
         // Do not read ObjectTable here — SetLocked can run during plugin ctor off the main thread.
         // Facing is captured on the next Framework Tick when RestrictionsActive.
     }
 
-    /// <summary>Call each framework tick to keep facing frozen while restricted.</summary>
+    /// <summary>Call each framework tick to keep facing frozen and groundsit enforced while restricted.</summary>
     public void Tick()
     {
         if (!RestrictionsActive)
         {
             // Recapture facing when leaving a duty while still locked.
             _hasFrozenRotation = false;
+            _resitCooldownFrames = 0;
             return;
         }
 
@@ -98,6 +111,7 @@ public sealed unsafe class LockController : IDisposable
             TryCaptureRotation();
 
         ApplyFrozenRotation();
+        EnforceGroundSit();
     }
 
     /// <summary>True when doll lock should suppress input (not inside a duty/instance).</summary>
@@ -209,36 +223,45 @@ public sealed unsafe class LockController : IDisposable
         byte* a6,
         byte bAdditiveUnk)
     {
-        _rmiWalkHook!.Original(self, sumLeft, sumForward, sumTurnLeft, haveBackwardOrStrafe, a6, bAdditiveUnk);
-        if (!RestrictionsActive)
+        // Must not call Original while restricted: it consumes LMB+RMB/WASD and cancels groundsit
+        // before any post-zeroing of the float outputs.
+        if (RestrictionsActive)
+        {
+            *sumLeft = 0;
+            *sumForward = 0;
+            *sumTurnLeft = 0;
+            if (haveBackwardOrStrafe != null)
+                *haveBackwardOrStrafe = 0;
+            if (a6 != null)
+                *a6 = 0;
+
+            if (!_hasFrozenRotation)
+                TryCaptureRotation();
+            ApplyFrozenRotation();
             return;
+        }
 
-        // Zero keyboard turn and LMB+RMB forward/strafe outputs.
-        *sumLeft = 0;
-        *sumForward = 0;
-        *sumTurnLeft = 0;
-        if (haveBackwardOrStrafe != null)
-            *haveBackwardOrStrafe = 0;
-
-        // Pin facing during input processing (before Framework Tick).
-        if (!_hasFrozenRotation)
-            TryCaptureRotation();
-        ApplyFrozenRotation();
+        _rmiWalkHook!.Original(self, sumLeft, sumForward, sumTurnLeft, haveBackwardOrStrafe, a6, bAdditiveUnk);
     }
 
     private void RMIFlyDetour(void* self, void* flyInput)
     {
-        _rmiFlyHook!.Original(self, flyInput);
-        if (!RestrictionsActive || flyInput == null)
+        if (RestrictionsActive)
+        {
+            if (flyInput != null)
+            {
+                var floats = (float*)flyInput;
+                for (var i = 0; i < 6; i++)
+                    floats[i] = 0;
+            }
+
+            if (!_hasFrozenRotation)
+                TryCaptureRotation();
+            ApplyFrozenRotation();
             return;
+        }
 
-        var floats = (float*)flyInput;
-        for (var i = 0; i < 6; i++)
-            floats[i] = 0;
-
-        if (!_hasFrozenRotation)
-            TryCaptureRotation();
-        ApplyFrozenRotation();
+        _rmiFlyHook!.Original(self, flyInput);
     }
 
     private bool UseActionDetour(
@@ -294,6 +317,28 @@ public sealed unsafe class LockController : IDisposable
         if (RestrictionsActive && IsJumpInput(inputId))
             return false;
         return _isInputIdHeldHook!.Original(self, inputId);
+    }
+
+    private void EnforceGroundSit()
+    {
+        if (!_config.AutoGroundSit)
+            return;
+
+        if (_resitCooldownFrames > 0)
+        {
+            _resitCooldownFrames--;
+            return;
+        }
+
+        // Groundsit sets InThatPosition; if they stood up, put them back.
+        if (_condition[ConditionFlag.InThatPosition] || _condition[ConditionFlag.Emoting])
+            return;
+
+        if (_objectTable.LocalPlayer is null)
+            return;
+
+        if (_commands.TryExecute(GameCommandRunner.SitGround))
+            _resitCooldownFrames = 90; // ~1.5s at 60fps — avoid command spam while standing anim plays
     }
 
     private static bool IsJumpInput(InputId inputId) =>

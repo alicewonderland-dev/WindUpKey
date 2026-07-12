@@ -25,6 +25,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IContextMenu ContextMenu { get; private set; } = null!;
     [PluginService] internal static IGameInteropProvider GameInterop { get; private set; } = null!;
     [PluginService] internal static IObjectTable ObjectTable { get; private set; } = null!;
+    [PluginService] internal static ITargetManager TargetManager { get; private set; } = null!;
     [PluginService] internal static ICondition Condition { get; private set; } = null!;
 
     public Configuration Configuration { get; }
@@ -50,13 +51,14 @@ public sealed class Plugin : IDalamudPlugin
             Log.Warning(ex, "WindUpKey config migrate/save failed; continuing with defaults where possible");
         }
 
-        _lockController = new LockController(GameInterop, Condition, ObjectTable, Log);
-        _timer = new WindTimerService(Configuration, _lockController);
+        var commands = new GameCommandRunner(Log);
+        _lockController = new LockController(GameInterop, Condition, ObjectTable, commands, Configuration, Log);
+        _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition);
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
         _relay = new RelayClient(Configuration, ClientState, ObjectTable, Log, _consent, _timer, _notifier);
 
-        _configWindow = new ConfigWindow(Configuration, _relay, _timer);
+        _configWindow = new ConfigWindow(Configuration, _relay, _timer, TargetManager);
         _windowSystem.AddWindow(_configWindow);
 
         var contextMenuSource = new ContextMenuWindSource(ContextMenu, ClientState, Configuration, _relay, Log);
@@ -80,6 +82,9 @@ public sealed class Plugin : IDalamudPlugin
         // Always start the loop; it waits until character data is ready.
         // Do not gate on IsLoggedIn — Login may already have fired before load.
         _relay.Start();
+
+        if (ClientState.IsLoggedIn)
+            _timer.OnLoggedIn();
 
         if (!Configuration.HasChosenRole)
             OpenConfig();
@@ -116,7 +121,11 @@ public sealed class Plugin : IDalamudPlugin
         _lockController.Tick();
     }
 
-    private void OnLogin() => _relay.Start();
+    private void OnLogin()
+    {
+        _relay.Start();
+        _timer.OnLoggedIn();
+    }
 
     private void OnLogout(int type, int code) => _relay.Stop();
 

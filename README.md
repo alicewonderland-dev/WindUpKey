@@ -1,6 +1,8 @@
 # Wind-Up Key
 
-Dalamud plugin. Connection settings are built into the plugin.
+Dalamud plugin. Connection settings are compiled in (no relay URL/token in the UI).
+
+Dolls get wound via paired partners; winders use the context menu. Remaining time is shown only to the winder after a successful wind — never to the doll.
 
 ## Install
 
@@ -12,24 +14,26 @@ Dalamud plugin. Connection settings are built into the plugin.
    https://raw.githubusercontent.com/alicewonderland-dev/WindUpKey/master/repo.json
    ```
 
-4. Click the **+** / save, then open the plugin installer (`/xlplugins`).
+4. Save, then open the plugin installer (`/xlplugins`).
 5. Find **Wind-Up Key** and install / enable it.
 
 ### Testing build
 
 1. Enable **Get plugin testing builds** in Dalamud Experimental settings.
-2. In the plugin installer, open **Wind-Up Key** and opt in to its testing builds (required for non-exclusive plugins).
-3. Update / reinstall so the plugin name shows **Wind-Up Key (Testing)** (version 0.1.2.0).
+2. In the plugin installer, open **Wind-Up Key** and opt in to its testing builds.
+3. Update / reinstall so the name shows **Wind-Up Key (Testing)**.
 
-That build includes Unwind / Add 1h wind in settings and self-wind from your own context menu.
+Testing adds Unwind / Add 1h in settings and self-wind from your own context menu.
 
 ## Develop / pack
 
+Prefer Testing / Debug while iterating. Pack Release only when publishing.
+
 ```powershell
-# Both Release (normal) and Testing zips
+# Both Release and Testing zips
 .\deploy\Pack-Plugin.ps1
 
-# Or one channel:
+# One channel:
 .\deploy\Pack-Plugin.ps1 -Channel Release
 .\deploy\Pack-Plugin.ps1 -Channel Testing
 ```
@@ -39,4 +43,5 @@ Outputs:
 - `deploy\dist\WindUpKey.zip` — public build
 - `deploy\dist\WindUpKey-Testing.zip` — testing helpers
 
-Local Debug builds also include testing helpers (`WINDUP_TESTING`).
+Local Debug builds include testing helpers (`WINDUP_TESTING`).
+

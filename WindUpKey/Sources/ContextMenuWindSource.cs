@@ -66,14 +66,25 @@ public sealed class ContextMenuWindSource : IWindUpSource
             return;
 
 #if WINDUP_TESTING
-        // Testing build: allow winding yourself (same path as winding another player).
+        // Testing: self allowed when paired with your own key (same menu as any other pair).
         var selfTarget = string.Equals(identity, _relay.LocalIdentity, StringComparison.OrdinalIgnoreCase);
-        var menuTitle = selfTarget ? "Wind Up (Self Test)" : "Wind Up";
+        if (selfTarget)
+        {
+            if (!_config.IsPairedByKey(_config.PairingKey) && !_config.IsPaired(identity))
+                return;
+        }
+        else if (!_config.IsPaired(identity))
+        {
+            return;
+        }
 #else
         if (string.Equals(identity, _relay.LocalIdentity, StringComparison.OrdinalIgnoreCase))
             return;
-        const string menuTitle = "Wind Up";
+        if (!_config.IsPaired(identity))
+            return;
 #endif
+
+        const string menuTitle = "Wind Up";
 
         args.AddMenuItem(new MenuItem
         {
@@ -90,12 +101,16 @@ public sealed class ContextMenuWindSource : IWindUpSource
                     {
                         Name = $"{h} hour{(h == 1 ? string.Empty : "s")}",
                         UseDefaultPrefix = true,
-                        OnClicked = args =>
-                        {
-                            StartWind(identity, h);
-                        },
+                        OnClicked = _ => StartWind(identity, h),
                     });
                 }
+
+                items.Add(new MenuItem
+                {
+                    Name = "Unwind",
+                    UseDefaultPrefix = true,
+                    OnClicked = _ => StartUnwind(identity),
+                });
 
                 clicked.OpenSubmenu(menuTitle, items);
             },
@@ -107,6 +122,11 @@ public sealed class ContextMenuWindSource : IWindUpSource
         _ = SendWindSafeAsync(identity, hours);
     }
 
+    private void StartUnwind(string identity)
+    {
+        _ = SendUnwindSafeAsync(identity);
+    }
+
     private async Task SendWindSafeAsync(string identity, double hours)
     {
         try
@@ -116,6 +136,18 @@ public sealed class ContextMenuWindSource : IWindUpSource
         catch (Exception ex)
         {
             _log.Warning(ex, "Failed to send wind to {Identity}", identity);
+        }
+    }
+
+    private async Task SendUnwindSafeAsync(string identity)
+    {
+        try
+        {
+            await _relay.SendUnwindAsync(identity);
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "Failed to send unwind to {Identity}", identity);
         }
     }
 

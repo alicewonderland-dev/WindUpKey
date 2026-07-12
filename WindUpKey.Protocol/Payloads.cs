@@ -4,22 +4,24 @@ namespace WindUpKey.Protocol;
 
 public sealed class RegisterPayload
 {
-    [JsonPropertyName("identity")]
-    public string Identity { get; set; } = string.Empty;
-
     [JsonPropertyName("token")]
     public string? Token { get; set; }
+
+    /// <summary>Sole relay identity. Name@World never registered with the relay.</summary>
+    [JsonPropertyName("pairingKey")]
+    public string PairingKey { get; set; } = string.Empty;
 }
 
 public sealed class WindPayload
 {
-    /// <summary>Correlation id so windResult/error can be matched by the requester.</summary>
     [JsonPropertyName("requestId")]
     public string RequestId { get; set; } = string.Empty;
 
+    /// <summary>Sender pairing key (set/overwritten by relay).</summary>
     [JsonPropertyName("from")]
     public string From { get; set; } = string.Empty;
 
+    /// <summary>Target pairing key.</summary>
     [JsonPropertyName("to")]
     public string To { get; set; } = string.Empty;
 
@@ -27,18 +29,34 @@ public sealed class WindPayload
     public double Hours { get; set; }
 }
 
+/// <summary>Partner-requested clear of remaining wind (doll must have CanUnwindMe for this key).</summary>
+public sealed class UnwindPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Sender pairing key (set/overwritten by relay).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Target pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+}
+
 public sealed class WindResultPayload
 {
     [JsonPropertyName("requestId")]
     public string RequestId { get; set; } = string.Empty;
 
+    /// <summary>Responder pairing key.</summary>
     [JsonPropertyName("from")]
     public string From { get; set; } = string.Empty;
 
+    /// <summary>Original winder pairing key.</summary>
     [JsonPropertyName("to")]
     public string To { get; set; } = string.Empty;
 
-    /// <summary>Remaining seconds after the wind (winder-facing only).</summary>
     [JsonPropertyName("remainingSeconds")]
     public double RemainingSeconds { get; set; }
 
@@ -46,12 +64,71 @@ public sealed class WindResultPayload
     public string RemainingDisplay { get; set; } = string.Empty;
 }
 
+public sealed class PairSubmitPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    [JsonPropertyName("myKey")]
+    public string MyKey { get; set; } = string.Empty;
+
+    [JsonPropertyName("theirKey")]
+    public string TheirKey { get; set; } = string.Empty;
+}
+
+public sealed class PairEstablishedPayload
+{
+    [JsonPropertyName("peerKey")]
+    public string PeerKey { get; set; } = string.Empty;
+}
+
+public sealed class PairRemovePayload
+{
+    [JsonPropertyName("peerKey")]
+    public string PeerKey { get; set; } = string.Empty;
+}
+
+public sealed class PresenceQueryPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Sender pairing key (set/overwritten by relay).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Target pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+}
+
+public sealed class PresenceResultPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Responder or relay-attributed pairing key.</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Original requester pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    [JsonPropertyName("online")]
+    public bool Online { get; set; }
+
+    /// <summary>Set by peer when answering a forwarded query; omit on relay offline replies.</summary>
+    [JsonPropertyName("stillPaired")]
+    public bool? StillPaired { get; set; }
+}
+
 public sealed class ErrorPayload
 {
     [JsonPropertyName("requestId")]
     public string? RequestId { get; set; }
 
-    /// <summary>When set, relay routes this error to the given identity (e.g. the winder).</summary>
+    /// <summary>When set, relay routes this error to the given pairing key.</summary>
     [JsonPropertyName("to")]
     public string? To { get; set; }
 
@@ -69,9 +146,11 @@ public static class ErrorCodes
     public const string Unauthorized = "unauthorized";
     public const string BadRequest = "bad_request";
     public const string NotRegistered = "not_registered";
+    public const string PairFailed = "pair_failed";
+    public const string PairKeyCollision = "pair_key_collision";
 }
 
-/// <summary>Helpers for Name@World identity strings.</summary>
+/// <summary>Helpers for Name@World identity strings (clientside only).</summary>
 public static class PlayerIdentity
 {
     public static string Format(string name, string world) => $"{name.Trim()}@{world.Trim()}";

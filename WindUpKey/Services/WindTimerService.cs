@@ -1,4 +1,6 @@
 using System;
+using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Plugin.Services;
 
 namespace WindUpKey.Services;
 
@@ -10,12 +12,25 @@ public sealed class WindTimerService
 {
     private readonly Configuration _config;
     private readonly LockController _lock;
+    private readonly GameCommandRunner _commands;
+    private readonly IObjectTable _objects;
+    private readonly ICondition _condition;
     private bool _wasLocked;
+    private bool _pendingLoginSit;
+    private int _loginSitAttempts;
 
-    public WindTimerService(Configuration config, LockController lockController)
+    public WindTimerService(
+        Configuration config,
+        LockController lockController,
+        GameCommandRunner commands,
+        IObjectTable objects,
+        ICondition condition)
     {
         _config = config;
         _lock = lockController;
+        _commands = commands;
+        _objects = objects;
+        _condition = condition;
         // Only dolls start from timer state; winders are unlocked at role switch, not every tick.
         _wasLocked = config.IsDoll && IsTimerEmpty;
         _lock.SetLocked(_wasLocked);
@@ -26,6 +41,16 @@ public sealed class WindTimerService
         _config.ExpiryUtc is null || _config.ExpiryUtc.Value <= DateTimeOffset.UtcNow;
 
     public bool IsLocked => _config.IsDoll && IsTimerEmpty;
+
+    /// <summary>Call on login (or plugin load while already logged in). Sits if currently unwound.</summary>
+    public void OnLoggedIn()
+    {
+        if (!IsLocked || !_config.AutoGroundSit)
+            return;
+
+        _pendingLoginSit = true;
+        _loginSitAttempts = 0;
+    }
 
     /// <summary>Extend the timer by hours (doll only). Returns remaining span for the remote winder.</summary>
     public TimeSpan AddHours(double hours)
@@ -64,14 +89,56 @@ public sealed class WindTimerService
     {
         // Only dolls track lock from the timer. Do not touch lock state for winders each frame.
         if (!_config.IsDoll)
+        {
+            _pendingLoginSit = false;
             return;
+        }
 
         SyncLockState();
+        TryPendingLoginSit();
+    }
+
+    private void TryPendingLoginSit()
+    {
+        if (!_pendingLoginSit)
+            return;
+
+        if (!IsLocked)
+        {
+            _pendingLoginSit = false;
+            return;
+        }
+
+        _loginSitAttempts++;
+        if (!CanEmoteNow())
+        {
+            if (_loginSitAttempts >= 1800)
+                _pendingLoginSit = false;
+            return;
+        }
+
+        if (_commands.TryExecute(GameCommandRunner.SitGround))
+            _pendingLoginSit = false;
+        else if (_loginSitAttempts >= 1800)
+            _pendingLoginSit = false;
+    }
+
+    private bool CanEmoteNow()
+    {
+        if (_objects.LocalPlayer is null)
+            return false;
+
+        return !_condition[ConditionFlag.BetweenAreas]
+               && !_condition[ConditionFlag.BetweenAreas51];
     }
 
 #if WINDUP_TESTING
     /// <summary>Testing: set remaining time to zero (locks the doll). Does not print remaining time.</summary>
-    public void UnwindForTesting()
+    public void UnwindForTesting() => ClearWind();
+#endif
+
+    /// <summary>Clear remaining wind (locks the doll). Used by partner unwind permission.</summary>
+    public void ClearWind()
     {
         if (!_config.IsDoll)
             return;
@@ -80,7 +147,6 @@ public sealed class WindTimerService
         _config.Save();
         SyncLockState();
     }
-#endif
 
     /// <summary>
     /// Call when leaving Doll (Winder or role picker): unlock movement once.
@@ -98,8 +164,12 @@ public sealed class WindTimerService
         if (locked == _wasLocked)
             return;
 
+        var becameLocked = locked && !_wasLocked;
         _wasLocked = locked;
         _lock.SetLocked(locked);
+
+        if (becameLocked && _config.AutoGroundSit)
+            _commands.Execute(GameCommandRunner.SitGround);
     }
 
     public static string FormatRemaining(TimeSpan remaining)

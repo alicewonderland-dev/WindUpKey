@@ -2,9 +2,9 @@
   "Author": "WonderlandDev",
   "Name": "Wind-Up Key (Testing)",
   "InternalName": "WindUpKey",
-  "AssemblyVersion": "0.1.2.0",
-  "Punchline": "Testing build — unwind, add wind, and self-wind from your own context menu.",
-  "Description": "Testing channel build with debug helpers: Unwind / Add 1h wind in settings, and right-click yourself for Wind Up (Self Test). Other players can still wind you normally. When time runs out, movement and teleport are locked. Remaining time is shown only to the person who wound you.",
+  "AssemblyVersion": "0.1.3.0",
+  "Punchline": "Testing build — unwind, add wind, and optional self-pair for self-wind.",
+  "Description": "Testing channel build with debug helpers: Unwind / Add 1h wind in settings. Pair with your own key to enable self-wind from the context menu. Other players can still wind you normally. When time runs out, movement and teleport are locked. Remaining time is shown only to the person who wound you.",
   "ApplicableVersion": "any",
   "DalamudApiLevel": 15,
   "Tags": [
