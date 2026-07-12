@@ -5,7 +5,8 @@ namespace WindUpKey.Services;
 
 /// <summary>
 /// Doll-only vague low-wind echo at random remaining times within
-/// 20–28h / 6–12h / 45m–2h windows (plus login reminder by band).
+/// 20–28h / 6–12h / 45m–2h windows (+ login reminder by band, skipped within 30m of the
+/// last echo unless remaining &lt; 1h).
 /// Never prints exact remaining time; never warns as a result of adding wind.
 /// Also echoes when winding expires or is cleared.
 /// </summary>
@@ -21,6 +22,12 @@ public sealed class LowWindWarningService
     private static readonly TimeSpan MidMax = TimeSpan.FromHours(12);
     private static readonly TimeSpan LowMin = TimeSpan.FromMinutes(45);
     private static readonly TimeSpan LowMax = TimeSpan.FromHours(2);
+
+    /// <summary>Login/enable reminder is skipped if a warning was sent more recently than this.</summary>
+    private static readonly TimeSpan LoginResendCooldown = TimeSpan.FromMinutes(30);
+
+    /// <summary>Always allow login/enable reminder when remaining is below this.</summary>
+    private static readonly TimeSpan LoginAlwaysResendBelow = TimeSpan.FromHours(1);
 
     private readonly Configuration _config;
     private readonly IChatGui _chat;
@@ -41,6 +48,7 @@ public sealed class LowWindWarningService
         if (!TryGetRemaining(out var remaining))
         {
             // Natural expiry: had wind last tick, now empty.
+            // Explicit ClearWind clears _lastRemaining first so this path does not double-echo.
             if (_lastRemaining is { } prev && prev > TimeSpan.Zero)
                 PrintMessage(_messages.Expired);
 
@@ -81,6 +89,7 @@ public sealed class LowWindWarningService
     /// <summary>
     /// On login (or load while logged in): one message by band max (not the secret trigger);
     /// mark past tiers fired so Tick does not re-spam.
+    /// Skips the chat line if a warning was sent within the last 30 minutes, unless remaining &lt; 1h.
     /// </summary>
     public void OnLoggedIn()
     {
@@ -107,7 +116,8 @@ public sealed class LowWindWarningService
             fired |= FlagHigh;
         }
 
-        PrintMessage(message);
+        if (ShouldPrintLoginReminder(remaining))
+            PrintMessage(message);
 
         if (fired != _config.LowWindWarningsFired)
         {
@@ -116,6 +126,17 @@ public sealed class LowWindWarningService
         }
 
         _lastRemaining = remaining;
+    }
+
+    private bool ShouldPrintLoginReminder(TimeSpan remaining)
+    {
+        if (remaining < LoginAlwaysResendBelow)
+            return true;
+
+        if (_config.LowWindLastWarningUtc is not { } last)
+            return true;
+
+        return DateTimeOffset.UtcNow - last > LoginResendCooldown;
     }
 
     /// <summary>After AddHours: re-arm / mark past silently — never print.</summary>
@@ -137,11 +158,11 @@ public sealed class LowWindWarningService
     /// <summary>After ClearWind: echo that winding is spent, then reset flags and triggers.</summary>
     public void OnCleared()
     {
-        // Partner/testing unwind — same “wind hit zero” beat if we were tracking remaining.
-        if (_config.IsDoll && _lastRemaining is { } prev && prev > TimeSpan.Zero)
-            PrintMessage(_messages.Expired);
-
+        // Clear tracking first so a re-entrant Tick (e.g. from chat/config save) cannot also echo.
+        var shouldEcho = _config.IsDoll && _lastRemaining is { } prev && prev > TimeSpan.Zero;
         ClearAll();
+        if (shouldEcho)
+            PrintMessage(_messages.Expired);
     }
 
 #if WINDUP_TESTING
@@ -353,6 +374,10 @@ public sealed class LowWindWarningService
         _config.Save();
     }
 
-    private void PrintMessage(string body) =>
+    private void PrintMessage(string body)
+    {
         _chat.Print($"[Wind-Up Key] {body}");
+        _config.LowWindLastWarningUtc = DateTimeOffset.UtcNow;
+        _config.Save();
+    }
 }

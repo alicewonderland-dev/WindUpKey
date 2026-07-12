@@ -748,6 +748,10 @@ public sealed class RelayClient : IDisposable
         if (payload is null)
             return;
 
+        // Remaining readout is winder-only — never surface it on a doll (incl. self-unwind testing).
+        if (_config.IsDoll)
+            return;
+
         var remaining = TimeSpan.FromSeconds(Math.Max(0, payload.RemainingSeconds));
         var fromKey = PairingKeyUtil.Normalize(payload.From);
         var pair = _config.FindPairByKey(fromKey);

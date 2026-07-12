@@ -65,6 +65,9 @@ public class Configuration : IPluginConfiguration
     /// <summary>Rolled remaining-seconds trigger for the low band (45m–2h). 0 = unset.</summary>
     public double LowWindTriggerLowSeconds { get; set; }
 
+    /// <summary>UTC time of the last low-wind chat echo (any band or expiry).</summary>
+    public DateTimeOffset? LowWindLastWarningUtc { get; set; }
+
     public bool IsDoll => Role == PlayerRole.Doll;
     public bool IsWinder => Role == PlayerRole.Winder;
     public bool HasChosenRole => Role is PlayerRole.Doll or PlayerRole.Winder;
