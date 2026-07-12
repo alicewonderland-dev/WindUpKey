@@ -174,7 +174,7 @@ public sealed class WindTimerService
         _wasLocked = locked;
         _lock.SetLocked(locked);
 
-        if (becameLocked && _config.AutoGroundSit)
+        if (becameLocked && _config.AutoGroundSit && _objects.LocalPlayer is not null)
             _commands.Execute(GameCommandRunner.SitGround);
     }
 

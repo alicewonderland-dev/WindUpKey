@@ -53,7 +53,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         var commands = new GameCommandRunner(Log);
-        _lockController = new LockController(GameInterop, Condition, ObjectTable, commands, Configuration, Log);
+        _lockController = new LockController(GameInterop, ClientState, Condition, ObjectTable, commands, Configuration, Log);
         var lowWindMessages = new LowWindMessagesConfig(PluginInterface.GetPluginConfigDirectory(), Log);
         _lowWind = new LowWindWarningService(Configuration, ChatGui, lowWindMessages);
         _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition, _lowWind);

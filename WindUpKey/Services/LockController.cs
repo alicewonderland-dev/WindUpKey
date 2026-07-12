@@ -12,7 +12,8 @@ namespace WindUpKey.Services;
 /// Patch-fragile hooks live only here. When locked (and not in an instance / not yet in-world):
 /// suppress walk/fly/turn input (before game processes it — keeps groundsit), hard-freeze facing,
 /// block jump (incl. spacebar), block teleport/return, and re-apply groundsit if stood up.
-/// Restrictions stay off until LocalPlayer exists so title/char-select never hit the detours.
+/// Restrictions stay off until logged in with a LocalPlayer so title/char-select never hit the detours
+/// (char select can still expose a LocalPlayer-like object).
 /// </summary>
 public sealed unsafe class LockController : IDisposable
 {
@@ -23,6 +24,7 @@ public sealed unsafe class LockController : IDisposable
 
     private readonly IPluginLog _log;
     private readonly IGameInteropProvider _interop;
+    private readonly IClientState _clientState;
     private readonly ICondition _condition;
     private readonly IObjectTable _objectTable;
     private readonly GameCommandRunner _commands;
@@ -69,6 +71,7 @@ public sealed unsafe class LockController : IDisposable
 
     public LockController(
         IGameInteropProvider interop,
+        IClientState clientState,
         ICondition condition,
         IObjectTable objectTable,
         GameCommandRunner commands,
@@ -76,6 +79,7 @@ public sealed unsafe class LockController : IDisposable
         IPluginLog log)
     {
         _interop = interop;
+        _clientState = clientState;
         _condition = condition;
         _objectTable = objectTable;
         _commands = commands;
@@ -116,12 +120,13 @@ public sealed unsafe class LockController : IDisposable
     }
 
     /// <summary>
-    /// True when doll lock should suppress input. Requires an in-world LocalPlayer so we never
+    /// True when doll lock should suppress input. Requires a real login plus LocalPlayer so we never
     /// intercept RMI/input on title, character select, or login load (that caused spin/crash).
     /// Also off inside a duty/instance and during zone transitions.
     /// </summary>
     private bool RestrictionsActive =>
         _locked
+        && _clientState.IsLoggedIn
         && !IsInInstance()
         && _objectTable.LocalPlayer is not null;
 
