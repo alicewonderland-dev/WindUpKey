@@ -67,6 +67,19 @@ function Pack-Channel {
     New-Item -ItemType Directory -Path $stageImages -Force | Out-Null
     Copy-Item $iconPath (Join-Path $stageImages "icon.png") -Force
 
+    # Bundled WAVs load from Sounds\ next to the DLL (see Plugin.cs / SoundEffectService).
+    $soundsSrc = Join-Path $outDir "Sounds"
+    if (-not (Test-Path $soundsSrc)) {
+        throw "Missing build output: $soundsSrc (expected windingup.wav / windingdown.wav)"
+    }
+    $wavs = @(Get-ChildItem -Path $soundsSrc -Filter "*.wav" -File -ErrorAction SilentlyContinue)
+    if ($wavs.Count -eq 0) {
+        throw "Missing build output: no .wav files under $soundsSrc"
+    }
+    $stageSounds = Join-Path $stageDir "Sounds"
+    New-Item -ItemType Directory -Path $stageSounds -Force | Out-Null
+    Copy-Item (Join-Path $soundsSrc "*.wav") $stageSounds -Force
+
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
     Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $zipPath -Force
     Remove-Item $stageDir -Recurse -Force
