@@ -33,6 +33,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ConfigWindow _configWindow;
     private readonly LockController _lockController;
     private readonly WindTimerService _timer;
+    private readonly LowWindWarningService _lowWind;
     private readonly ConsentService _consent;
     private readonly IWindNotifier _notifier;
     private readonly RelayClient _relay;
@@ -53,7 +54,8 @@ public sealed class Plugin : IDalamudPlugin
 
         var commands = new GameCommandRunner(Log);
         _lockController = new LockController(GameInterop, Condition, ObjectTable, commands, Configuration, Log);
-        _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition);
+        _lowWind = new LowWindWarningService(Configuration, ChatGui);
+        _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition, _lowWind);
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
         _relay = new RelayClient(Configuration, ClientState, ObjectTable, Log, _consent, _timer, _notifier);
@@ -84,7 +86,10 @@ public sealed class Plugin : IDalamudPlugin
         _relay.Start();
 
         if (ClientState.IsLoggedIn)
+        {
             _timer.OnLoggedIn();
+            _lowWind.OnLoggedIn();
+        }
 
         if (!Configuration.HasChosenRole)
             OpenConfig();
@@ -118,6 +123,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         _relay.Tick();
         _timer.Tick();
+        _lowWind.Tick();
         _lockController.Tick();
     }
 
@@ -125,6 +131,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         _relay.Start();
         _timer.OnLoggedIn();
+        _lowWind.OnLoggedIn();
     }
 
     private void OnLogout(int type, int code) => _relay.Stop();

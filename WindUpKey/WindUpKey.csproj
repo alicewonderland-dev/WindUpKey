@@ -14,7 +14,7 @@
 
   <!-- Testing channel must be a higher version than Release for Dalamud to serve it. -->
   <PropertyGroup Condition="'$(Configuration)' == 'Testing'">
-    <Version>0.1.4.0</Version>
+    <Version>0.1.3.1</Version>
   </PropertyGroup>
 
   <ItemGroup>

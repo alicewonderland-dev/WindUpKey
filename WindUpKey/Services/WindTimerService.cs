@@ -5,8 +5,8 @@ using Dalamud.Plugin.Services;
 namespace WindUpKey.Services;
 
 /// <summary>
-/// Owns expiry state for dolls only. Remaining duration is returned for the person winding —
-/// never surface it in doll UI/chat.
+/// Owns expiry state for dolls only. Exact remaining duration is returned for the person winding —
+/// never surface it in doll UI/chat (vague low-wind echo is handled by <see cref="LowWindWarningService"/>).
 /// </summary>
 public sealed class WindTimerService
 {
@@ -15,6 +15,7 @@ public sealed class WindTimerService
     private readonly GameCommandRunner _commands;
     private readonly IObjectTable _objects;
     private readonly ICondition _condition;
+    private readonly LowWindWarningService _lowWind;
     private bool _wasLocked;
     private bool _pendingLoginSit;
     private int _loginSitAttempts;
@@ -24,13 +25,15 @@ public sealed class WindTimerService
         LockController lockController,
         GameCommandRunner commands,
         IObjectTable objects,
-        ICondition condition)
+        ICondition condition,
+        LowWindWarningService lowWind)
     {
         _config = config;
         _lock = lockController;
         _commands = commands;
         _objects = objects;
         _condition = condition;
+        _lowWind = lowWind;
         // Only dolls start from timer state; winders are unlocked at role switch, not every tick.
         _wasLocked = config.IsDoll && IsTimerEmpty;
         _lock.SetLocked(_wasLocked);
@@ -71,6 +74,7 @@ public sealed class WindTimerService
         _config.ExpiryUtc = proposed;
         _config.Save();
         SyncLockState();
+        _lowWind.OnWindChanged();
         return RemainingForWinder();
     }
 
@@ -146,6 +150,7 @@ public sealed class WindTimerService
         _config.ExpiryUtc = null;
         _config.Save();
         SyncLockState();
+        _lowWind.OnCleared();
     }
 
     /// <summary>

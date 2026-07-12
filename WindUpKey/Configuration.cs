@@ -50,6 +50,12 @@ public class Configuration : IPluginConfiguration
     /// <summary>Absolute expiry. Null or past => locked. Never display remaining duration to the doll.</summary>
     public DateTimeOffset? ExpiryUtc { get; set; }
 
+    /// <summary>
+    /// Bitmask of low-wind echo warnings already sent this wind cycle.
+    /// Bit 0 = 24h, bit 1 = 8h, bit 2 = 1h. Cleared when winding pushes above a threshold.
+    /// </summary>
+    public int LowWindWarningsFired { get; set; }
+
     public bool IsDoll => Role == PlayerRole.Doll;
     public bool IsWinder => Role == PlayerRole.Winder;
     public bool HasChosenRole => Role is PlayerRole.Doll or PlayerRole.Winder;
