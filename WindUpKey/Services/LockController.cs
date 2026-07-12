@@ -9,9 +9,10 @@ using CSGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 namespace WindUpKey.Services;
 
 /// <summary>
-/// Patch-fragile hooks live only here. When locked (and not in an instance):
+/// Patch-fragile hooks live only here. When locked (and not in an instance / not yet in-world):
 /// suppress walk/fly/turn input (before game processes it — keeps groundsit), hard-freeze facing,
 /// block jump (incl. spacebar), block teleport/return, and re-apply groundsit if stood up.
+/// Restrictions stay off until LocalPlayer exists so title/char-select never hit the detours.
 /// </summary>
 public sealed unsafe class LockController : IDisposable
 {
@@ -114,8 +115,15 @@ public sealed unsafe class LockController : IDisposable
         EnforceGroundSit();
     }
 
-    /// <summary>True when doll lock should suppress input (not inside a duty/instance).</summary>
-    private bool RestrictionsActive => _locked && !IsInInstance();
+    /// <summary>
+    /// True when doll lock should suppress input. Requires an in-world LocalPlayer so we never
+    /// intercept RMI/input on title, character select, or login load (that caused spin/crash).
+    /// Also off inside a duty/instance and during zone transitions.
+    /// </summary>
+    private bool RestrictionsActive =>
+        _locked
+        && !IsInInstance()
+        && _objectTable.LocalPlayer is not null;
 
     private bool IsInInstance()
     {
