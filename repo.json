@@ -20,5 +20,28 @@
       "key",
       "timer"
     ]
+  },
+  {
+    "Author": "WonderlandDev",
+    "Name": "Wonderland Browser",
+    "Description": "Renders browser overlays in-game to enable playing in fullscreen (and G-SYNC) while having access to ACT overlays.\nUse the settings button below or the '/wb config' command to configure.\nBased on the BrowserHost plugin by ackwell.",
+    "InternalName": "WonderlandBrowser",
+    "AssemblyVersion": "2.0.0",
+    "RepoUrl": "https://github.com/alicewonderland-dev/WindUpKey",
+    "ApplicableVersion": "any",
+    "DalamudApiLevel": 15,
+    "Punchline": "Browser overlays rendered in-game.",
+    "IsHide": false,
+    "IconUrl": "https://raw.githubusercontent.com/alicewonderland-dev/WindUpKey/master/wonderland-browser.png",
+    "DownloadLinkInstall": "https://github.com/alicewonderland-dev/WindUpKey/releases/download/WonderlandBrowser-v2.0.0/WonderlandBrowser.zip",
+    "DownloadLinkUpdate": "https://github.com/alicewonderland-dev/WindUpKey/releases/download/WonderlandBrowser-v2.0.0/WonderlandBrowser.zip",
+    "LastUpdate": 1783945090,
+    "Tags": [
+      "browser",
+      "overlay",
+      "act",
+      "chromium",
+      "youtube"
+    ]
   }
 ]
