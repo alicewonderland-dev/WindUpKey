@@ -9,7 +9,7 @@ namespace WindUpKey;
 [Serializable]
 public class Configuration : IPluginConfiguration
 {
-    public const int CurrentVersion = 6;
+    public const int CurrentVersion = 7;
 
     /// <summary>Orphan profile from pre-v6 flat config until the first logged-in ContentId claims it.</summary>
     public const string PendingProfileKey = "pending";
@@ -69,6 +69,12 @@ public class Configuration : IPluginConfiguration
 
     public double MaxWindHours { get; set; } = 72;
 
+    /// <summary>When true, only owners may change max hours / unwound emote settings.</summary>
+    public bool OwnerSettingsLocked { get; set; }
+
+    /// <summary>Dolls this character owns (from remote ownerGrant).</summary>
+    public List<OwnedDoll> OwnedDolls { get; set; } = [];
+
     /// <summary>
     /// Stable 8-character A–Z0–9 key for mutual pairing.
     /// Derived from a one-way hash of the local Name@World (see <see cref="PairingKeyUtil.FromIdentity"/>).
@@ -86,11 +92,26 @@ public class Configuration : IPluginConfiguration
     /// <summary>Outbound key-rotation announces waiting for an online peer.</summary>
     public List<PendingKeyRotation> PendingKeyRotations { get; set; } = [];
 
-    /// <summary>When true, run lock emote (/playdead if unlocked, else /groundsit) on unwind / login / re-enforce.</summary>
+    /// <summary>When true, play <see cref="LockEmoteId"/> on unwind / login / re-enforce.</summary>
     public bool AutoGroundSit { get; set; } = true;
+
+    /// <summary>
+    /// Emote sheet row played while unwound when <see cref="AutoGroundSit"/> is on.
+    /// Default 52 = Ground Sit. 0 is treated as Ground Sit for old configs.
+    /// </summary>
+    public ushort LockEmoteId { get; set; } = 52;
+
+    /// <summary>Resolved lock emote id (0 → Ground Sit).</summary>
+    public ushort EffectiveLockEmoteId => LockEmoteId == 0 ? (ushort)52 : LockEmoteId;
 
     /// <summary>When true, play bundled wind-up / wind-down sound effects.</summary>
     public bool SoundEffectsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// When true (doll), apply a no-timer Moodles status for coarse wind charge.
+    /// Requires Moodles with remote apply enabled; partners see it via their sync plugin.
+    /// </summary>
+    public bool MoodlesStatusEnabled { get; set; } = true;
 
     public bool SafewordEnabled { get; set; }
 
@@ -135,9 +156,12 @@ public class Configuration : IPluginConfiguration
         PairedPartners ??= [];
         PendingPartnerKeys ??= [];
         PendingKeyRotations ??= [];
+        OwnedDolls ??= [];
 
         if (MaxWindHours <= 0)
             MaxWindHours = 72;
+
+        NormalizeOwnedDolls();
 
         // Whole hours only (also cleans up older fractional configs).
         SafewordHours = Math.Clamp(Math.Round(SafewordHours), 1, 24);
@@ -154,9 +178,7 @@ public class Configuration : IPluginConfiguration
 
         // v5: whitelist removed — pairing only. Do not convert old whitelist entries.
         if (Version < 5)
-        {
-            // Drop legacy whitelist fields if deserialized into ignored extras; lists start fresh.
-        }
+            Version = 5;
 
         // Pairing key is derived from Name@World on login; do not invent a random one here.
         if (!PairingKeyUtil.IsValid(PairingKey))
@@ -221,6 +243,7 @@ public class Configuration : IPluginConfiguration
     {
         NormalizePendingKeys();
         NormalizePendingRotations();
+        NormalizeOwnedDolls();
         return new CharacterProfile
         {
             PairingKey = PairingKey,
@@ -236,12 +259,20 @@ public class Configuration : IPluginConfiguration
                     Identity = r.Identity,
                 })
                 .ToList(),
+            OwnedDolls = OwnedDolls
+                .Select(d => new OwnedDoll
+                {
+                    DollKey = d.DollKey,
+                    Identity = d.Identity,
+                })
+                .ToList(),
             Role = Role,
             HasCompletedInitialSetup = HasCompletedInitialSetup,
             HardcoreMode = HardcoreMode,
             HardcoreLastClearedUtc = HardcoreLastClearedUtc,
             DebugMode = DebugMode,
             MaxWindHours = MaxWindHours,
+            OwnerSettingsLocked = OwnerSettingsLocked,
             SafewordEnabled = SafewordEnabled,
             Safeword = Safeword,
             SafewordHours = SafewordHours,
@@ -261,12 +292,14 @@ public class Configuration : IPluginConfiguration
         PairedPartners = profile.PairedPartners ?? [];
         PendingPartnerKeys = profile.PendingPartnerKeys ?? [];
         PendingKeyRotations = profile.PendingKeyRotations ?? [];
+        OwnedDolls = profile.OwnedDolls ?? [];
         Role = profile.Role;
         HasCompletedInitialSetup = profile.HasCompletedInitialSetup;
         HardcoreMode = profile.HardcoreMode;
         HardcoreLastClearedUtc = profile.HardcoreLastClearedUtc;
         DebugMode = profile.DebugMode;
         MaxWindHours = profile.MaxWindHours > 0 ? profile.MaxWindHours : 72;
+        OwnerSettingsLocked = profile.OwnerSettingsLocked;
         SafewordEnabled = profile.SafewordEnabled;
         Safeword = string.IsNullOrEmpty(profile.Safeword) ? "safeword" : profile.Safeword;
         SafewordHours = Math.Clamp(Math.Round(profile.SafewordHours <= 0 ? 1 : profile.SafewordHours), 1, 24);
@@ -285,6 +318,7 @@ public class Configuration : IPluginConfiguration
 
         NormalizePendingKeys();
         NormalizePendingRotations();
+        NormalizeOwnedDolls();
         StripLegacySelfTestingIdentity();
     }
 
@@ -325,6 +359,20 @@ public class Configuration : IPluginConfiguration
             .ToList();
     }
 
+    private void NormalizeOwnedDolls()
+    {
+        OwnedDolls = (OwnedDolls ?? [])
+            .Select(d => new OwnedDoll
+            {
+                DollKey = PairingKeyUtil.Normalize(d.DollKey),
+                Identity = d.Identity?.Trim() ?? string.Empty,
+            })
+            .Where(d => PairingKeyUtil.IsValid(d.DollKey))
+            .GroupBy(d => d.DollKey, StringComparer.Ordinal)
+            .Select(g => g.First())
+            .ToList();
+    }
+
     private void StripLegacySelfTestingIdentity()
     {
         foreach (var partner in PairedPartners)
@@ -360,6 +408,71 @@ public class Configuration : IPluginConfiguration
     public bool IsPaired(string identity) => FindPair(identity) is not null;
 
     public bool IsPairedByKey(string pairingKey) => FindPairByKey(pairingKey) is not null;
+
+    public bool HasOwners => PairedPartners.Any(p => p.IsOwner);
+
+    public OwnedDoll? FindOwnedDoll(string dollKey)
+    {
+        var key = PairingKeyUtil.Normalize(dollKey);
+        if (!PairingKeyUtil.IsValid(key))
+            return null;
+        return OwnedDolls.FirstOrDefault(d =>
+            string.Equals(PairingKeyUtil.Normalize(d.DollKey), key, StringComparison.Ordinal));
+    }
+
+    public void UpsertOwnedDoll(string dollKey, string? identity)
+    {
+        var key = PairingKeyUtil.Normalize(dollKey);
+        if (!PairingKeyUtil.IsValid(key))
+            return;
+
+        var existing = FindOwnedDoll(key);
+        if (existing is null)
+        {
+            OwnedDolls.Add(new OwnedDoll
+            {
+                DollKey = key,
+                Identity = identity?.Trim() ?? string.Empty,
+            });
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(identity))
+            existing.Identity = identity.Trim();
+    }
+
+    public bool RemoveOwnedDoll(string dollKey)
+    {
+        var key = PairingKeyUtil.Normalize(dollKey);
+        if (!PairingKeyUtil.IsValid(key))
+            return false;
+        return OwnedDolls.RemoveAll(d =>
+            string.Equals(PairingKeyUtil.Normalize(d.DollKey), key, StringComparison.Ordinal)) > 0;
+    }
+
+    /// <summary>Updates an owned doll's key in place (identity preserved unless replaced).</summary>
+    public bool TryReplaceOwnedDollKey(string oldKeyRaw, string newKeyRaw, string? identity = null)
+    {
+        var oldKey = PairingKeyUtil.Normalize(oldKeyRaw);
+        var newKey = PairingKeyUtil.Normalize(newKeyRaw);
+        if (!PairingKeyUtil.IsValid(oldKey) || !PairingKeyUtil.IsValid(newKey))
+            return false;
+        if (string.Equals(oldKey, newKey, StringComparison.Ordinal))
+            return true;
+
+        var doll = FindOwnedDoll(oldKey);
+        if (doll is null)
+            return false;
+
+        if (FindOwnedDoll(newKey) is not null
+            && !string.Equals(PairingKeyUtil.Normalize(doll.DollKey), newKey, StringComparison.Ordinal))
+            return false;
+
+        doll.DollKey = newKey;
+        if (!string.IsNullOrWhiteSpace(identity))
+            doll.Identity = identity.Trim();
+        return true;
+    }
 
     /// <summary>Updates a partner's stored key in place (consent preserved).</summary>
     public bool TryReplacePartnerKey(string oldKeyRaw, string newKeyRaw)

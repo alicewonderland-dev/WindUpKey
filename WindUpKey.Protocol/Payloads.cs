@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Text.Json.Serialization;
 
 namespace WindUpKey.Protocol;
@@ -29,7 +30,7 @@ public sealed class WindPayload
     public double Hours { get; set; }
 }
 
-/// <summary>Partner-requested clear of remaining wind (doll must have CanUnwindMe for this key).</summary>
+/// <summary>Partner-requested clear of remaining wind (doll must have CanUnwindMe or IsOwner for this key).</summary>
 public sealed class UnwindPayload
 {
     [JsonPropertyName("requestId")]
@@ -146,6 +147,138 @@ public sealed class KeyRotatedPayload
     /// <summary>Optional new Name@World for the partner's local label only.</summary>
     [JsonPropertyName("identity")]
     public string? Identity { get; set; }
+}
+
+/// <summary>Doll designates the recipient as an owner.</summary>
+public sealed class OwnerGrantPayload
+{
+    /// <summary>Doll pairing key (set/overwritten by relay).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>New owner pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    /// <summary>Optional doll Name@World for the owner's local label.</summary>
+    [JsonPropertyName("identity")]
+    public string? Identity { get; set; }
+}
+
+/// <summary>Doll clears ownership for the recipient (unlock / unpair).</summary>
+public sealed class OwnerRevokedPayload
+{
+    /// <summary>Doll pairing key (set/overwritten by relay).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Former owner pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+}
+
+public sealed class OwnerEmoteInfo
+{
+    [JsonPropertyName("id")]
+    public ushort Id { get; set; }
+
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+}
+
+public sealed class OwnerSettingsQueryPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Owner pairing key (set/overwritten by relay).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Doll pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+}
+
+public sealed class OwnerSettingsResultPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Doll pairing key (set/overwritten by relay on outbound).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Owner pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    [JsonPropertyName("maxWindHours")]
+    public double MaxWindHours { get; set; }
+
+    [JsonPropertyName("autoGroundSit")]
+    public bool AutoGroundSit { get; set; }
+
+    [JsonPropertyName("lockEmoteId")]
+    public ushort LockEmoteId { get; set; }
+
+    [JsonPropertyName("settingsLocked")]
+    public bool SettingsLocked { get; set; }
+
+    [JsonPropertyName("emotes")]
+    public List<OwnerEmoteInfo> Emotes { get; set; } = [];
+}
+
+public sealed class OwnerSettingsUpdatePayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Owner pairing key (set/overwritten by relay).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Doll pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    [JsonPropertyName("maxWindHours")]
+    public double? MaxWindHours { get; set; }
+
+    [JsonPropertyName("autoGroundSit")]
+    public bool? AutoGroundSit { get; set; }
+
+    [JsonPropertyName("lockEmoteId")]
+    public ushort? LockEmoteId { get; set; }
+
+    [JsonPropertyName("settingsLocked")]
+    public bool? SettingsLocked { get; set; }
+}
+
+public sealed class OwnerSettingsAckPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Doll pairing key (set/overwritten by relay on outbound).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Owner pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    [JsonPropertyName("maxWindHours")]
+    public double MaxWindHours { get; set; }
+
+    [JsonPropertyName("autoGroundSit")]
+    public bool AutoGroundSit { get; set; }
+
+    [JsonPropertyName("lockEmoteId")]
+    public ushort LockEmoteId { get; set; }
+
+    [JsonPropertyName("settingsLocked")]
+    public bool SettingsLocked { get; set; }
 }
 
 public sealed class ErrorPayload

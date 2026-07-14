@@ -19,6 +19,9 @@ public sealed class CharacterProfile
     /// <summary>Outbound key-rotation announces waiting for an online peer.</summary>
     public List<PendingKeyRotation> PendingKeyRotations { get; set; } = [];
 
+    /// <summary>Dolls this character owns (from remote ownerGrant).</summary>
+    public List<OwnedDoll> OwnedDolls { get; set; } = [];
+
     public PlayerRole Role { get; set; } = PlayerRole.Unset;
 
     public bool HasCompletedInitialSetup { get; set; }
@@ -31,6 +34,9 @@ public sealed class CharacterProfile
     public bool DebugMode { get; set; }
 
     public double MaxWindHours { get; set; } = 72;
+
+    /// <summary>When true, only owners may change max hours / unwound emote settings.</summary>
+    public bool OwnerSettingsLocked { get; set; }
 
     public bool SafewordEnabled { get; set; }
 

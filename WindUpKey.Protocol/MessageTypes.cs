@@ -22,4 +22,10 @@ public static class MessageTypes
     public const string PresenceQuery = "presenceQuery";
     public const string PresenceResult = "presenceResult";
     public const string KeyRotated = "keyRotated";
+    public const string OwnerGrant = "ownerGrant";
+    public const string OwnerRevoked = "ownerRevoked";
+    public const string OwnerSettingsQuery = "ownerSettingsQuery";
+    public const string OwnerSettingsResult = "ownerSettingsResult";
+    public const string OwnerSettingsUpdate = "ownerSettingsUpdate";
+    public const string OwnerSettingsAck = "ownerSettingsAck";
 }

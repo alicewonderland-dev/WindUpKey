@@ -1,7 +1,9 @@
 # Builds WindUpKey Release and/or Testing zips for the Dalamud custom repo.
 # Output:
-#   deploy/dist/WindUpKey.zip          (Release — no debug helpers)
-#   deploy/dist/WindUpKey-Testing.zip  (Testing — unwind + self-wind)
+#   deploy/dist/WindUpKey.zip          (Release — public/default version)
+#   deploy/dist/WindUpKey-Testing.zip  (Testing — higher AssemblyVersion / Testing manifest only)
+# Debug helpers (self-wind, unwind shortcuts, etc.) are runtime-gated via Configuration.IsDebugEnabled,
+# not by the Testing compile channel.
 
 param(
     [ValidateSet('Release', 'Testing', 'Both')]

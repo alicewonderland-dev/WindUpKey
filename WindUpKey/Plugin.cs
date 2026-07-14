@@ -30,6 +30,8 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IObjectTable ObjectTable { get; private set; } = null!;
     [PluginService] internal static ITargetManager TargetManager { get; private set; } = null!;
     [PluginService] internal static ICondition Condition { get; private set; } = null!;
+    [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
+    [PluginService] internal static IUnlockState UnlockState { get; private set; } = null!;
 
     public Configuration Configuration { get; }
     private readonly WindowSystem _windowSystem = new("WindUpKey");
@@ -41,6 +43,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly IWindNotifier _notifier;
     private readonly SoundEffectService _sounds;
     private readonly RelayClient _relay;
+    private readonly MoodlesWindStatusService _moodlesStatus;
     private readonly List<IWindUpSource> _sources = [];
 
     public Plugin()
@@ -56,7 +59,7 @@ public sealed class Plugin : IDalamudPlugin
             Log.Warning(ex, "WindUpKey config migrate/save failed; continuing with defaults where possible");
         }
 
-        var commands = new GameCommandRunner(Log);
+        var commands = new GameCommandRunner(Log, DataManager, UnlockState, Configuration);
         _lockController = new LockController(GameInterop, ClientState, Condition, ObjectTable, commands, Configuration, Log);
         var lowWindMessages = new LowWindMessagesConfig(PluginInterface.GetPluginConfigDirectory(), Log);
         var soundsDir = System.IO.Path.Combine(
@@ -67,9 +70,12 @@ public sealed class Plugin : IDalamudPlugin
         _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition, _lowWind, ChatGui);
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
-        _relay = new RelayClient(Configuration, ClientState, ObjectTable, Log, ChatGui, _consent, _timer, _notifier, _sounds);
+        _relay = new RelayClient(
+            Configuration, ClientState, ObjectTable, Log, ChatGui, _consent, _timer, _notifier, _sounds, commands);
+        _moodlesStatus = new MoodlesWindStatusService(
+            PluginInterface, ClientState, ObjectTable, Configuration, _timer, lowWindMessages, Log);
 
-        _configWindow = new ConfigWindow(Configuration, _relay, _timer, TargetManager, lowWindMessages.FilePath);
+        _configWindow = new ConfigWindow(Configuration, _relay, _timer, TargetManager, commands, lowWindMessages.FilePath);
         _windowSystem.AddWindow(_configWindow);
 
         var contextMenuSource = new ContextMenuWindSource(ContextMenu, ClientState, Configuration, _relay, Log);
@@ -80,7 +86,7 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
             HelpMessage =
-                "Open Wind-Up Key config.\n/windup safeword <word> uses your safeword.\n/windup unlock clears Hardcore (confirmation required).",
+                "Open Wind-Up Key config.\n/windup safeword <word> uses your safeword.\n/windup unlock clears Hardcore and all owners (confirmation required).",
         });
 
         PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
@@ -98,7 +104,7 @@ public sealed class Plugin : IDalamudPlugin
         if (ClientState.IsLoggedIn)
         {
             _timer.OnLoggedIn();
-            _lowWind.OnLoggedIn();
+            _pendingLoginServices = true;
         }
 
         if (!Configuration.HasChosenRole)
@@ -122,6 +128,7 @@ public sealed class Plugin : IDalamudPlugin
         _sources.Clear();
 
         _relay.Dispose();
+        _moodlesStatus.Dispose();
         _sounds.Dispose();
         _lockController.Dispose();
         _windowSystem.RemoveAllWindows();
@@ -130,23 +137,46 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OpenConfig() => _configWindow.IsOpen = true;
 
+    private bool _pendingLoginServices;
+
     private void OnFrameworkUpdate(IFramework framework)
     {
+        var loading = Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.BetweenAreas]
+                      || Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.BetweenAreas51];
+
         _relay.Tick();
         _timer.SetRelaySafetyBypass(_relay.ShouldSuspendMovementLocks);
         _timer.Tick();
         _lowWind.Tick();
+
+        // Moodles reflection during zone load can crash the client; wait until stable.
+        if (!loading)
+        {
+            if (_pendingLoginServices)
+            {
+                _pendingLoginServices = false;
+                _lowWind.OnLoggedIn();
+            }
+
+            _moodlesStatus.Tick();
+        }
+
         _lockController.Tick();
     }
 
     private void OnLogin()
     {
+        _pendingLoginServices = true;
         _relay.Start();
         _timer.OnLoggedIn();
-        _lowWind.OnLoggedIn();
+        // LowWind.OnLoggedIn deferred until !BetweenAreas (see OnFrameworkUpdate).
     }
 
-    private void OnLogout(int type, int code) => _relay.Stop();
+    private void OnLogout(int type, int code)
+    {
+        _lockController.UninstallHooks();
+        _relay.Stop();
+    }
 
     private void OnCommand(string command, string args)
     {
@@ -163,9 +193,12 @@ public sealed class Plugin : IDalamudPlugin
 
         if (string.Equals(verb, "unlock", StringComparison.OrdinalIgnoreCase))
         {
-            if (!Configuration.HardcoreMode)
+            var hasOwners = Configuration.HasOwners;
+            var hardcoreOn = Configuration.HardcoreMode;
+
+            if (!hardcoreOn && !hasOwners)
             {
-                PluginChat.Print(ChatGui, "Hardcore is already off.", PluginChat.Grey);
+                PluginChat.Print(ChatGui, "Nothing to unlock (Hardcore is off and you have no owners).", PluginChat.Grey);
                 return;
             }
 
@@ -173,26 +206,38 @@ public sealed class Plugin : IDalamudPlugin
             {
                 PluginChat.Print(
                     ChatGui,
-                    "To clear Hardcore, use: /windup unlock I am a very dumb doll who got stuck in hardcore",
+                    "To clear Hardcore and/or all owners, use: /windup unlock I am a very dumb doll who got stuck in hardcore",
                     PluginChat.White);
                 return;
             }
 
-            // Confirmed clear attempt — 72h lockout blocks without the success echo.
-            if (Configuration.HardcoreLastClearedUtc is { } lastCleared
+            // Confirmed clear attempt — 72h lockout blocks Hardcore clear without the success echo.
+            if (hardcoreOn
+                && Configuration.HardcoreLastClearedUtc is { } lastCleared
                 && DateTimeOffset.UtcNow - lastCleared < HardcoreReUnlockCooldown)
             {
                 PluginChat.Print(
                     ChatGui,
                     "You are a very, very dumb doll who got stuck in hardcore... multiple times! Hardcore is locked for 3 days.",
                     PluginChat.Purple);
-                return;
+                // Still allow clearing owners during Hardcore cooldown.
+                if (!hasOwners)
+                    return;
+            }
+            else if (hardcoreOn)
+            {
+                Configuration.HardcoreMode = false;
+                Configuration.HardcoreLastClearedUtc = DateTimeOffset.UtcNow;
+                Configuration.Save();
+                PluginChat.Print(ChatGui, "Hardcore cleared. You can change role again.", PluginChat.Green);
             }
 
-            Configuration.HardcoreMode = false;
-            Configuration.HardcoreLastClearedUtc = DateTimeOffset.UtcNow;
-            Configuration.Save();
-            PluginChat.Print(ChatGui, "Hardcore cleared. You can change role again.", PluginChat.Green);
+            if (hasOwners)
+            {
+                _ = _relay.ClearAllOwnersAsync();
+                PluginChat.Print(ChatGui, "All owners cleared. Owner-locked settings are unlocked.", PluginChat.Green);
+            }
+
             return;
         }
 

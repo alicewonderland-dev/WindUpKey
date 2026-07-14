@@ -180,7 +180,7 @@ public sealed class WindTimerService
             return;
         }
 
-        if (_commands.TryExecute(_commands.GetLockEmoteCommand()))
+        if (_commands.TryExecuteLockEmote())
             _pendingLoginSit = false;
         else if (_loginSitAttempts >= 1800)
             _pendingLoginSit = false;
@@ -194,9 +194,6 @@ public sealed class WindTimerService
         return !_condition[ConditionFlag.BetweenAreas]
                && !_condition[ConditionFlag.BetweenAreas51];
     }
-
-    /// <summary>Debug: set remaining time to zero (locks the doll). Does not print remaining time.</summary>
-    public void UnwindForTesting() => ClearWind();
 
     /// <summary>
     /// Clear remaining wind (locks the doll). Used by partner unwind permission.
@@ -233,11 +230,14 @@ public sealed class WindTimerService
             return;
 
         var becameLocked = locked && !_wasLocked;
+        var becameUnlocked = !locked && _wasLocked;
         _wasLocked = locked;
         _lock.SetLocked(locked);
 
         if (becameLocked && _config.AutoGroundSit && _objects.LocalPlayer is not null)
-            _commands.Execute(_commands.GetLockEmoteCommand());
+            _commands.ExecuteLockEmote();
+        else if (becameUnlocked && _objects.LocalPlayer is not null)
+            _lock.RequestCancelPoseNudge();
     }
 
     public static string FormatRemaining(TimeSpan remaining)

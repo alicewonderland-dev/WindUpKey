@@ -17,16 +17,29 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly RelayClient _relay;
     private readonly WindTimerService _timer;
     private readonly ITargetManager _targets;
+    private readonly GameCommandRunner _commands;
     private readonly string _lowWindMessagesPath;
     private readonly Dictionary<string, string> _partnerKeyDrafts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, OwnerSettingsDraft> _ownerDrafts = new(StringComparer.Ordinal);
     private string _pairKeyDraft = string.Empty;
     private bool _hardcoreConfirm;
+    private static readonly double[] WindHourPresets = [1.0, 6.0, 12.0, 24.0];
+
+    private sealed class OwnerSettingsDraft
+    {
+        public double MaxHours = 72;
+        public bool AutoSit = true;
+        public ushort EmoteId = 52;
+        public bool Locked;
+        public bool Synced;
+    }
 
     public ConfigWindow(
         Configuration config,
         RelayClient relay,
         WindTimerService timer,
         ITargetManager targets,
+        GameCommandRunner commands,
         string lowWindMessagesPath)
         : base("Wind-Up Key###WindUpKeyConfig")
     {
@@ -34,6 +47,7 @@ public sealed class ConfigWindow : Window, IDisposable
         _relay = relay;
         _timer = timer;
         _targets = targets;
+        _commands = commands;
         _lowWindMessagesPath = lowWindMessagesPath;
         Size = new Vector2(520, 480);
         SizeCondition = ImGuiCond.FirstUseEver;
@@ -50,6 +64,9 @@ public sealed class ConfigWindow : Window, IDisposable
             DrawRoleSetup();
             return;
         }
+
+        if (_config.IsDebugEnabled)
+            _relay.SyncDebugSelfOwnership();
 
         if (!ImGui.BeginTabBar("WindUpKeySettingsTabs"))
             return;
@@ -69,6 +86,12 @@ public sealed class ConfigWindow : Window, IDisposable
         if (_config.IsDoll && ImGui.BeginTabItem("Safeword"))
         {
             DrawSafewordTab();
+            ImGui.EndTabItem();
+        }
+
+        if (_config.OwnedDolls.Count > 0 && ImGui.BeginTabItem("Owner"))
+        {
+            DrawOwnerTab();
             ImGui.EndTabItem();
         }
 
@@ -145,15 +168,35 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.TextUnformatted("Timer");
             ImGui.Separator();
 
+            if (_config.OwnerSettingsLocked)
+                ImGui.TextWrapped("An owner has locked max hours and unwound emote settings.");
+
+            var settingsLocked = _config.OwnerSettingsLocked;
+            if (settingsLocked)
+                ImGui.BeginDisabled();
+
             var maxHours = (int)Math.Round(_config.MaxWindHours);
             ImGui.SetNextItemWidth(80);
             if (ImGui.InputInt("Max wind hours", ref maxHours))
                 _config.MaxWindHours = Math.Clamp(maxHours, 1, 168);
 
             var autoSit = _config.AutoGroundSit;
-            if (ImGui.Checkbox("Auto sit/playdead when unwound", ref autoSit))
+            if (ImGui.Checkbox("Play emote when unwound", ref autoSit))
             {
                 _config.AutoGroundSit = autoSit;
+                _config.Save();
+            }
+
+            if (autoSit)
+                DrawLockEmoteCombo();
+
+            if (settingsLocked)
+                ImGui.EndDisabled();
+
+            var moodlesOn = _config.MoodlesStatusEnabled;
+            if (ImGui.Checkbox("Show wind charge as Moodle (requires Moodles)", ref moodlesOn))
+            {
+                _config.MoodlesStatusEnabled = moodlesOn;
                 _config.Save();
             }
 
@@ -216,6 +259,41 @@ public sealed class ConfigWindow : Window, IDisposable
                 _config.Save();
             }
         }
+    }
+
+    private void DrawLockEmoteCombo()
+    {
+        var emotes = _commands.GetUnlockedLoopingEmotes();
+        var selectedId = _config.EffectiveLockEmoteId;
+        var selectedInList = TryFindEmoteName(emotes, selectedId, out var selectedName);
+
+        if (!selectedInList)
+        {
+            selectedName = _commands.GetEmoteName(selectedId) ?? $"Emote #{selectedId}";
+            if (selectedId != GameCommandRunner.GroundSitEmoteId)
+            {
+                _config.LockEmoteId = GameCommandRunner.GroundSitEmoteId;
+                _config.Save();
+                selectedId = GameCommandRunner.GroundSitEmoteId;
+                selectedName = TryFindEmoteName(emotes, selectedId, out var fromList)
+                    ? fromList
+                    : (_commands.GetEmoteName(selectedId) ?? "Sit on Ground");
+            }
+        }
+
+        DrawEmoteCombo(
+            "Unwound emote",
+            emotes,
+            selectedId,
+            selectedName ?? "Sit on Ground",
+            "lock_emote",
+            id =>
+            {
+                if (id == _config.EffectiveLockEmoteId)
+                    return;
+                _config.LockEmoteId = id;
+                _config.Save();
+            });
     }
 
     private void DrawPairingTab()
@@ -351,31 +429,48 @@ public sealed class ConfigWindow : Window, IDisposable
 
                 if (_config.IsDoll)
                 {
-                    var canWind = partner.CanWindMe;
-                    if (ImGui.Checkbox("Can wind me", ref canWind))
+                    if (partner.IsOwner)
                     {
-                        partner.CanWindMe = canWind;
-                        _config.Save();
+                        ImGui.BeginDisabled();
+                        var owner = true;
+                        ImGui.Checkbox("Owner", ref owner);
+                        ImGui.EndDisabled();
+                        ImGui.TextDisabled("Owners always may wind/unwind. Clear with /windup unlock.");
+                    }
+                    else
+                    {
+                        var makeOwner = false;
+                        if (ImGui.Checkbox("Owner", ref makeOwner) && makeOwner)
+                            _ = _relay.GrantOwnerAsync(partner.PartnerKey);
                     }
 
-                    var canUnwind = partner.CanUnwindMe;
-                    if (ImGui.Checkbox("Can unwind me", ref canUnwind))
+                    if (partner.IsOwner)
                     {
-                        partner.CanUnwindMe = canUnwind;
-                        _config.Save();
+                        ImGui.TextDisabled("Can wind me / Can unwind me: always allowed for owners.");
+                    }
+                    else
+                    {
+                        var canWind = partner.CanWindMe;
+                        if (ImGui.Checkbox("Can wind me", ref canWind))
+                        {
+                            partner.CanWindMe = canWind;
+                            _config.Save();
+                        }
+
+                        var canUnwind = partner.CanUnwindMe;
+                        if (ImGui.Checkbox("Can unwind me", ref canUnwind))
+                        {
+                            partner.CanUnwindMe = canUnwind;
+                            _config.Save();
+                        }
                     }
                 }
 
                 ImGui.TextUnformatted("Wind");
                 ImGui.SameLine();
-                foreach (var hours in new[] { 1.0, 6.0, 12.0, 24.0 })
-                {
-                    var h = hours;
-                    var label = h == 1 ? "1h" : $"{h:0}h";
-                    if (ImGui.SmallButton(label))
-                        _ = _relay.SendWindByKeyAsync(partner.PartnerKey, h);
-                    ImGui.SameLine();
-                }
+                DrawWindHourButtons(
+                    hours => _ = _relay.SendWindByKeyAsync(partner.PartnerKey, hours),
+                    smallButtons: true);
 
                 if (ImGui.SmallButton("Unwind"))
                     _ = _relay.SendUnwindByKeyAsync(partner.PartnerKey);
@@ -466,6 +561,238 @@ public sealed class ConfigWindow : Window, IDisposable
         return true;
     }
 
+    private void DrawOwnerTab()
+    {
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Owned dolls");
+        ImGui.Separator();
+        ImGui.TextWrapped("Manage max wind hours and unwound emote settings for dolls that designated you as an owner.");
+
+        if (_config.OwnedDolls.Count == 0)
+        {
+            ImGui.TextDisabled("No owned dolls.");
+            return;
+        }
+
+        for (var i = 0; i < _config.OwnedDolls.Count; i++)
+        {
+            var doll = _config.OwnedDolls[i];
+            ImGui.PushID(i);
+            _relay.EnsurePresenceFresh(doll.DollKey);
+
+            var header = string.IsNullOrWhiteSpace(doll.Identity)
+                ? doll.DollKey
+                : $"{doll.Identity}  ({doll.DollKey})";
+
+            // Collapsed by default. Stable id keeps expand state per doll.
+            if (!ImGui.CollapsingHeader($"{header}###owned_{doll.DollKey}"))
+            {
+                DrawPartnerPresenceLabel(doll.DollKey);
+                ImGui.PopID();
+                continue;
+            }
+
+            DrawPartnerPresenceLabel(doll.DollKey);
+
+            if (!_ownerDrafts.TryGetValue(doll.DollKey, out var draft))
+            {
+                draft = new OwnerSettingsDraft();
+                _ownerDrafts[doll.DollKey] = draft;
+                _ = _relay.QueryOwnerSettingsAsync(doll.DollKey);
+            }
+
+            var snap = _relay.GetOwnerSettings(doll.DollKey);
+            if (snap?.LastError is { Length: > 0 } err)
+                ImGui.TextColored(new Vector4(0.9f, 0.35f, 0.35f, 1f), err);
+
+            if (ImGui.Button("Refresh settings"))
+            {
+                draft.Synced = false;
+                _ = _relay.QueryOwnerSettingsAsync(doll.DollKey);
+            }
+
+            if (snap is not { HasData: true })
+            {
+                ImGui.TextDisabled("Waiting for settings (doll must be online)…");
+                ImGui.PopID();
+                ImGui.Spacing();
+                continue;
+            }
+
+            if (!draft.Synced)
+            {
+                draft.MaxHours = snap.MaxWindHours;
+                draft.AutoSit = snap.AutoGroundSit;
+                draft.EmoteId = snap.LockEmoteId == 0 ? (ushort)52 : snap.LockEmoteId;
+                draft.Locked = snap.SettingsLocked;
+                draft.Synced = true;
+            }
+
+            ImGui.Spacing();
+            if (draft.Locked)
+                ImGui.BeginDisabled();
+
+            var maxHours = (int)Math.Round(draft.MaxHours);
+            ImGui.SetNextItemWidth(80);
+            if (ImGui.InputInt("Max wind hours", ref maxHours))
+            {
+                draft.MaxHours = Math.Clamp(maxHours, 1, 168);
+                if (!ImGui.IsItemActive())
+                    PushOwnerSettings(doll.DollKey, draft);
+            }
+
+            if (ImGui.IsItemDeactivatedAfterEdit())
+            {
+                draft.MaxHours = Math.Clamp(maxHours, 1, 168);
+                PushOwnerSettings(doll.DollKey, draft);
+            }
+
+            if (ImGui.Checkbox("Play emote when unwound", ref draft.AutoSit))
+                PushOwnerSettings(doll.DollKey, draft);
+
+            if (draft.AutoSit)
+            {
+                var emoteId = draft.EmoteId;
+                DrawOwnerEmoteCombo(snap.Emotes, ref emoteId);
+                if (emoteId != draft.EmoteId)
+                {
+                    draft.EmoteId = emoteId;
+                    PushOwnerSettings(doll.DollKey, draft);
+                }
+            }
+
+            if (draft.Locked)
+                ImGui.EndDisabled();
+
+            if (DrawOwnerLockToggle(draft.Locked))
+            {
+                draft.Locked = !draft.Locked;
+                PushOwnerSettings(doll.DollKey, draft, notify: false);
+            }
+
+            ImGui.TextDisabled("When locked, these settings cannot be changed until unlocked. Only owners can unlock.");
+
+            ImGui.PopID();
+            ImGui.Spacing();
+        }
+    }
+
+    private void PushOwnerSettings(string dollKey, OwnerSettingsDraft draft, bool notify = true)
+    {
+        _ = _relay.UpdateOwnerSettingsAsync(
+            dollKey,
+            maxWindHours: draft.MaxHours,
+            autoGroundSit: draft.AutoSit,
+            lockEmoteId: draft.EmoteId,
+            settingsLocked: draft.Locked,
+            notify: notify);
+    }
+
+    private static bool DrawOwnerLockToggle(bool locked)
+    {
+        Vector4 color, hover, active;
+        if (locked)
+        {
+            color = new Vector4(0.75f, 0.18f, 0.18f, 1f);
+            hover = new Vector4(0.88f, 0.28f, 0.28f, 1f);
+            active = new Vector4(0.60f, 0.12f, 0.12f, 1f);
+        }
+        else
+        {
+            color = new Vector4(0.25f, 0.65f, 0.30f, 1f);
+            hover = new Vector4(0.35f, 0.78f, 0.40f, 1f);
+            active = new Vector4(0.18f, 0.52f, 0.22f, 1f);
+        }
+
+        ImGui.PushStyleColor(ImGuiCol.Button, color);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, hover);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, active);
+        var clicked = ImGui.Button(locked ? "Locked" : "Unlocked");
+        ImGui.PopStyleColor(3);
+        return clicked;
+    }
+
+    private void DrawOwnerEmoteCombo(IReadOnlyList<(ushort Id, string Name)> emotes, ref ushort emoteId)
+    {
+        var selectedId = emoteId == 0 ? (ushort)52 : emoteId;
+        var selectedInList = TryFindEmoteName(emotes, selectedId, out var selectedName);
+        if (!selectedInList)
+            selectedName = _commands.GetEmoteName(selectedId) ?? $"Emote {selectedId}";
+
+        var chosen = selectedId;
+        DrawEmoteCombo(
+            "Unwound emote",
+            emotes,
+            selectedId,
+            selectedName ?? "Select emote",
+            "owner_emote",
+            id => chosen = id,
+            showMissingEntry: !selectedInList,
+            missingName: selectedName);
+        emoteId = chosen;
+    }
+
+    private static bool TryFindEmoteName(
+        IReadOnlyList<(ushort Id, string Name)> emotes,
+        ushort id,
+        out string name)
+    {
+        foreach (var (eid, n) in emotes)
+        {
+            if (eid != id)
+                continue;
+            name = n;
+            return true;
+        }
+
+        name = string.Empty;
+        return false;
+    }
+
+    private static void DrawEmoteCombo(
+        string label,
+        IReadOnlyList<(ushort Id, string Name)> emotes,
+        ushort selectedId,
+        string preview,
+        string idPrefix,
+        Action<ushort> onSelected,
+        bool showMissingEntry = false,
+        string? missingName = null)
+    {
+        ImGui.SetNextItemWidth(220);
+        if (!ImGui.BeginCombo(label, preview))
+            return;
+
+        foreach (var (id, name) in emotes)
+        {
+            var isSelected = id == selectedId;
+            if (ImGui.Selectable($"{name}##{idPrefix}_{id}", isSelected))
+                onSelected(id);
+            if (isSelected)
+                ImGui.SetItemDefaultFocus();
+        }
+
+        if (showMissingEntry && missingName is not null)
+        {
+            if (ImGui.Selectable($"{missingName}##{idPrefix}_missing", true))
+                onSelected(selectedId);
+        }
+
+        ImGui.EndCombo();
+    }
+
+    private static void DrawWindHourButtons(Action<double> onClick, bool smallButtons)
+    {
+        foreach (var hours in WindHourPresets)
+        {
+            var label = hours == 1 ? "1h" : $"{hours:0}h";
+            var clicked = smallButtons ? ImGui.SmallButton(label) : ImGui.Button(label);
+            if (clicked)
+                onClick(hours);
+            ImGui.SameLine();
+        }
+    }
+
     private void DrawSafewordTab()
     {
         ImGui.Spacing();
@@ -502,7 +829,7 @@ public sealed class ConfigWindow : Window, IDisposable
         if (_config.HardcoreMode)
         {
             ImGui.TextWrapped("Hardcore is on. You are locked as a Doll and cannot switch to Winder.");
-            ImGui.TextDisabled("Use /windup unlock to begin clearing Hardcore.");
+            ImGui.TextDisabled("Use /windup unlock to begin clearing Hardcore (also clears all owners).");
         }
         else if (!_hardcoreConfirm)
         {
@@ -557,14 +884,13 @@ public sealed class ConfigWindow : Window, IDisposable
 
         ImGui.Spacing();
         ImGui.TextUnformatted("Self wind");
-        foreach (var hours in new[] { 1.0, 6.0, 12.0, 24.0 })
-        {
-            var h = hours;
-            var label = h == 1 ? "1h" : $"{h:0}h";
-            if (ImGui.Button(label) && EnsureDebugSelfPair(canWind: true, canUnwind: false))
-                _ = _relay.SendWindByKeyAsync(_config.PairingKey, h);
-            ImGui.SameLine();
-        }
+        DrawWindHourButtons(
+            hours =>
+            {
+                if (EnsureDebugSelfPair(canWind: true, canUnwind: false))
+                    _ = _relay.SendWindByKeyAsync(_config.PairingKey, hours);
+            },
+            smallButtons: false);
 
         if (ImGui.Button("Unwind") && EnsureDebugSelfPair(canWind: false, canUnwind: true))
             _ = _relay.SendUnwindByKeyAsync(_config.PairingKey);

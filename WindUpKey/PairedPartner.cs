@@ -18,4 +18,7 @@ public sealed class PairedPartner
 
     /// <summary>Doll-side: when true, this partner may clear your wind (set time to 0).</summary>
     public bool CanUnwindMe { get; set; }
+
+    /// <summary>Doll-side: when true, this partner is an owner (always wind/unwind; remote settings).</summary>
+    public bool IsOwner { get; set; }
 }

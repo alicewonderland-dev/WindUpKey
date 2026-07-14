@@ -1,6 +1,6 @@
 # Wind-Up Key
 
-Dalamud plugin (current release **0.1.4.1**).
+Dalamud plugin (current release **0.1.5.0**).
 
 Dolls get wound via paired partners; winders use the context menu. Remaining time is shown only to the winder after a successful wind — never to the doll.
 
@@ -21,7 +21,10 @@ Dolls get wound via paired partners; winders use the context menu. Remaining tim
 
 - `/windup` opens the config window.
 - Log in so your pairing key appears, then exchange keys and pair. Each character has its own pairing and timer state.
-- Winders wind a paired doll from the target context menu. Dolls never see an exact countdown; they may get vague low-wind chat echoes.
+- Winders wind a paired doll from the target context menu (or pairing-tab hour buttons). Dolls never see an exact countdown; they may get vague low-wind chat echoes.
+- Partners with unwind permission (or an Owner) can clear remaining wind from the pairing UI.
+- Owners always may wind and unwind; a doll can grant Owner on a paired partner. Owners get an Owner tab to push remote max hours, auto-sit, and unwound emote settings.
+- Optional Moodles integration: dolls can show a coarse wind-charge Moodle (requires Moodles with remote apply enabled).
 - When a doll’s wind runs out, movement and teleport stay locked until someone winds them again.
 - If the relay host stays unreachable for about a minute while you are logged in, those locks suspend until it reconnects (the timer itself is not cleared).
 - Optional safeword: set it in config, then `/windup safeword <word>` (disabled while Hardcore is on).

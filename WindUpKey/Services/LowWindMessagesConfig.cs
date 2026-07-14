@@ -58,6 +58,26 @@ public sealed class LowWindMessagesConfig
     public const string DefaultUnwindNamed =
         "{name} pulls your key out. Your springs go slack before the key is reinserted - you can go no further without being rewound.";
 
+    public const string DefaultMoodleFullyWoundTitle = "Fully Wound";
+    public const string DefaultMoodleFullyWoundDescription =
+        "Your key is wound tight. Springs hold strong; motion comes easily.";
+
+    public const string DefaultMoodleWoundTitle = "Wound";
+    public const string DefaultMoodleWoundDescription =
+        "Your winding holds. Gears turn smoothly for now.";
+
+    public const string DefaultMoodleLowTitle = "Winding Low";
+    public const string DefaultMoodleLowDescription =
+        "Your key is running low. Seek winding soon, before your steps grow stiff.";
+
+    public const string DefaultMoodleNearlySpentTitle = "Nearly Spent";
+    public const string DefaultMoodleNearlySpentDescription =
+        "Your winding is nearly spent. Find someone to re-wind you before you seize up.";
+
+    public const string DefaultMoodleUnwoundTitle = "Unwound";
+    public const string DefaultMoodleUnwoundDescription =
+        "Your winding has run out. Your springs seize - you can go no further without being rewound.";
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -96,6 +116,27 @@ public sealed class LowWindMessagesConfig
     public string WindFullNamed => Resolve(EnsureLoaded().WindFullNamed, DefaultWindFullNamed);
     public string Unwind => Resolve(EnsureLoaded().Unwind, DefaultUnwind);
     public string UnwindNamed => Resolve(EnsureLoaded().UnwindNamed, DefaultUnwindNamed);
+
+    public string MoodleFullyWoundTitle =>
+        Resolve(EnsureLoaded().MoodleFullyWoundTitle, DefaultMoodleFullyWoundTitle);
+    public string MoodleFullyWoundDescription =>
+        Resolve(EnsureLoaded().MoodleFullyWoundDescription, DefaultMoodleFullyWoundDescription);
+    public string MoodleWoundTitle =>
+        Resolve(EnsureLoaded().MoodleWoundTitle, DefaultMoodleWoundTitle);
+    public string MoodleWoundDescription =>
+        Resolve(EnsureLoaded().MoodleWoundDescription, DefaultMoodleWoundDescription);
+    public string MoodleLowTitle =>
+        Resolve(EnsureLoaded().MoodleLowTitle, DefaultMoodleLowTitle);
+    public string MoodleLowDescription =>
+        Resolve(EnsureLoaded().MoodleLowDescription, DefaultMoodleLowDescription);
+    public string MoodleNearlySpentTitle =>
+        Resolve(EnsureLoaded().MoodleNearlySpentTitle, DefaultMoodleNearlySpentTitle);
+    public string MoodleNearlySpentDescription =>
+        Resolve(EnsureLoaded().MoodleNearlySpentDescription, DefaultMoodleNearlySpentDescription);
+    public string MoodleUnwoundTitle =>
+        Resolve(EnsureLoaded().MoodleUnwoundTitle, DefaultMoodleUnwoundTitle);
+    public string MoodleUnwoundDescription =>
+        Resolve(EnsureLoaded().MoodleUnwoundDescription, DefaultMoodleUnwoundDescription);
 
     private MessagesFile EnsureLoaded()
     {
@@ -174,14 +215,27 @@ public sealed class LowWindMessagesConfig
         public string? Unwind { get; set; }
         public string? UnwindNamed { get; set; }
 
+        public string? MoodleFullyWoundTitle { get; set; }
+        public string? MoodleFullyWoundDescription { get; set; }
+        public string? MoodleWoundTitle { get; set; }
+        public string? MoodleWoundDescription { get; set; }
+        public string? MoodleLowTitle { get; set; }
+        public string? MoodleLowDescription { get; set; }
+        public string? MoodleNearlySpentTitle { get; set; }
+        public string? MoodleNearlySpentDescription { get; set; }
+        public string? MoodleUnwoundTitle { get; set; }
+        public string? MoodleUnwoundDescription { get; set; }
+
         public static MessagesFile CreateDefaults() => new()
         {
             Comment =
-                "Doll RP chat lines. Color tags: <c:pink>text</c> (also red, orange, yellow, green, blue, purple, grey, white). " +
-                "Untagged text uses the default chat color; only [Wind-Up Key] is pink by default. " +
+                "Doll RP chat lines and Moodle titles/descriptions. Color tags (chat only): <c:pink>text</c> " +
+                "(also red, orange, yellow, green, blue, purple, grey, white). " +
+                "Untagged chat text uses the default chat color; only [Wind-Up Key] is pink by default. " +
                 "low-wind: high/mid/low/expired. " +
                 "wind-received: windLight/Medium/Deep/Full (+ *Named with {name}). " +
-                "unwind / unwindNamed: partner removed your key. Blank = built-in default.",
+                "unwind / unwindNamed: partner removed your key. " +
+                "moodle*: titles/descriptions for wind-charge Moodles (no exact time). Blank = built-in default.",
             High = DefaultHigh,
             Mid = DefaultMid,
             Low = DefaultLow,
@@ -196,6 +250,16 @@ public sealed class LowWindMessagesConfig
             WindFullNamed = DefaultWindFullNamed,
             Unwind = DefaultUnwind,
             UnwindNamed = DefaultUnwindNamed,
+            MoodleFullyWoundTitle = DefaultMoodleFullyWoundTitle,
+            MoodleFullyWoundDescription = DefaultMoodleFullyWoundDescription,
+            MoodleWoundTitle = DefaultMoodleWoundTitle,
+            MoodleWoundDescription = DefaultMoodleWoundDescription,
+            MoodleLowTitle = DefaultMoodleLowTitle,
+            MoodleLowDescription = DefaultMoodleLowDescription,
+            MoodleNearlySpentTitle = DefaultMoodleNearlySpentTitle,
+            MoodleNearlySpentDescription = DefaultMoodleNearlySpentDescription,
+            MoodleUnwoundTitle = DefaultMoodleUnwoundTitle,
+            MoodleUnwoundDescription = DefaultMoodleUnwoundDescription,
         };
     }
 }

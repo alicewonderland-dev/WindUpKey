@@ -3,6 +3,8 @@ using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Client.Game.Character;
+using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.System.Input;
 using CSGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 
@@ -12,8 +14,9 @@ namespace WindUpKey.Services;
 /// Patch-fragile hooks live only here. When locked (and not in an instance / not yet in-world):
 /// suppress walk/fly/turn input (before game processes it — keeps groundsit), hard-freeze facing,
 /// block jump (incl. spacebar), block teleport/return, and re-apply groundsit if stood up.
-/// Restrictions stay off until logged in with a LocalPlayer so title/char-select never hit the detours
-/// (char select can still expose a LocalPlayer-like object).
+/// Hooks install only while the doll is locked and in-world; they are removed when wound
+/// or on logout. After login/zone/`BetweenAreas`, wait a short settle before install; mid-world
+/// unwind installs immediately. Installing passthrough hooks at login still crashed the client.
 /// </summary>
 public sealed unsafe class LockController : IDisposable
 {
@@ -35,6 +38,10 @@ public sealed unsafe class LockController : IDisposable
     private bool _hasFrozenRotation;
     private bool _applyingFrozenRotation;
     private int _resitCooldownFrames;
+    /// <summary>Remaining RMI frames to force forward walk (cancels sit/emotes on unlock).</summary>
+    private int _nudgeForwardTicks;
+    /// <summary>Deferred <c>/sit</c> stand (must run on framework tick — wind arrives off-thread).</summary>
+    private bool _pendingSitStand;
 
     private Hook<RMIWalkDelegate>? _rmiWalkHook;
     private Hook<RMIFlyDelegate>? _rmiFlyHook;
@@ -69,6 +76,14 @@ public sealed unsafe class LockController : IDisposable
 
     private delegate bool IsInputIdDelegate(InputData* self, InputId inputId);
 
+    private bool _hooksInstalled;
+    private int _hookSettleFrames;
+    /// <summary>
+    /// True once we have been hook-eligible (logged in, LocalPlayer, not duty/BetweenAreas)
+    /// without leaving that state. Used to skip the post-zone settle on mid-world unwind.
+    /// </summary>
+    private bool _hooksWereEligible;
+
     public LockController(
         IGameInteropProvider interop,
         IClientState clientState,
@@ -85,7 +100,7 @@ public sealed unsafe class LockController : IDisposable
         _commands = commands;
         _config = config;
         _log = log;
-        TryInstallHooks();
+        // Do not install hooks here — title/char-select detours cause spin/crash even when inactive.
     }
 
     public void SetLocked(bool locked)
@@ -101,9 +116,92 @@ public sealed unsafe class LockController : IDisposable
         // Facing is captured on the next Framework Tick when RestrictionsActive.
     }
 
+    /// <summary>
+    /// After rewind: stand from sit/groundsit via <c>/sit</c> (get-up anim), or cancel other
+    /// looping emotes with one frame of forward walk. No-op when already idle.
+    /// Sit is queued for the next framework tick — inbound wind runs off-thread.
+    /// </summary>
+    public void RequestCancelPoseNudge()
+    {
+        if (_objectTable.LocalPlayer is null)
+            return;
+
+        if (ShouldStandWithSitCommand())
+        {
+            _pendingSitStand = true;
+            return;
+        }
+
+        if (!_condition[ConditionFlag.InThatPosition] && !_condition[ConditionFlag.Emoting])
+            return;
+
+        _nudgeForwardTicks = 1;
+    }
+
+    /// <summary>
+    /// Sit / groundsit (configured lock emote or detected pose) → use <c>/sit</c> for get-up anim.
+    /// </summary>
+    private unsafe bool ShouldStandWithSitCommand()
+    {
+        if (!_condition[ConditionFlag.InThatPosition])
+            return false;
+
+        var lockId = _config.EffectiveLockEmoteId;
+        if (lockId is GameCommandRunner.SitEmoteId or GameCommandRunner.GroundSitEmoteId)
+            return true;
+
+        return IsSittingOrGroundSitting();
+    }
+
+    /// <summary>
+    /// True when local player is in chair-sit or groundsit (not doze / other position loops).
+    /// </summary>
+    private unsafe bool IsSittingOrGroundSitting()
+    {
+        var player = _objectTable.LocalPlayer;
+        if (player is null)
+            return false;
+
+        try
+        {
+            var character = (Character*)player.Address;
+            var emoteId = character->EmoteController.EmoteId;
+            if (emoteId is GameCommandRunner.SitEmoteId or GameCommandRunner.GroundSitEmoteId)
+                return true;
+
+            var pose = character->EmoteController.CurrentPoseType;
+            if (pose is EmoteController.PoseType.Sit or EmoteController.PoseType.GroundSit)
+                return true;
+
+            // EmoteMode rows: 1 = groundsit, 2 = sit (doze is 3).
+            if (character->Mode == CharacterModes.InPositionLoop && character->ModeParam is 1 or 2)
+                return true;
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "WindUpKey: failed to detect sit/groundsit state");
+            return false;
+        }
+    }
+
     /// <summary>Call each framework tick to keep facing frozen and groundsit enforced while restricted.</summary>
     public void Tick()
     {
+        if (_pendingSitStand)
+        {
+            _pendingSitStand = false;
+            if (_objectTable.LocalPlayer is not null)
+                _commands.Execute("/sit");
+        }
+
+        EnsureHooksInstalled();
+
+        // Hooks are only needed while locked (or briefly for an unlock pose nudge).
+        if (_hooksInstalled && !_locked && _nudgeForwardTicks <= 0)
+            UninstallHooks();
+
         if (!RestrictionsActive)
         {
             // Recapture facing when leaving a duty while still locked.
@@ -137,6 +235,78 @@ public sealed unsafe class LockController : IDisposable
                || _condition[ConditionFlag.BoundByDuty95]
                || _condition[ConditionFlag.BetweenAreas]
                || _condition[ConditionFlag.BetweenAreas51];
+    }
+
+    /// <summary>
+    /// Install movement hooks only when the doll is locked and fully in-world
+    /// (or briefly while a cancel-pose forward nudge is pending).
+    /// Settle (~3s) only after first becoming eligible post-login/zone; mid-world unwind
+    /// and unlock nudge install immediately. Passthrough hooks around login still crash.
+    /// </summary>
+    private void EnsureHooksInstalled()
+    {
+        if (_hooksInstalled)
+            return;
+
+        var eligible = _clientState.IsLoggedIn
+                       && _objectTable.LocalPlayer is not null
+                       && !IsInInstance();
+        if (!eligible)
+        {
+            _hookSettleFrames = 0;
+            _hooksWereEligible = false;
+            return;
+        }
+
+        var needHooks = _locked || _nudgeForwardTicks > 0;
+        if (!needHooks)
+        {
+            // Still in-world while wound — keep eligibility so the next lock skips settle.
+            _hookSettleFrames = 0;
+            _hooksWereEligible = true;
+            return;
+        }
+
+        // Already in-world (or unlock nudge): install immediately.
+        if (_hooksWereEligible || (_nudgeForwardTicks > 0 && !_locked))
+        {
+            _hooksWereEligible = true;
+            InstallHooksNow();
+            return;
+        }
+
+        // Just became eligible after login / BetweenAreas / duty — wait before install.
+        _hookSettleFrames++;
+        if (_hookSettleFrames < 180) // ~3s at 60fps after leaving BetweenAreas
+            return;
+
+        _hooksWereEligible = true;
+        InstallHooksNow();
+    }
+
+    private void InstallHooksNow()
+    {
+        TryInstallHooks();
+        _hooksInstalled = _rmiWalkHook is not null
+            || _rmiFlyHook is not null
+            || _useActionHook is not null
+            || _setRotationHook is not null
+            || _isInputIdPressedHook is not null;
+    }
+
+    /// <summary>
+    /// Drop hooks when no longer needed (unlocked) or on logout.
+    /// Does not clear <see cref="_hooksWereEligible"/> — mid-world unlock must not re-settle on the next lock.
+    /// </summary>
+    public void UninstallHooks()
+    {
+        DisposeHooks();
+        _hooksInstalled = false;
+        _hookSettleFrames = 0;
+        _hasFrozenRotation = false;
+        _resitCooldownFrames = 0;
+        _nudgeForwardTicks = 0;
+        _pendingSitStand = false;
     }
 
     private void TryInstallHooks()
@@ -227,6 +397,24 @@ public sealed unsafe class LockController : IDisposable
         }
     }
 
+    private void DisposeHooks()
+    {
+        _rmiWalkHook?.Dispose();
+        _rmiWalkHook = null;
+        _rmiFlyHook?.Dispose();
+        _rmiFlyHook = null;
+        _useActionHook?.Dispose();
+        _useActionHook = null;
+        _setRotationHook?.Dispose();
+        _setRotationHook = null;
+        _isInputIdPressedHook?.Dispose();
+        _isInputIdPressedHook = null;
+        _isInputIdDownHook?.Dispose();
+        _isInputIdDownHook = null;
+        _isInputIdHeldHook?.Dispose();
+        _isInputIdHeldHook = null;
+    }
+
     private void RMIWalkDetour(
         void* self,
         float* sumLeft,
@@ -255,6 +443,15 @@ public sealed unsafe class LockController : IDisposable
         }
 
         _rmiWalkHook!.Original(self, sumLeft, sumForward, sumTurnLeft, haveBackwardOrStrafe, a6, bAdditiveUnk);
+
+        // One frame of forward input cancels sit / looping emotes after rewind.
+        if (_nudgeForwardTicks > 0)
+        {
+            *sumForward = 1f;
+            *sumLeft = 0;
+            *sumTurnLeft = 0;
+            _nudgeForwardTicks--;
+        }
     }
 
     private void RMIFlyDetour(void* self, void* flyInput)
@@ -350,7 +547,7 @@ public sealed unsafe class LockController : IDisposable
         if (_objectTable.LocalPlayer is null)
             return;
 
-        if (_commands.TryExecute(_commands.GetLockEmoteCommand()))
+        if (_commands.TryExecuteLockEmote())
             _resitCooldownFrames = 90; // ~1.5s at 60fps — avoid command spam while standing anim plays
     }
 
@@ -417,14 +614,5 @@ public sealed unsafe class LockController : IDisposable
         }
     }
 
-    public void Dispose()
-    {
-        _rmiWalkHook?.Dispose();
-        _rmiFlyHook?.Dispose();
-        _useActionHook?.Dispose();
-        _setRotationHook?.Dispose();
-        _isInputIdPressedHook?.Dispose();
-        _isInputIdDownHook?.Dispose();
-        _isInputIdHeldHook?.Dispose();
-    }
+    public void Dispose() => DisposeHooks();
 }

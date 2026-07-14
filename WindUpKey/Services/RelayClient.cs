@@ -18,6 +18,19 @@ public enum PartnerPresence
     Offline,
 }
 
+/// <summary>Cached doll settings for the Owner config tab.</summary>
+public sealed class OwnerSettingsSnapshot
+{
+    public string DollKey { get; init; } = string.Empty;
+    public double MaxWindHours { get; set; }
+    public bool AutoGroundSit { get; set; }
+    public ushort LockEmoteId { get; set; }
+    public bool SettingsLocked { get; set; }
+    public List<(ushort Id, string Name)> Emotes { get; set; } = [];
+    public string? LastError { get; set; }
+    public bool HasData { get; set; }
+}
+
 /// <summary>
 /// WebSocket client for the wind-up relay. Wind sources should call
 /// <see cref="SendWindAsync"/> or <see cref="SendWindByKeyAsync"/>.
@@ -27,6 +40,7 @@ public sealed class RelayClient : IDisposable
 {
     public const string GenericWindFailure = "Unable to wind that player.";
     public const string GenericPairFailure = "Pairing could not be completed.";
+    public const string GenericOwnerSettingsFailure = "Unable to update that doll's settings.";
     private static readonly TimeSpan PresenceThrottle = TimeSpan.FromSeconds(10);
 
     /// <summary>
@@ -44,6 +58,7 @@ public sealed class RelayClient : IDisposable
     private readonly WindTimerService _timer;
     private readonly IWindNotifier _notifier;
     private readonly SoundEffectService _sounds;
+    private readonly GameCommandRunner _commands;
 
     private ClientWebSocket? _socket;
     private CancellationTokenSource? _loopCts;
@@ -62,6 +77,12 @@ public sealed class RelayClient : IDisposable
     private readonly object _pendingWindLock = new();
     private readonly Dictionary<string, double> _pendingWindHoursByRequestId = new(StringComparer.Ordinal);
 
+    private readonly object _ownerSettingsLock = new();
+    private readonly Dictionary<string, OwnerSettingsSnapshot> _ownerSettingsByDollKey = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (string DollKey, bool NotifyOnAck)> _pendingOwnerRequests = new(StringComparer.Ordinal);
+    private readonly object _emoteCacheLock = new();
+    private List<OwnerEmoteInfo> _cachedUnlockedEmotes = [];
+
     // Written on framework thread, read by background loop — never touch Dalamud APIs off-thread.
     private volatile bool _loggedIn;
     private volatile string? _cachedIdentity;
@@ -76,7 +97,8 @@ public sealed class RelayClient : IDisposable
         ConsentService consent,
         WindTimerService timer,
         IWindNotifier notifier,
-        SoundEffectService sounds)
+        SoundEffectService sounds,
+        GameCommandRunner commands)
     {
         _config = config;
         _clientState = clientState;
@@ -87,6 +109,7 @@ public sealed class RelayClient : IDisposable
         _timer = timer;
         _notifier = notifier;
         _sounds = sounds;
+        _commands = commands;
     }
 
     public bool IsConnected => _socket?.State == WebSocketState.Open;
@@ -118,6 +141,17 @@ public sealed class RelayClient : IDisposable
 
         lock (_presenceLock)
             return _presenceByKey.TryGetValue(key, out var status) ? status : PartnerPresence.Unknown;
+    }
+
+    /// <summary>Latest owner-settings snapshot for a doll key (Owner tab).</summary>
+    public OwnerSettingsSnapshot? GetOwnerSettings(string dollKey)
+    {
+        var key = PairingKeyUtil.Normalize(dollKey);
+        if (!PairingKeyUtil.IsValid(key))
+            return null;
+
+        lock (_ownerSettingsLock)
+            return _ownerSettingsByDollKey.TryGetValue(key, out var snap) ? CloneOwnerSettings(snap) : null;
     }
 
     /// <summary>Throttled presence refresh while the pairing tab is visible.</summary>
@@ -187,14 +221,19 @@ public sealed class RelayClient : IDisposable
         {
             try
             {
-                var contentId = TryReadLocalContentId();
-                if (contentId != 0 && _config.ActivateCharacter(contentId))
+                // Skip ContentId / profile swap until LocalPlayer exists (zone load).
+                if (_objectTable.LocalPlayer is not null)
                 {
-                    ClearAllPresence();
-                    _config.Save();
-                    _log.Information("WindUpKey active character profile={ContentId}", _config.ActiveContentId);
-                    if (IsConnected)
-                        CloseSocket();
+                    var contentId = TryReadLocalContentId();
+                    if (contentId != 0 && _config.ActivateCharacter(contentId))
+                    {
+                        ClearAllPresence();
+                        ClearAllOwnerSettings();
+                        _config.Save();
+                        _log.Information("WindUpKey active character profile={ContentId}", _config.ActiveContentId);
+                        if (IsConnected)
+                            CloseSocket();
+                    }
                 }
             }
             catch (Exception ex)
@@ -208,6 +247,7 @@ public sealed class RelayClient : IDisposable
 
         if (Interlocked.Increment(ref _tickLogCounter) % 300 == 1)
         {
+            RefreshUnlockedEmoteCache();
             _log.Debug(
                 "WindUpKey Tick: running={Running} loggedIn={LoggedIn} identity={Identity} connected={Connected} status={Status}",
                 Volatile.Read(ref _running) == 1,
@@ -324,6 +364,11 @@ public sealed class RelayClient : IDisposable
             {
                 await RunLoopAsync(ct).ConfigureAwait(false);
                 _log.Debug("WindUpKey relay background loop exited normally");
+            }
+            catch (OperationCanceledException)
+            {
+                // Start() cancels any previous loop via Stop(); expected, not a crash.
+                _log.Debug("WindUpKey relay background loop canceled");
             }
             catch (Exception ex)
             {
@@ -554,6 +599,8 @@ public sealed class RelayClient : IDisposable
         if (!PairingKeyUtil.IsValid(peerKey))
             return;
 
+        var wasOwner = _config.FindPairByKey(peerKey) is { IsOwner: true };
+
         _config.PairedPartners.RemoveAll(p =>
             string.Equals(PairingKeyUtil.Normalize(p.PartnerKey), peerKey, StringComparison.Ordinal));
         _config.Save();
@@ -563,10 +610,252 @@ public sealed class RelayClient : IDisposable
         if (!IsConnected || string.Equals(peerKey, _config.PairingKey, StringComparison.Ordinal))
             return;
 
+        if (wasOwner)
+            await SendOwnerRevokedAsync(peerKey).ConfigureAwait(false);
+
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.PairRemove, new PairRemovePayload
         {
             PeerKey = peerKey,
         }), CancellationToken.None);
+    }
+
+    /// <summary>Doll designates a paired partner as an owner (idempotent).</summary>
+    public async Task GrantOwnerAsync(string partnerKey)
+    {
+        if (!_config.IsDoll)
+            return;
+
+        var peerKey = PairingKeyUtil.Normalize(partnerKey);
+        var pair = _config.FindPairByKey(peerKey);
+        if (pair is null)
+            return;
+
+        if (!pair.IsOwner)
+        {
+            pair.IsOwner = true;
+            _config.Save();
+        }
+
+        var isSelf = string.Equals(peerKey, _config.PairingKey, StringComparison.Ordinal);
+        if (isSelf)
+        {
+            // Debug self-pair: no relay round-trip — mirror ownerGrant locally so the Owner tab appears.
+            if (_config.IsDebugEnabled)
+                ApplyLocalOwnerGrant(peerKey, LocalOwnerIdentityLabel());
+            return;
+        }
+
+        if (!IsConnected)
+            return;
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerGrant, new OwnerGrantPayload
+        {
+            From = _config.PairingKey,
+            To = peerKey,
+            Identity = LocalOwnerIdentityLabel(),
+        }), CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Debug self-test: if this character owns itself but <see cref="Configuration.OwnedDolls"/> is empty
+    /// (e.g. grant before this fix), repair so the Owner tab shows.
+    /// </summary>
+    public void SyncDebugSelfOwnership()
+    {
+        if (!_config.IsDebugEnabled)
+            return;
+
+        var selfKey = PairingKeyUtil.Normalize(_config.PairingKey);
+        if (!PairingKeyUtil.IsValid(selfKey))
+            return;
+
+        var pair = _config.FindPairByKey(selfKey);
+        if (pair is not { IsOwner: true })
+            return;
+
+        if (_config.FindOwnedDoll(selfKey) is not null)
+            return;
+
+        ApplyLocalOwnerGrant(selfKey, LocalOwnerIdentityLabel());
+    }
+
+    /// <summary>Clear all owners, unlock owner settings, and notify former owners.</summary>
+    public async Task ClearAllOwnersAsync()
+    {
+        var ownerKeys = _config.PairedPartners
+            .Where(p => p.IsOwner)
+            .Select(p => PairingKeyUtil.Normalize(p.PartnerKey))
+            .Where(PairingKeyUtil.IsValid)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        foreach (var partner in _config.PairedPartners)
+            partner.IsOwner = false;
+
+        _config.OwnerSettingsLocked = false;
+
+        // Self-owner lives on this same client — clear OwnedDolls locally (no useful relay revoke).
+        var selfKey = PairingKeyUtil.Normalize(_config.PairingKey);
+        if (PairingKeyUtil.IsValid(selfKey) && ownerKeys.Contains(selfKey, StringComparer.Ordinal))
+        {
+            _config.RemoveOwnedDoll(selfKey);
+            ClearOwnerSettings(selfKey);
+        }
+
+        _config.Save();
+
+        if (!IsConnected)
+            return;
+
+        foreach (var key in ownerKeys)
+        {
+            if (string.Equals(key, selfKey, StringComparison.Ordinal))
+                continue;
+            await SendOwnerRevokedAsync(key).ConfigureAwait(false);
+        }
+    }
+
+    public async Task QueryOwnerSettingsAsync(string dollKey)
+    {
+        var key = PairingKeyUtil.Normalize(dollKey);
+        if (!PairingKeyUtil.IsValid(key))
+            return;
+
+        EnsureOwnerSettingsSlot(key);
+
+        // Debug self-owner: answer from local config (relay self-route is unreliable for UI testing).
+        if (_config.IsDebugEnabled
+            && string.Equals(key, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
+        {
+            ApplyLocalOwnerSettingsSnapshot(key);
+            return;
+        }
+
+        if (!IsConnected)
+        {
+            SetOwnerSettingsError(key, "Not connected yet. Try again in a moment.");
+            return;
+        }
+
+        var requestId = Guid.NewGuid().ToString("N");
+        RememberPendingOwnerRequest(requestId, key);
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerSettingsQuery, new OwnerSettingsQueryPayload
+        {
+            RequestId = requestId,
+            From = _config.PairingKey,
+            To = key,
+        }), CancellationToken.None).ConfigureAwait(false);
+    }
+
+    public async Task UpdateOwnerSettingsAsync(
+        string dollKey,
+        double? maxWindHours = null,
+        bool? autoGroundSit = null,
+        ushort? lockEmoteId = null,
+        bool? settingsLocked = null,
+        bool notify = true)
+    {
+        var key = PairingKeyUtil.Normalize(dollKey);
+        if (!PairingKeyUtil.IsValid(key))
+            return;
+
+        EnsureOwnerSettingsSlot(key);
+
+        if (_config.IsDebugEnabled
+            && string.Equals(key, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
+        {
+            ApplyLocalOwnerSettingsUpdate(maxWindHours, autoGroundSit, lockEmoteId, settingsLocked);
+            ApplyLocalOwnerSettingsSnapshot(key);
+            if (notify)
+                PluginChat.Print(_chat, "Doll settings updated.", PluginChat.Green);
+            return;
+        }
+
+        if (!IsConnected)
+        {
+            SetOwnerSettingsError(key, "Not connected yet. Try again in a moment.");
+            return;
+        }
+
+        var requestId = Guid.NewGuid().ToString("N");
+        RememberPendingOwnerRequest(requestId, key, notify);
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerSettingsUpdate, new OwnerSettingsUpdatePayload
+        {
+            RequestId = requestId,
+            From = _config.PairingKey,
+            To = key,
+            MaxWindHours = maxWindHours,
+            AutoGroundSit = autoGroundSit,
+            LockEmoteId = lockEmoteId,
+            SettingsLocked = settingsLocked,
+        }), CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private string? LocalOwnerIdentityLabel() =>
+        string.IsNullOrWhiteSpace(_config.LastKnownIdentity)
+            ? _cachedIdentity
+            : _config.LastKnownIdentity;
+
+    private void ApplyLocalOwnerGrant(string dollKey, string? identity)
+    {
+        _config.UpsertOwnedDoll(dollKey, identity);
+        _config.Save();
+        PluginChat.Print(_chat, "You were designated as an owner.", PluginChat.Green);
+    }
+
+    private void ApplyLocalOwnerSettingsUpdate(
+        double? maxWindHours,
+        bool? autoGroundSit,
+        ushort? lockEmoteId,
+        bool? settingsLocked)
+    {
+        if (maxWindHours is { } hours)
+            _config.MaxWindHours = Math.Clamp(Math.Round(hours), 1, 168);
+
+        if (autoGroundSit is { } autoSit)
+            _config.AutoGroundSit = autoSit;
+
+        if (lockEmoteId is { } emoteId)
+            _config.LockEmoteId = emoteId == 0 ? (ushort)52 : emoteId;
+
+        if (settingsLocked is { } locked)
+            _config.OwnerSettingsLocked = locked;
+
+        _config.Save();
+    }
+
+    private void ApplyLocalOwnerSettingsSnapshot(string dollKey)
+    {
+        RefreshUnlockedEmoteCache();
+        var emotes = SnapshotUnlockedEmotes()
+            .Select(e => (e.Id, e.Name ?? string.Empty))
+            .ToList();
+
+        lock (_ownerSettingsLock)
+        {
+            _ownerSettingsByDollKey[dollKey] = new OwnerSettingsSnapshot
+            {
+                DollKey = dollKey,
+                MaxWindHours = _config.MaxWindHours,
+                AutoGroundSit = _config.AutoGroundSit,
+                LockEmoteId = _config.EffectiveLockEmoteId,
+                SettingsLocked = _config.OwnerSettingsLocked,
+                Emotes = emotes,
+                LastError = null,
+                HasData = true,
+            };
+        }
+    }
+
+    private async Task SendOwnerRevokedAsync(string ownerKey)
+    {
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerRevoked, new OwnerRevokedPayload
+        {
+            From = _config.PairingKey,
+            To = ownerKey,
+        }), CancellationToken.None).ConfigureAwait(false);
     }
 
     private string? TryReadIdentity()
@@ -793,6 +1082,24 @@ public sealed class RelayClient : IDisposable
             case MessageTypes.KeyRotated:
                 HandleKeyRotated(envelope);
                 break;
+            case MessageTypes.OwnerGrant:
+                HandleOwnerGrant(envelope);
+                break;
+            case MessageTypes.OwnerRevoked:
+                HandleOwnerRevoked(envelope);
+                break;
+            case MessageTypes.OwnerSettingsQuery:
+                await HandleInboundOwnerSettingsQueryAsync(envelope, ct).ConfigureAwait(false);
+                break;
+            case MessageTypes.OwnerSettingsResult:
+                HandleOwnerSettingsResult(envelope);
+                break;
+            case MessageTypes.OwnerSettingsUpdate:
+                await HandleInboundOwnerSettingsUpdateAsync(envelope, ct).ConfigureAwait(false);
+                break;
+            case MessageTypes.OwnerSettingsAck:
+                HandleOwnerSettingsAck(envelope);
+                break;
             case MessageTypes.Ping:
                 await SendEnvelopeAsync(Envelope.Create(MessageTypes.Pong, new { }), ct).ConfigureAwait(false);
                 break;
@@ -930,7 +1237,21 @@ public sealed class RelayClient : IDisposable
             return;
 
         if (!string.IsNullOrEmpty(payload.RequestId))
+        {
             TryTakePendingWind(payload.RequestId, out _);
+            if (TryTakePendingOwnerRequest(payload.RequestId, out var dollKey))
+            {
+                var message = payload.Code == ErrorCodes.TargetOffline
+                    ? "That doll is offline."
+                    : payload.Code == ErrorCodes.NotAllowed
+                        ? "Not allowed to manage that doll."
+                        : GenericOwnerSettingsFailure;
+                SetOwnerSettingsError(dollKey, message);
+                _notifier.NotifyWinderError(message);
+                await Task.CompletedTask.ConfigureAwait(false);
+                return;
+            }
+        }
 
         if (payload.Code == ErrorCodes.PairKeyCollision)
         {
@@ -1007,7 +1328,10 @@ public sealed class RelayClient : IDisposable
             return;
 
         var peerKey = PairingKeyUtil.Normalize(payload.PeerKey);
+        var wasOwner = _config.FindPairByKey(peerKey) is { IsOwner: true };
         SilentRemovePartner(peerKey);
+        if (wasOwner && IsConnected)
+            _ = SendOwnerRevokedAsync(peerKey);
     }
 
     private async Task HandleInboundPresenceQueryAsync(Envelope envelope, CancellationToken ct)
@@ -1045,7 +1369,33 @@ public sealed class RelayClient : IDisposable
         if (payload.StillPaired == false)
             SilentRemovePartner(peerKey);
         else if (payload.Online)
+        {
             _ = TrySendPendingKeyRotationAsync(peerKey, CancellationToken.None);
+            _ = TryResendOwnerGrantAsync(peerKey);
+        }
+    }
+
+    private async Task TryResendOwnerGrantAsync(string partnerKey)
+    {
+        if (!_config.IsDoll || !IsConnected)
+            return;
+
+        var peer = PairingKeyUtil.Normalize(partnerKey);
+        var pair = _config.FindPairByKey(peer);
+        if (pair is not { IsOwner: true })
+            return;
+
+        if (string.Equals(peer, _config.PairingKey, StringComparison.Ordinal))
+            return;
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerGrant, new OwnerGrantPayload
+        {
+            From = _config.PairingKey,
+            To = peer,
+            Identity = string.IsNullOrWhiteSpace(_config.LastKnownIdentity)
+                ? _cachedIdentity
+                : _config.LastKnownIdentity,
+        }), CancellationToken.None).ConfigureAwait(false);
     }
 
     private void HandleKeyRotated(Envelope envelope)
@@ -1059,11 +1409,42 @@ public sealed class RelayClient : IDisposable
         if (!PairingKeyUtil.IsValid(oldKey) || !PairingKeyUtil.IsValid(newKey))
             return;
 
+        var ownedUpdated = _config.TryReplaceOwnedDollKey(oldKey, newKey, payload.Identity);
+        if (ownedUpdated)
+        {
+            lock (_ownerSettingsLock)
+            {
+                if (_ownerSettingsByDollKey.Remove(oldKey, out var snap))
+                {
+                    snap = CloneOwnerSettings(snap);
+                    // Rebuild under new key — Clone keeps DollKey; fix it.
+                    var moved = new OwnerSettingsSnapshot
+                    {
+                        DollKey = newKey,
+                        MaxWindHours = snap.MaxWindHours,
+                        AutoGroundSit = snap.AutoGroundSit,
+                        LockEmoteId = snap.LockEmoteId,
+                        SettingsLocked = snap.SettingsLocked,
+                        Emotes = snap.Emotes,
+                        LastError = snap.LastError,
+                        HasData = snap.HasData,
+                    };
+                    _ownerSettingsByDollKey[newKey] = moved;
+                }
+            }
+        }
+
         // Trust only when OldKey matches an existing pair (blocks forged rotations).
         var pair = _config.FindPairByKey(oldKey);
         if (pair is null)
         {
-            _log.Information("WindUpKey ignored keyRotated: oldKey={Old} not paired", oldKey);
+            if (ownedUpdated)
+            {
+                _config.Save();
+                _log.Information("WindUpKey owned doll key rotated {Old} -> {New}", oldKey, newKey);
+            }
+            else
+                _log.Information("WindUpKey ignored keyRotated: oldKey={Old} not paired", oldKey);
             return;
         }
 
@@ -1144,10 +1525,308 @@ public sealed class RelayClient : IDisposable
     {
         var removed = _config.PairedPartners.RemoveAll(p =>
             string.Equals(PairingKeyUtil.Normalize(p.PartnerKey), peerKey, StringComparison.Ordinal));
-        if (removed > 0)
+        var ownedRemoved = _config.RemoveOwnedDoll(peerKey);
+        if (removed > 0 || ownedRemoved)
             _config.Save();
 
         ClearPresence(peerKey);
+        ClearOwnerSettings(peerKey);
+    }
+
+    private void HandleOwnerGrant(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<OwnerGrantPayload>();
+        if (payload is null)
+            return;
+
+        var dollKey = PairingKeyUtil.Normalize(payload.From);
+        if (!PairingKeyUtil.IsValid(dollKey))
+            return;
+
+        // Accept grant only from a paired doll (or debug self).
+        var fromSelf = string.Equals(dollKey, _config.PairingKey, StringComparison.Ordinal);
+        if (!(_config.IsDebugEnabled && fromSelf) && !_consent.IsPairedByKey(dollKey))
+            return;
+
+        ApplyLocalOwnerGrant(dollKey, payload.Identity);
+    }
+
+    private void HandleOwnerRevoked(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<OwnerRevokedPayload>();
+        if (payload is null)
+            return;
+
+        var dollKey = PairingKeyUtil.Normalize(payload.From);
+        if (!PairingKeyUtil.IsValid(dollKey))
+            return;
+
+        if (!_config.RemoveOwnedDoll(dollKey))
+            return;
+
+        _config.Save();
+        ClearOwnerSettings(dollKey);
+        PluginChat.Print(_chat, "Your ownership of a doll was cleared.", PluginChat.Grey);
+    }
+
+    private async Task HandleInboundOwnerSettingsQueryAsync(Envelope envelope, CancellationToken ct)
+    {
+        var payload = envelope.GetPayload<OwnerSettingsQueryPayload>();
+        if (payload is null)
+            return;
+
+        var fromKey = PairingKeyUtil.Normalize(payload.From);
+        if (!PairingKeyUtil.IsValid(fromKey))
+            return;
+
+        if (!_consent.IsPairedByKey(fromKey))
+            return;
+
+        if (!_config.IsDoll || !_consent.IsOwnerKey(fromKey))
+        {
+            await SendEnvelopeAsync(Envelope.Create(MessageTypes.Error, new ErrorPayload
+            {
+                RequestId = payload.RequestId,
+                To = fromKey,
+                Code = ErrorCodes.NotAllowed,
+                Message = GenericOwnerSettingsFailure,
+            }), ct).ConfigureAwait(false);
+            return;
+        }
+
+        var emotes = SnapshotUnlockedEmotes();
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerSettingsResult, new OwnerSettingsResultPayload
+        {
+            RequestId = payload.RequestId,
+            From = _config.PairingKey,
+            To = fromKey,
+            MaxWindHours = _config.MaxWindHours,
+            AutoGroundSit = _config.AutoGroundSit,
+            LockEmoteId = _config.EffectiveLockEmoteId,
+            SettingsLocked = _config.OwnerSettingsLocked,
+            Emotes = emotes,
+        }), ct).ConfigureAwait(false);
+    }
+
+    private async Task HandleInboundOwnerSettingsUpdateAsync(Envelope envelope, CancellationToken ct)
+    {
+        var payload = envelope.GetPayload<OwnerSettingsUpdatePayload>();
+        if (payload is null)
+            return;
+
+        var fromKey = PairingKeyUtil.Normalize(payload.From);
+        if (!PairingKeyUtil.IsValid(fromKey))
+            return;
+
+        if (!_consent.IsPairedByKey(fromKey))
+            return;
+
+        if (!_config.IsDoll || !_consent.IsOwnerKey(fromKey))
+        {
+            await SendEnvelopeAsync(Envelope.Create(MessageTypes.Error, new ErrorPayload
+            {
+                RequestId = payload.RequestId,
+                To = fromKey,
+                Code = ErrorCodes.NotAllowed,
+                Message = GenericOwnerSettingsFailure,
+            }), ct).ConfigureAwait(false);
+            return;
+        }
+
+        if (payload.MaxWindHours is { } hours)
+            _config.MaxWindHours = Math.Clamp(Math.Round(hours), 1, 168);
+
+        if (payload.AutoGroundSit is { } autoSit)
+            _config.AutoGroundSit = autoSit;
+
+        if (payload.LockEmoteId is { } emoteId)
+            _config.LockEmoteId = emoteId == 0 ? (ushort)52 : emoteId;
+
+        if (payload.SettingsLocked is { } locked)
+            _config.OwnerSettingsLocked = locked;
+
+        _config.Save();
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerSettingsAck, new OwnerSettingsAckPayload
+        {
+            RequestId = payload.RequestId,
+            From = _config.PairingKey,
+            To = fromKey,
+            MaxWindHours = _config.MaxWindHours,
+            AutoGroundSit = _config.AutoGroundSit,
+            LockEmoteId = _config.EffectiveLockEmoteId,
+            SettingsLocked = _config.OwnerSettingsLocked,
+        }), ct).ConfigureAwait(false);
+    }
+
+    private void HandleOwnerSettingsResult(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<OwnerSettingsResultPayload>();
+        if (payload is null)
+            return;
+
+        var dollKey = PairingKeyUtil.Normalize(payload.From);
+        if (!PairingKeyUtil.IsValid(dollKey))
+            return;
+
+        TryTakePendingOwnerRequest(payload.RequestId, out _);
+
+        lock (_ownerSettingsLock)
+        {
+            _ownerSettingsByDollKey[dollKey] = new OwnerSettingsSnapshot
+            {
+                DollKey = dollKey,
+                MaxWindHours = payload.MaxWindHours,
+                AutoGroundSit = payload.AutoGroundSit,
+                LockEmoteId = payload.LockEmoteId == 0 ? (ushort)52 : payload.LockEmoteId,
+                SettingsLocked = payload.SettingsLocked,
+                Emotes = (payload.Emotes ?? [])
+                    .Select(e => (e.Id, e.Name ?? string.Empty))
+                    .ToList(),
+                LastError = null,
+                HasData = true,
+            };
+        }
+    }
+
+    private void HandleOwnerSettingsAck(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<OwnerSettingsAckPayload>();
+        if (payload is null)
+            return;
+
+        var dollKey = PairingKeyUtil.Normalize(payload.From);
+        if (!PairingKeyUtil.IsValid(dollKey))
+            return;
+
+        TryTakePendingOwnerRequest(payload.RequestId, out _, out var notify);
+
+        lock (_ownerSettingsLock)
+        {
+            if (!_ownerSettingsByDollKey.TryGetValue(dollKey, out var existing))
+            {
+                existing = new OwnerSettingsSnapshot { DollKey = dollKey };
+                _ownerSettingsByDollKey[dollKey] = existing;
+            }
+
+            existing.MaxWindHours = payload.MaxWindHours;
+            existing.AutoGroundSit = payload.AutoGroundSit;
+            existing.LockEmoteId = payload.LockEmoteId == 0 ? (ushort)52 : payload.LockEmoteId;
+            existing.SettingsLocked = payload.SettingsLocked;
+            existing.LastError = null;
+            existing.HasData = true;
+        }
+
+        if (notify)
+            PluginChat.Print(_chat, "Doll settings updated.", PluginChat.Green);
+    }
+
+    private void RememberPendingOwnerRequest(string requestId, string dollKey, bool notifyOnAck = false)
+    {
+        lock (_ownerSettingsLock)
+            _pendingOwnerRequests[requestId] = (dollKey, notifyOnAck);
+    }
+
+    private bool TryTakePendingOwnerRequest(string? requestId, out string dollKey)
+        => TryTakePendingOwnerRequest(requestId, out dollKey, out _);
+
+    private bool TryTakePendingOwnerRequest(string? requestId, out string dollKey, out bool notifyOnAck)
+    {
+        dollKey = string.Empty;
+        notifyOnAck = false;
+        if (string.IsNullOrEmpty(requestId))
+            return false;
+
+        lock (_ownerSettingsLock)
+        {
+            if (!_pendingOwnerRequests.Remove(requestId, out var pending))
+                return false;
+            dollKey = pending.DollKey;
+            notifyOnAck = pending.NotifyOnAck;
+            return true;
+        }
+    }
+
+    private void EnsureOwnerSettingsSlot(string dollKey)
+    {
+        lock (_ownerSettingsLock)
+        {
+            if (_ownerSettingsByDollKey.ContainsKey(dollKey))
+                return;
+            _ownerSettingsByDollKey[dollKey] = new OwnerSettingsSnapshot { DollKey = dollKey };
+        }
+    }
+
+    private void SetOwnerSettingsError(string dollKey, string message)
+    {
+        lock (_ownerSettingsLock)
+        {
+            if (!_ownerSettingsByDollKey.TryGetValue(dollKey, out var snap))
+            {
+                snap = new OwnerSettingsSnapshot { DollKey = dollKey };
+                _ownerSettingsByDollKey[dollKey] = snap;
+            }
+
+            snap.LastError = message;
+        }
+    }
+
+    private void ClearOwnerSettings(string dollKey)
+    {
+        lock (_ownerSettingsLock)
+            _ownerSettingsByDollKey.Remove(dollKey);
+    }
+
+    private void ClearAllOwnerSettings()
+    {
+        lock (_ownerSettingsLock)
+        {
+            _ownerSettingsByDollKey.Clear();
+            _pendingOwnerRequests.Clear();
+        }
+    }
+
+    private static OwnerSettingsSnapshot CloneOwnerSettings(OwnerSettingsSnapshot snap) =>
+        new()
+        {
+            DollKey = snap.DollKey,
+            MaxWindHours = snap.MaxWindHours,
+            AutoGroundSit = snap.AutoGroundSit,
+            LockEmoteId = snap.LockEmoteId,
+            SettingsLocked = snap.SettingsLocked,
+            Emotes = snap.Emotes.ToList(),
+            LastError = snap.LastError,
+            HasData = snap.HasData,
+        };
+
+    private void RefreshUnlockedEmoteCache()
+    {
+        if (!_loggedIn || !_config.IsDoll)
+            return;
+
+        try
+        {
+            var list = _commands.GetUnlockedLoopingEmotes()
+                .Select(e => new OwnerEmoteInfo { Id = e.Id, Name = e.Name })
+                .ToList();
+            lock (_emoteCacheLock)
+                _cachedUnlockedEmotes = list;
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "WindUpKey failed refreshing unlocked emote cache");
+        }
+    }
+
+    private List<OwnerEmoteInfo> SnapshotUnlockedEmotes()
+    {
+        lock (_emoteCacheLock)
+        {
+            return _cachedUnlockedEmotes
+                .Select(e => new OwnerEmoteInfo { Id = e.Id, Name = e.Name })
+                .ToList();
+        }
     }
 
     private void SetPresence(string peerKey, PartnerPresence status)
