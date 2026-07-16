@@ -225,14 +225,24 @@ public sealed class RelayClient : IDisposable
                 if (_objectTable.LocalPlayer is not null)
                 {
                     var contentId = TryReadLocalContentId();
-                    if (contentId != 0 && _config.ActivateCharacter(contentId))
+                    if (contentId != 0)
                     {
-                        ClearAllPresence();
-                        ClearAllOwnerSettings();
-                        _config.Save();
-                        _log.Information("WindUpKey active character profile={ContentId}", _config.ActiveContentId);
-                        if (IsConnected)
-                            CloseSocket();
+                        var switched = _config.ActivateCharacter(contentId);
+                        // Orphan lock: settings locked with no owners (e.g. owner unpaired offline).
+                        var unlocked = _config.UnlockOwnerSettingsIfNoOwners();
+                        if (switched)
+                        {
+                            ClearAllPresence();
+                            ClearAllOwnerSettings();
+                            _config.Save();
+                            _log.Information("WindUpKey active character profile={ContentId}", _config.ActiveContentId);
+                            if (IsConnected)
+                                CloseSocket();
+                        }
+                        else if (unlocked)
+                        {
+                            _config.Save();
+                        }
                     }
                 }
             }
@@ -429,6 +439,7 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
+        RememberPartnerIdentity(pair, targetIdentity);
         await SendWindByKeyAsync(pair.PartnerKey, hours).ConfigureAwait(false);
     }
 
@@ -499,6 +510,7 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
+        RememberPartnerIdentity(pair, targetIdentity);
         await SendUnwindByKeyAsync(pair.PartnerKey).ConfigureAwait(false);
     }
 
@@ -603,6 +615,7 @@ public sealed class RelayClient : IDisposable
 
         _config.PairedPartners.RemoveAll(p =>
             string.Equals(PairingKeyUtil.Normalize(p.PartnerKey), peerKey, StringComparison.Ordinal));
+        _config.UnlockOwnerSettingsIfNoOwners();
         _config.Save();
         ClearPresence(peerKey);
 
@@ -1281,6 +1294,22 @@ public sealed class RelayClient : IDisposable
             _pendingWindHoursByRequestId[requestId] = hours;
     }
 
+    /// <summary>
+    /// Fills empty local-only Name@World on a pair after a successful context-menu resolve.
+    /// </summary>
+    private void RememberPartnerIdentity(PairedPartner pair, string targetIdentity)
+    {
+        if (!string.IsNullOrWhiteSpace(pair.Identity))
+            return;
+
+        var normalized = PlayerIdentity.Normalize(targetIdentity);
+        if (string.IsNullOrEmpty(normalized))
+            return;
+
+        pair.Identity = normalized;
+        _config.Save();
+    }
+
     private bool TryTakePendingWind(string? requestId, out double hours)
     {
         hours = 0;
@@ -1526,7 +1555,8 @@ public sealed class RelayClient : IDisposable
         var removed = _config.PairedPartners.RemoveAll(p =>
             string.Equals(PairingKeyUtil.Normalize(p.PartnerKey), peerKey, StringComparison.Ordinal));
         var ownedRemoved = _config.RemoveOwnedDoll(peerKey);
-        if (removed > 0 || ownedRemoved)
+        var unlocked = _config.UnlockOwnerSettingsIfNoOwners();
+        if (removed > 0 || ownedRemoved || unlocked)
             _config.Save();
 
         ClearPresence(peerKey);

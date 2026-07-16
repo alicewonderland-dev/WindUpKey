@@ -391,9 +391,19 @@ public class Configuration : IPluginConfiguration
     public PairedPartner? FindPair(string identity)
     {
         var normalized = PlayerIdentity.Normalize(identity);
-        return PairedPartners.FirstOrDefault(p =>
+        if (string.IsNullOrEmpty(normalized))
+            return null;
+
+        var byIdentity = PairedPartners.FirstOrDefault(p =>
             !string.IsNullOrEmpty(p.Identity)
             && string.Equals(PlayerIdentity.Normalize(p.Identity), normalized, StringComparison.OrdinalIgnoreCase));
+        if (byIdentity is not null)
+            return byIdentity;
+
+        // Pairing stores PartnerKey only; Identity is optional/local. Context menu still has
+        // Name@World, so derive the pairing key and match like the rest of the wire path.
+        var derived = PairingKeyUtil.FromIdentity(normalized);
+        return FindPairByKey(derived);
     }
 
     public PairedPartner? FindPairByKey(string pairingKey)
@@ -410,6 +420,18 @@ public class Configuration : IPluginConfiguration
     public bool IsPairedByKey(string pairingKey) => FindPairByKey(pairingKey) is not null;
 
     public bool HasOwners => PairedPartners.Any(p => p.IsOwner);
+
+    /// <summary>
+    /// If owner settings are locked but no owners remain, unlock them.
+    /// Returns true when the lock was cleared (caller should Save).
+    /// </summary>
+    public bool UnlockOwnerSettingsIfNoOwners()
+    {
+        if (!OwnerSettingsLocked || HasOwners)
+            return false;
+        OwnerSettingsLocked = false;
+        return true;
+    }
 
     public OwnedDoll? FindOwnedDoll(string dollKey)
     {
