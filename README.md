@@ -1,31 +1,27 @@
 # Wind-Up Key
 
-Dalamud plugin (current release **0.1.5.0**).
+Current version: **0.2.0.0**
 
-Dolls get wound via paired partners; winders use the context menu. Remaining time is shown only to the winder after a successful wind — never to the doll.
+A (hopefully) simple plugin. Become the wind-up doll of your dreams, or assist dolls by helping to wind them.
 
-## Install
+## Installation
 
-1. In game, open **Dalamud Settings** (`/xlsettings`).
-2. Open **Experimental**.
-3. Under **Custom Plugin Repositories**, add:
+1. Open Dalamud Settings in game with `/xlsettings`.
+2. Select **Experimental** and add this URL under **Custom Plugin Repositories**:
 
-   ```
+   ```text
    https://raw.githubusercontent.com/alicewonderland-dev/WindUpKey/master/repo.json
    ```
 
-4. Save, then open the plugin installer (`/xlplugins`).
-5. Find **Wind-Up Key** and install / enable it.
+3. Save the settings and open the plugin installer with `/xlplugins`.
+4. Find **Wind-Up Key**, then install and enable it.
 
-## Usage
+## Features
 
-- `/windup` opens the config window.
-- Log in so your pairing key appears, then exchange keys and pair. Each character has its own pairing and timer state.
-- Winders wind a paired doll from the target context menu (or pairing-tab hour buttons). Dolls never see an exact countdown; they may get vague low-wind chat echoes.
-- Partners with unwind permission (or an Owner) can clear remaining wind from the pairing UI.
-- Owners always may wind and unwind; a doll can grant Owner on a paired partner. Owners get an Owner tab to push remote max hours, auto-sit, and unwound emote settings.
-- Optional Moodles integration: dolls can show a coarse wind-charge Moodle (requires Moodles with remote apply enabled).
-- When a doll’s wind runs out, movement and teleport stay locked until someone winds them again.
-- If the relay host stays unreachable for about a minute while you are logged in, those locks suspend until it reconnects (the timer itself is not cleared).
-- Optional safeword: set it in config, then `/windup safeword <word>` (disabled while Hardcore is on).
-- Hardcore locks you as a Doll. Clear it with `/windup unlock` and the confirmation phrase the plugin prints; clearing starts a 3-day re-unlock cooldown.
+- Per-character Doll and Winder roles with secure partner pairing.
+- Context-menu and remote winding with configurable consent.
+- Optional partner unwinding and owner-controlled doll settings.
+- Movement and teleport restrictions when a doll runs out of winding.
+- Automatic winding bonuses when a doll receives a duty commendation.
+- Customizable notifications.
+- Optional sound effects, Moodles integration, safeword, and Hardcore mode.

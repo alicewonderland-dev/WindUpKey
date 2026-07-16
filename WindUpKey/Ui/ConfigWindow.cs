@@ -19,6 +19,8 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly ITargetManager _targets;
     private readonly GameCommandRunner _commands;
     private readonly string _lowWindMessagesPath;
+    private readonly ChangelogWindow _changelogWindow;
+    private readonly string _pluginVersion;
     private readonly Dictionary<string, string> _partnerKeyDrafts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, OwnerSettingsDraft> _ownerDrafts = new(StringComparer.Ordinal);
     private string _pairKeyDraft = string.Empty;
@@ -40,7 +42,9 @@ public sealed class ConfigWindow : Window, IDisposable
         WindTimerService timer,
         ITargetManager targets,
         GameCommandRunner commands,
-        string lowWindMessagesPath)
+        string lowWindMessagesPath,
+        ChangelogWindow changelogWindow,
+        string pluginVersion)
         : base("Wind-Up Key###WindUpKeyConfig")
     {
         _config = config;
@@ -49,6 +53,8 @@ public sealed class ConfigWindow : Window, IDisposable
         _targets = targets;
         _commands = commands;
         _lowWindMessagesPath = lowWindMessagesPath;
+        _changelogWindow = changelogWindow;
+        _pluginVersion = pluginVersion;
         Size = new Vector2(520, 480);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
@@ -95,6 +101,13 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.EndTabItem();
         }
 
+        if (ImGui.BeginTabItem("About"))
+        {
+            DrawAboutTab();
+            ImGui.EndTabItem();
+        }
+
+        // Debug is intentionally last so conditional tabs never appear after it.
         if (_config.IsDebugEnabled && ImGui.BeginTabItem("Debug"))
         {
             DrawDebugTab();
@@ -102,6 +115,22 @@ public sealed class ConfigWindow : Window, IDisposable
         }
 
         ImGui.EndTabBar();
+    }
+
+    private void DrawAboutTab()
+    {
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Wind-Up Key");
+        ImGui.TextDisabled($"Version {_pluginVersion}");
+        ImGui.Separator();
+        ImGui.Spacing();
+        ImGui.TextWrapped(
+            "A (hopefully) simple plugin. Become the wind-up doll of your dreams, " +
+            "or assist dolls by helping to wind them.");
+        ImGui.Spacing();
+
+        if (ImGui.Button("Change Log"))
+            _changelogWindow.IsOpen = true;
     }
 
     private void DrawRoleSetup()
@@ -348,6 +377,8 @@ public sealed class ConfigWindow : Window, IDisposable
             for (var i = 0; i < _config.PairedPartners.Count; i++)
             {
                 var partner = _config.PairedPartners[i];
+                var actionPartnerKey = PairingKeyUtil.Normalize(partner.PartnerKey);
+                var hasValidPartnerKey = PairingKeyUtil.IsValid(actionPartnerKey);
                 ImGui.PushID(i);
 
                 var header = string.IsNullOrWhiteSpace(partner.Identity)
@@ -440,8 +471,8 @@ public sealed class ConfigWindow : Window, IDisposable
                     else
                     {
                         var makeOwner = false;
-                        if (ImGui.Checkbox("Owner", ref makeOwner) && makeOwner)
-                            _ = _relay.GrantOwnerAsync(partner.PartnerKey);
+                        if (ImGui.Checkbox("Owner", ref makeOwner) && makeOwner && hasValidPartnerKey)
+                            _ = _relay.GrantOwnerAsync(actionPartnerKey);
                     }
 
                     if (partner.IsOwner)
@@ -468,12 +499,14 @@ public sealed class ConfigWindow : Window, IDisposable
 
                 ImGui.TextUnformatted("Wind");
                 ImGui.SameLine();
+                if (!hasValidPartnerKey)
+                    ImGui.BeginDisabled();
                 DrawWindHourButtons(
-                    hours => _ = _relay.SendWindByKeyAsync(partner.PartnerKey, hours),
+                    hours => _ = _relay.SendWindByKeyAsync(actionPartnerKey, hours),
                     smallButtons: true);
 
                 if (ImGui.SmallButton("Unwind"))
-                    _ = _relay.SendUnwindByKeyAsync(partner.PartnerKey);
+                    _ = _relay.SendUnwindByKeyAsync(actionPartnerKey);
 
                 ImGui.Spacing();
                 var danger = new Vector4(0.75f, 0.18f, 0.18f, 1f);
@@ -485,19 +518,20 @@ public sealed class ConfigWindow : Window, IDisposable
                 if (ImGui.Button("Unpair"))
                     ImGui.OpenPopup("unpair_confirm");
                 ImGui.PopStyleColor(3);
+                if (!hasValidPartnerKey)
+                    ImGui.EndDisabled();
 
                 var popupOpen = true;
                 if (ImGui.BeginPopupModal("unpair_confirm", ref popupOpen, ImGuiWindowFlags.AlwaysAutoResize))
                 {
-                    ImGui.TextUnformatted($"Unpair {partner.PartnerKey}?");
+                    ImGui.TextUnformatted($"Unpair {actionPartnerKey}?");
                     ImGui.Spacing();
                     ImGui.PushStyleColor(ImGuiCol.Button, danger);
                     ImGui.PushStyleColor(ImGuiCol.ButtonHovered, dangerHover);
                     ImGui.PushStyleColor(ImGuiCol.ButtonActive, dangerActive);
                     if (ImGui.Button("Confirm", new Vector2(100, 0)))
                     {
-                        var key = partner.PartnerKey;
-                        _ = _relay.UnpairByKeyAsync(key);
+                        _ = _relay.UnpairByKeyAsync(actionPartnerKey);
                         ImGui.CloseCurrentPopup();
                         i--;
                     }

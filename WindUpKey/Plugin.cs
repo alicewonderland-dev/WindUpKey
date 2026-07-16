@@ -32,10 +32,13 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static ICondition Condition { get; private set; } = null!;
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
     [PluginService] internal static IUnlockState UnlockState { get; private set; } = null!;
+    [PluginService] internal static IDutyState DutyState { get; private set; } = null!;
+    [PluginService] internal static IPlayerState PlayerState { get; private set; } = null!;
 
     public Configuration Configuration { get; }
     private readonly WindowSystem _windowSystem = new("WindUpKey");
     private readonly ConfigWindow _configWindow;
+    private readonly ChangelogWindow _changelogWindow;
     private readonly LockController _lockController;
     private readonly WindTimerService _timer;
     private readonly LowWindWarningService _lowWind;
@@ -75,11 +78,24 @@ public sealed class Plugin : IDalamudPlugin
         _moodlesStatus = new MoodlesWindStatusService(
             PluginInterface, ClientState, ObjectTable, Configuration, _timer, lowWindMessages, Log);
 
-        _configWindow = new ConfigWindow(Configuration, _relay, _timer, TargetManager, commands, lowWindMessages.FilePath);
+        _changelogWindow = new ChangelogWindow();
+        _configWindow = new ConfigWindow(
+            Configuration,
+            _relay,
+            _timer,
+            TargetManager,
+            commands,
+            lowWindMessages.FilePath,
+            _changelogWindow,
+            PluginInterface.Manifest.AssemblyVersion.ToString());
         _windowSystem.AddWindow(_configWindow);
+        _windowSystem.AddWindow(_changelogWindow);
 
         var contextMenuSource = new ContextMenuWindSource(ContextMenu, ClientState, Configuration, _relay, Log);
         _sources.Add(contextMenuSource);
+        var commendationSource = new CommendationWindSource(
+            DutyState, PlayerState, Framework, ClientState, Configuration, _timer, Log);
+        _sources.Add(commendationSource);
         foreach (var source in _sources)
             source.Enable();
 

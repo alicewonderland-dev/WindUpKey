@@ -189,6 +189,23 @@ public sealed class LowWindWarningService
         _sounds.PlayWind(hoursAdded);
     }
 
+    /// <summary>After a commendation bonus that actually added time: print its dedicated vague RP line.</summary>
+    public void OnCommendationWind(int commendationsReceived)
+    {
+        if (!_config.IsDoll)
+            return;
+
+        PrintMessage(_messages.CommendationWind);
+        var soundHours = commendationsReceived switch
+        {
+            <= 1 => 1,
+            2 => 6,
+            3 => 12,
+            _ => 24,
+        };
+        _sounds.PlayWind(TimeSpan.FromHours(soundHours));
+    }
+
     private static string FormatNamed(string template, string name) =>
         template.Replace("{name}", name, StringComparison.Ordinal);
 

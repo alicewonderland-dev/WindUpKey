@@ -58,6 +58,9 @@ public sealed class LowWindMessagesConfig
     public const string DefaultUnwindNamed =
         "{name} pulls your key out. Your springs go slack before the key is reinserted - you can go no further without being rewound.";
 
+    public const string DefaultCommendationWind =
+        "On the way out, a grateful player gives your key a few welcome turns.";
+
     public const string DefaultMoodleFullyWoundTitle = "Fully Wound";
     public const string DefaultMoodleFullyWoundDescription =
         "Your key is wound tight. Springs hold strong; motion comes easily.";
@@ -116,6 +119,7 @@ public sealed class LowWindMessagesConfig
     public string WindFullNamed => Resolve(EnsureLoaded().WindFullNamed, DefaultWindFullNamed);
     public string Unwind => Resolve(EnsureLoaded().Unwind, DefaultUnwind);
     public string UnwindNamed => Resolve(EnsureLoaded().UnwindNamed, DefaultUnwindNamed);
+    public string CommendationWind => Resolve(EnsureLoaded().CommendationWind, DefaultCommendationWind);
 
     public string MoodleFullyWoundTitle =>
         Resolve(EnsureLoaded().MoodleFullyWoundTitle, DefaultMoodleFullyWoundTitle);
@@ -214,6 +218,7 @@ public sealed class LowWindMessagesConfig
         public string? WindFullNamed { get; set; }
         public string? Unwind { get; set; }
         public string? UnwindNamed { get; set; }
+        public string? CommendationWind { get; set; }
 
         public string? MoodleFullyWoundTitle { get; set; }
         public string? MoodleFullyWoundDescription { get; set; }
@@ -235,6 +240,7 @@ public sealed class LowWindMessagesConfig
                 "low-wind: high/mid/low/expired. " +
                 "wind-received: windLight/Medium/Deep/Full (+ *Named with {name}). " +
                 "unwind / unwindNamed: partner removed your key. " +
+                "commendationWind: a completed-duty commendation winds the doll. " +
                 "moodle*: titles/descriptions for wind-charge Moodles (no exact time). Blank = built-in default.",
             High = DefaultHigh,
             Mid = DefaultMid,
@@ -250,6 +256,7 @@ public sealed class LowWindMessagesConfig
             WindFullNamed = DefaultWindFullNamed,
             Unwind = DefaultUnwind,
             UnwindNamed = DefaultUnwindNamed,
+            CommendationWind = DefaultCommendationWind,
             MoodleFullyWoundTitle = DefaultMoodleFullyWoundTitle,
             MoodleFullyWoundDescription = DefaultMoodleFullyWoundDescription,
             MoodleWoundTitle = DefaultMoodleWoundTitle,

@@ -104,9 +104,34 @@ public sealed class WindTimerService
         if (hours <= 0)
             return RemainingForWinder();
 
+        var actualAdded = AddWind(TimeSpan.FromHours(hours));
+        if (actualAdded > TimeSpan.Zero)
+            _lowWind.OnWoundReceived(actualAdded, TryWinderDisplayName(winderIdentity));
+        return RemainingForWinder();
+    }
+
+    /// <summary>
+    /// Adds a commendation bonus using the normal timer cap, but emits only the dedicated
+    /// vague commendation RP echo. Returns the time actually added after applying the cap.
+    /// </summary>
+    public TimeSpan AddCommendationWind(TimeSpan bonus, int commendationsReceived)
+    {
+        var actualAdded = AddWind(bonus);
+        if (actualAdded <= TimeSpan.Zero)
+            return TimeSpan.Zero;
+
+        _lowWind.OnCommendationWind(commendationsReceived);
+        return actualAdded;
+    }
+
+    private TimeSpan AddWind(TimeSpan amount)
+    {
+        if (!_config.IsDoll || amount <= TimeSpan.Zero)
+            return TimeSpan.Zero;
+
         var now = DateTimeOffset.UtcNow;
         var currentExpiry = _config.ExpiryUtc is { } exp && exp > now ? exp : now;
-        var proposed = currentExpiry.AddHours(hours);
+        var proposed = currentExpiry.Add(amount);
         var maxExpiry = now.AddHours(Math.Max(0.01, _config.MaxWindHours));
         if (proposed > maxExpiry)
             proposed = maxExpiry;
@@ -116,9 +141,7 @@ public sealed class WindTimerService
         _config.Save();
         SyncLockState();
         _lowWind.OnWindChanged();
-        if (actualAdded > TimeSpan.Zero)
-            _lowWind.OnWoundReceived(actualAdded, TryWinderDisplayName(winderIdentity));
-        return RemainingForWinder();
+        return actualAdded;
     }
 
     private static string? TryWinderDisplayName(string? identity)
