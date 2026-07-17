@@ -12,6 +12,11 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.0.1 — Stability",
+            [
+                "Fixed a bug that could cause intermittent crashes or unexpected behavior.",
+            ]),
+        new(
             "0.2.0.0 — Commendations",
             [
                 "Dolls can gain winding time after receiving commendations from a completed duty.",

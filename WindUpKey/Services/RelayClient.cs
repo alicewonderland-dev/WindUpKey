@@ -52,6 +52,7 @@ public sealed class RelayClient : IDisposable
     private readonly Configuration _config;
     private readonly IClientState _clientState;
     private readonly IObjectTable _objectTable;
+    private readonly IFramework _framework;
     private readonly IPluginLog _log;
     private readonly IChatGui _chat;
     private readonly ConsentService _consent;
@@ -61,12 +62,15 @@ public sealed class RelayClient : IDisposable
     private readonly GameCommandRunner _commands;
 
     private ClientWebSocket? _socket;
+    private readonly object _socketGate = new();
+    private int _socketGeneration;
     private CancellationTokenSource? _loopCts;
     private Task? _loopTask;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private int _reconnectDelayMs = 1000;
     private string? _lastStatus;
     private int _running;
+    private int _loopGeneration;
     private DateTimeOffset? _unreachableSinceUtc;
 
     private readonly object _presenceLock = new();
@@ -92,6 +96,7 @@ public sealed class RelayClient : IDisposable
         Configuration config,
         IClientState clientState,
         IObjectTable objectTable,
+        IFramework framework,
         IPluginLog log,
         IChatGui chat,
         ConsentService consent,
@@ -103,6 +108,7 @@ public sealed class RelayClient : IDisposable
         _config = config;
         _clientState = clientState;
         _objectTable = objectTable;
+        _framework = framework;
         _log = log;
         _chat = chat;
         _consent = consent;
@@ -365,6 +371,7 @@ public sealed class RelayClient : IDisposable
         _reconnectDelayMs = 1000;
         _loopCts = new CancellationTokenSource();
         var ct = _loopCts.Token;
+        var generation = Interlocked.Increment(ref _loopGeneration);
         Interlocked.Exchange(ref _running, 1);
 
         _loopTask = Task.Run(async () =>
@@ -372,7 +379,7 @@ public sealed class RelayClient : IDisposable
             _log.Debug("WindUpKey relay background loop entered");
             try
             {
-                await RunLoopAsync(ct).ConfigureAwait(false);
+                await RunLoopAsync(generation, ct).ConfigureAwait(false);
                 _log.Debug("WindUpKey relay background loop exited normally");
             }
             catch (OperationCanceledException)
@@ -387,7 +394,8 @@ public sealed class RelayClient : IDisposable
             }
             finally
             {
-                Interlocked.Exchange(ref _running, 0);
+                if (Volatile.Read(ref _loopGeneration) == generation)
+                    Interlocked.Exchange(ref _running, 0);
             }
         });
     }
@@ -395,6 +403,7 @@ public sealed class RelayClient : IDisposable
     public void Stop()
     {
         _log.Debug("WindUpKey relay Stop()");
+        Interlocked.Increment(ref _loopGeneration);
         try
         {
             _loopCts?.Cancel();
@@ -903,7 +912,7 @@ public sealed class RelayClient : IDisposable
         return info is null ? 0UL : info->GetLocalContentId();
     }
 
-    private async Task RunLoopAsync(CancellationToken ct)
+    private async Task RunLoopAsync(int generation, CancellationToken ct)
     {
         _log.Debug("WindUpKey RunLoopAsync begin");
         while (!ct.IsCancellationRequested)
@@ -927,10 +936,10 @@ public sealed class RelayClient : IDisposable
             {
                 _lastStatus = "Connecting…";
                 _log.Information("WindUpKey loop: connecting as {Identity}", identity);
-                await ConnectAndRegisterAsync(ct).ConfigureAwait(false);
+                var socket = await ConnectAndRegisterAsync(generation, ct).ConfigureAwait(false);
                 _lastStatus = null;
                 _reconnectDelayMs = 1000;
-                await ReceiveLoopAsync(ct).ConfigureAwait(false);
+                await ReceiveLoopAsync(socket, ct).ConfigureAwait(false);
                 _lastStatus = "Disconnected. Reconnecting…";
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -943,7 +952,7 @@ public sealed class RelayClient : IDisposable
                 _log.Warning(ex, "WindUpKey relay connection issue");
             }
 
-            CloseSocket();
+            CloseSocketForGeneration(generation);
             try
             {
                 await Task.Delay(_reconnectDelayMs, ct).ConfigureAwait(false);
@@ -959,19 +968,22 @@ public sealed class RelayClient : IDisposable
         _log.Debug("WindUpKey RunLoopAsync end");
     }
 
-    private async Task ConnectAndRegisterAsync(CancellationToken ct)
+    private async Task<ClientWebSocket> ConnectAndRegisterAsync(int generation, CancellationToken ct)
     {
-        CloseSocket();
-        _config.ApplyRelayDefaults();
+        CloseSocketForGeneration(generation);
 
-        // Identity is required by RunLoopAsync before connect; derive without Save (off framework thread).
-        var identity = _cachedIdentity;
-        if (identity is not null)
+        // Keep even the connection-preparation config writes on the framework thread.
+        await _framework.RunOnTick(() =>
         {
+            _config.ApplyRelayDefaults();
+            var identity = _cachedIdentity;
+            if (identity is null)
+                return;
+
             var derived = PairingKeyUtil.FromIdentity(identity);
             if (PairingKeyUtil.IsValid(derived))
                 _config.PairingKey = derived;
-        }
+        }, cancellationToken: ct).ConfigureAwait(false);
 
         if (!PairingKeyUtil.IsValid(_config.PairingKey))
             throw new InvalidOperationException("Pairing key unavailable before register.");
@@ -982,11 +994,34 @@ public sealed class RelayClient : IDisposable
         _log.Information("WindUpKey connect attempt host={Host}", safeHost);
 
         var uri = BuildUri(baseUrl);
-        _socket = new ClientWebSocket();
+        var socket = new ClientWebSocket();
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
-        await _socket.ConnectAsync(uri, timeoutCts.Token).ConfigureAwait(false);
-        _log.Information("WindUpKey WebSocket open host={Host} state={State}", safeHost, _socket.State);
+        await socket.ConnectAsync(uri, timeoutCts.Token).ConfigureAwait(false);
+
+        if (Volatile.Read(ref _loopGeneration) != generation || ct.IsCancellationRequested)
+        {
+            socket.Dispose();
+            ct.ThrowIfCancellationRequested();
+            throw new OperationCanceledException("Relay loop was superseded.", ct);
+        }
+
+        ClientWebSocket? replaced;
+        lock (_socketGate)
+        {
+            if (Volatile.Read(ref _loopGeneration) != generation || ct.IsCancellationRequested)
+            {
+                socket.Dispose();
+                ct.ThrowIfCancellationRequested();
+                throw new OperationCanceledException("Relay loop was superseded.", ct);
+            }
+
+            replaced = _socket;
+            _socket = socket;
+            _socketGeneration = generation;
+        }
+        replaced?.Dispose();
+        _log.Information("WindUpKey WebSocket open host={Host} state={State}", safeHost, socket.State);
 
         var register = new RegisterPayload
         {
@@ -1010,6 +1045,8 @@ public sealed class RelayClient : IDisposable
         // Presence-driven keyRotated flush (send when peer answers online).
         foreach (var pending in _config.PendingKeyRotations.ToArray())
             await RequestPresenceAsync(pending.PartnerKey).ConfigureAwait(false);
+
+        return socket;
     }
 
     private static string SafeHost(string baseUrl)
@@ -1037,12 +1074,12 @@ public sealed class RelayClient : IDisposable
         return new Uri(url);
     }
 
-    private async Task ReceiveLoopAsync(CancellationToken ct)
+    private async Task ReceiveLoopAsync(ClientWebSocket socket, CancellationToken ct)
     {
         var buffer = new byte[16 * 1024];
-        while (_socket is { State: WebSocketState.Open } && !ct.IsCancellationRequested)
+        while (socket.State == WebSocketState.Open && !ct.IsCancellationRequested)
         {
-            var result = await _socket.ReceiveAsync(buffer, ct).ConfigureAwait(false);
+            var result = await socket.ReceiveAsync(buffer, ct).ConfigureAwait(false);
             if (result.MessageType == WebSocketMessageType.Close)
                 break;
 
@@ -1052,11 +1089,16 @@ public sealed class RelayClient : IDisposable
             var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
             while (!result.EndOfMessage)
             {
-                result = await _socket.ReceiveAsync(buffer, ct).ConfigureAwait(false);
+                result = await socket.ReceiveAsync(buffer, ct).ConfigureAwait(false);
                 json += Encoding.UTF8.GetString(buffer, 0, result.Count);
             }
 
-            await HandleMessageAsync(json, ct).ConfigureAwait(false);
+            // Socket IO stays on this worker; all plugin/config/game state is applied on
+            // Dalamud's framework thread so lock hooks cannot change at an unsafe time.
+            await _framework.RunOnTick(
+                    () => HandleMessageAsync(json, ct),
+                    cancellationToken: ct)
+                .ConfigureAwait(false);
         }
     }
 
@@ -1885,14 +1927,18 @@ public sealed class RelayClient : IDisposable
 
     private async Task SendEnvelopeAsync(Envelope envelope, CancellationToken ct)
     {
-        if (_socket is not { State: WebSocketState.Open })
+        ClientWebSocket? socket;
+        lock (_socketGate)
+            socket = _socket;
+
+        if (socket is not { State: WebSocketState.Open })
             return;
 
         var bytes = Encoding.UTF8.GetBytes(envelope.Serialize());
         await _sendLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await _socket.SendAsync(bytes, WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+            await socket.SendAsync(bytes, WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -1902,16 +1948,45 @@ public sealed class RelayClient : IDisposable
 
     private void CloseSocket()
     {
+        ClientWebSocket? socket;
+        lock (_socketGate)
+        {
+            socket = _socket;
+            _socket = null;
+            _socketGeneration = 0;
+        }
+
         try
         {
-            _socket?.Dispose();
+            socket?.Dispose();
         }
         catch (Exception ex)
         {
             _log.Debug(ex, "WindUpKey CloseSocket");
         }
+    }
 
-        _socket = null;
+    private void CloseSocketForGeneration(int generation)
+    {
+        ClientWebSocket? socket;
+        lock (_socketGate)
+        {
+            if (_socketGeneration != generation)
+                return;
+
+            socket = _socket;
+            _socket = null;
+            _socketGeneration = 0;
+        }
+
+        try
+        {
+            socket?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "WindUpKey CloseSocket generation={Generation}", generation);
+        }
     }
 
     public void Dispose()
