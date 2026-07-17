@@ -89,6 +89,26 @@ public sealed class PairRemovePayload
     public string PeerKey { get; set; } = string.Empty;
 }
 
+/// <summary>Relay pushes established peer keys after register (consent stays client-local).</summary>
+public sealed class PairSyncPayload
+{
+    [JsonPropertyName("peerKeys")]
+    public List<string> PeerKeys { get; set; } = [];
+}
+
+/// <summary>Offline store-and-forward status for a requestId-bearing message.</summary>
+public sealed class DeliveryStatusPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = string.Empty;
+}
+
 public sealed class PresenceQueryPayload
 {
     [JsonPropertyName("requestId")]
@@ -125,8 +145,10 @@ public sealed class PresenceResultPayload
 }
 
 /// <summary>
-/// Announces that the sender's pairing key changed after a Name@World change.
-/// Recipients trust only when <see cref="OldKey"/> matches an existing pair.
+/// Legacy: announces that the sender's pairing key changed.
+/// Modern clients keep a frozen pairing key across rename/world transfer; this remains
+/// for manual/legacy rotation. Recipients trust only when <see cref="OldKey"/> matches an existing pair.
+/// Optional <see cref="Identity"/> is for the partner's local label only and must not be stored by the relay.
 /// </summary>
 public sealed class KeyRotatedPayload
 {
@@ -306,6 +328,7 @@ public static class ErrorCodes
     public const string NotRegistered = "not_registered";
     public const string PairFailed = "pair_failed";
     public const string PairKeyCollision = "pair_key_collision";
+    public const string RateLimited = "rate_limited";
 }
 
 /// <summary>Helpers for Name@World identity strings (clientside only).</summary>

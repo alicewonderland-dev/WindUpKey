@@ -1,6 +1,6 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.2.0.1</Version>
+    <Version>0.2.0.2</Version>
     <Description></Description>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -9,7 +9,7 @@
 
   <!-- Testing channel must be a higher version than Release for Dalamud to serve it. -->
   <PropertyGroup Condition="'$(Configuration)' == 'Testing'">
-    <Version>0.2.0.2</Version>
+    <Version>0.2.0.3</Version>
   </PropertyGroup>
 
   <ItemGroup>

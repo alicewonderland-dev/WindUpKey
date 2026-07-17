@@ -28,4 +28,10 @@ public static class MessageTypes
     public const string OwnerSettingsResult = "ownerSettingsResult";
     public const string OwnerSettingsUpdate = "ownerSettingsUpdate";
     public const string OwnerSettingsAck = "ownerSettingsAck";
+    /// <summary>Relay → client: established peer pairing keys (no consent flags).</summary>
+    public const string PairSync = "pairSync";
+    /// <summary>Relay → sender: offline message accepted into durable outbox.</summary>
+    public const string DeliveryQueued = "deliveryQueued";
+    /// <summary>Relay → sender: previously queued message handed to the target socket.</summary>
+    public const string DeliveryDelivered = "deliveryDelivered";
 }

@@ -22,6 +22,28 @@ if (-not (Test-Path (Join-Path $repoRoot "WindUpKey.sln"))) {
 
 $project = Join-Path $repoRoot "WindUpKey\WindUpKey.csproj"
 $distDir = Join-Path $repoRoot "deploy\dist"
+
+function Clear-GeneratedReadOnly {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    & attrib.exe -R $Path *> $null
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        & attrib.exe -R (Join-Path $Path '*') /S /D *> $null
+    }
+}
+
+# Generated output can retain Windows' ReadOnly attribute after a build or copy.
+# Clear it before MSBuild and DalamudPackager update or replace those files.
+Clear-GeneratedReadOnly (Join-Path $repoRoot "WindUpKey\bin")
+Clear-GeneratedReadOnly (Join-Path $repoRoot "WindUpKey\obj")
+Clear-GeneratedReadOnly $distDir
 New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
 function Pack-Channel {
@@ -58,7 +80,10 @@ function Pack-Channel {
         throw "Missing build output: $iconPath"
     }
 
-    if (Test-Path $stageDir) { Remove-Item $stageDir -Recurse -Force }
+    if (Test-Path $stageDir) {
+        Clear-GeneratedReadOnly $stageDir
+        Remove-Item $stageDir -Recurse -Force
+    }
     New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
     foreach ($name in $required) {
@@ -82,7 +107,10 @@ function Pack-Channel {
     New-Item -ItemType Directory -Path $stageSounds -Force | Out-Null
     Copy-Item (Join-Path $soundsSrc "*.wav") $stageSounds -Force
 
-    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+    if (Test-Path $zipPath) {
+        Clear-GeneratedReadOnly $zipPath
+        Remove-Item $zipPath -Force
+    }
     Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $zipPath -Force
     Remove-Item $stageDir -Recurse -Force
 

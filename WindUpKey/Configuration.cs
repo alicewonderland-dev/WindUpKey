@@ -180,7 +180,7 @@ public class Configuration : IPluginConfiguration
         if (Version < 5)
             Version = 5;
 
-        // Pairing key is derived from Name@World on login; do not invent a random one here.
+        // Pairing key is seeded from Name@World only when empty; do not invent a random one here.
         if (!PairingKeyUtil.IsValid(PairingKey))
             PairingKey = string.Empty;
 

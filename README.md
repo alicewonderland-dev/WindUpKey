@@ -1,6 +1,6 @@
 # Wind-Up Key
 
-Current version: **0.2.0.1**
+Current version: **0.2.0.2**
 
 A (hopefully) simple plugin. Become the wind-up doll of your dreams, or assist dolls by helping to wind them.
 
@@ -18,8 +18,8 @@ A (hopefully) simple plugin. Become the wind-up doll of your dreams, or assist d
 
 ## Features
 
-- Per-character Doll and Winder roles with secure partner pairing.
-- Context-menu and remote winding with configurable consent.
+- Per-character Doll and Winder roles with secure partner pairing (pairing keys survive rename/world transfer while local config remains).
+- Context-menu and remote winding with configurable consent; offline winds queue on the relay until the doll is back.
 - Optional partner unwinding and owner-controlled doll settings.
 - Movement and teleport restrictions when a doll runs out of winding.
 - Automatic winding bonuses when a doll receives a duty commendation.

@@ -16,8 +16,9 @@ public static class PairingKeyUtil
     private const string Pepper = "WindUpKey/pairing/v1";
 
     /// <summary>
-    /// Stable 8-character key derived from Name@World. Same identity always yields the same key;
-    /// the identity cannot be recovered from the key.
+    /// One-way 8-character key derived from Name@World (identity cannot be recovered).
+    /// Used only to seed <c>PairingKey</c> when a profile has no valid key (first login or
+    /// config wipe). After seeding, the stored key must not change on rename/world transfer.
     /// </summary>
     public static string FromIdentity(string nameAtWorld)
     {

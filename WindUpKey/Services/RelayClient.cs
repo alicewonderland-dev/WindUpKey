@@ -296,7 +296,9 @@ public sealed class RelayClient : IDisposable
     }
 
     /// <summary>
-    /// Keeps <see cref="Configuration.PairingKey"/> equal to the identity-derived code.
+    /// Seeds <see cref="Configuration.PairingKey"/> from Name@World only when empty/invalid.
+    /// Rename and world transfer update <see cref="Configuration.LastKnownIdentity"/> only —
+    /// the stored pairing key stays put so partners keep routing.
     /// Safe to call on the framework thread (may Save).
     /// </summary>
     private void SyncPairingKeyFromIdentity()
@@ -304,62 +306,22 @@ public sealed class RelayClient : IDisposable
         if (_cachedIdentity is null)
             return;
 
+        _config.LastKnownIdentity = _cachedIdentity;
+
+        if (PairingKeyUtil.IsValid(_config.PairingKey))
+            return;
+
         var derived = PairingKeyUtil.FromIdentity(_cachedIdentity);
         if (!PairingKeyUtil.IsValid(derived))
             return;
 
-        _config.LastKnownIdentity = _cachedIdentity;
-
-        if (string.Equals(_config.PairingKey, derived, StringComparison.Ordinal))
-            return;
-
-        var previous = _config.PairingKey;
         _config.PairingKey = derived;
-
-        if (PairingKeyUtil.IsValid(previous))
-        {
-            MigrateSelfPairKey(previous, derived);
-            EnqueueRotationsForPartners(previous, derived, _cachedIdentity);
-            PluginChat.Print(
-                _chat,
-                $"Pairing key changed to {derived} (was {previous}). " +
-                "Paired partners will be notified when online; they can also update your key manually.",
-                PluginChat.Yellow);
-        }
-
         _config.Save();
-        _log.Information(
-            "WindUpKey pairing key synced from identity (was {Previous})",
-            PairingKeyUtil.IsValid(previous) ? previous : "(none)");
+        _log.Information("WindUpKey pairing key seeded from identity");
 
-        // Re-register if we were already online under a different key.
+        // Re-register if we connected before the key was available.
         if (IsConnected)
             CloseSocket();
-    }
-
-    private void MigrateSelfPairKey(string oldKey, string newKey)
-    {
-        var selfPair = _config.FindPairByKey(oldKey);
-        if (selfPair is null)
-            return;
-        if (string.Equals(PairingKeyUtil.Normalize(selfPair.PartnerKey), newKey, StringComparison.Ordinal))
-            return;
-        selfPair.PartnerKey = newKey;
-    }
-
-    private void EnqueueRotationsForPartners(string oldKey, string newKey, string identity)
-    {
-        foreach (var partner in _config.PairedPartners.ToArray())
-        {
-            var peer = PairingKeyUtil.Normalize(partner.PartnerKey);
-            if (!PairingKeyUtil.IsValid(peer))
-                continue;
-            if (string.Equals(peer, newKey, StringComparison.Ordinal)
-                || string.Equals(peer, oldKey, StringComparison.Ordinal))
-                continue;
-
-            _config.EnqueueKeyRotation(peer, oldKey, newKey, identity);
-        }
     }
 
     public void Start()
@@ -980,9 +942,16 @@ public sealed class RelayClient : IDisposable
             if (identity is null)
                 return;
 
+            _config.LastKnownIdentity = identity;
+            if (PairingKeyUtil.IsValid(_config.PairingKey))
+                return;
+
             var derived = PairingKeyUtil.FromIdentity(identity);
             if (PairingKeyUtil.IsValid(derived))
+            {
                 _config.PairingKey = derived;
+                _config.Save();
+            }
         }, cancellationToken: ct).ConfigureAwait(false);
 
         if (!PairingKeyUtil.IsValid(_config.PairingKey))
@@ -1039,6 +1008,25 @@ public sealed class RelayClient : IDisposable
                 RequestId = Guid.NewGuid().ToString("N"),
                 MyKey = _config.PairingKey,
                 TheirKey = key,
+            }), ct).ConfigureAwait(false);
+        }
+
+        // Re-assert established partners so the relay can rebuild durable pairs after upgrades/restarts.
+        foreach (var partner in _config.PairedPartners.ToArray())
+        {
+            var peer = PairingKeyUtil.Normalize(partner.PartnerKey);
+            if (!PairingKeyUtil.IsValid(peer))
+                continue;
+            if (string.Equals(peer, _config.PairingKey, StringComparison.Ordinal))
+                continue;
+            if (_config.PendingPartnerKeys.Contains(peer, StringComparer.Ordinal))
+                continue;
+
+            await SendEnvelopeAsync(Envelope.Create(MessageTypes.PairSubmit, new PairSubmitPayload
+            {
+                RequestId = Guid.NewGuid().ToString("N"),
+                MyKey = _config.PairingKey,
+                TheirKey = peer,
             }), ct).ConfigureAwait(false);
         }
 
@@ -1125,8 +1113,17 @@ public sealed class RelayClient : IDisposable
             case MessageTypes.PairEstablished:
                 HandlePairEstablished(envelope);
                 break;
+            case MessageTypes.PairSync:
+                HandlePairSync(envelope);
+                break;
             case MessageTypes.PairRemove:
                 HandlePairRemove(envelope);
+                break;
+            case MessageTypes.DeliveryQueued:
+                HandleDeliveryQueued(envelope);
+                break;
+            case MessageTypes.DeliveryDelivered:
+                HandleDeliveryDelivered(envelope);
                 break;
             case MessageTypes.PresenceQuery:
                 await HandleInboundPresenceQueryAsync(envelope, ct).ConfigureAwait(false);
@@ -1310,9 +1307,15 @@ public sealed class RelayClient : IDisposable
 
         if (payload.Code == ErrorCodes.PairKeyCollision)
         {
-            // Key is identity-derived and must stay stable; another session (or stale socket) holds it.
+            // Key is stable per character profile; another session (or stale socket) holds it.
             _log.Warning("WindUpKey pairing key in use — reconnecting without changing key");
             CloseSocket();
+            return;
+        }
+
+        if (payload.Code == ErrorCodes.RateLimited)
+        {
+            _notifier.NotifyWinderError("Relay is busy; try again shortly.");
             return;
         }
 
@@ -1372,12 +1375,40 @@ public sealed class RelayClient : IDisposable
         if (payload is null)
             return;
 
-        var peerKey = PairingKeyUtil.Normalize(payload.PeerKey);
-        if (!PairingKeyUtil.IsValid(peerKey))
+        EnsurePeerPair(PairingKeyUtil.Normalize(payload.PeerKey));
+    }
+
+    private void HandlePairSync(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<PairSyncPayload>();
+        if (payload?.PeerKeys is null || payload.PeerKeys.Count == 0)
             return;
 
+        var added = false;
+        foreach (var raw in payload.PeerKeys)
+        {
+            if (EnsurePeerPair(PairingKeyUtil.Normalize(raw), save: false))
+                added = true;
+        }
+
+        if (added)
+            _config.Save();
+    }
+
+    /// <summary>
+    /// Restores a peer key entry without consent flags (doll must re-enable wind/unwind).
+    /// </summary>
+    private bool EnsurePeerPair(string peerKey, bool save = true)
+    {
+        if (!PairingKeyUtil.IsValid(peerKey))
+            return false;
+
+        if (string.Equals(peerKey, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
+            return false;
+
         var existing = _config.FindPairByKey(peerKey);
-        if (existing is null)
+        var created = existing is null;
+        if (created)
         {
             _config.PairedPartners.Add(new PairedPartner
             {
@@ -1385,11 +1416,41 @@ public sealed class RelayClient : IDisposable
                 PartnerKey = peerKey,
                 CanWindMe = false,
             });
+            _log.Information("WindUpKey paired with key={Key}", peerKey);
         }
 
-        _config.PendingPartnerKeys.RemoveAll(k => string.Equals(k, peerKey, StringComparison.Ordinal));
-        _config.Save();
-        _log.Information("WindUpKey paired with key={Key}", peerKey);
+        var pendingCleared = _config.PendingPartnerKeys.RemoveAll(k =>
+            string.Equals(k, peerKey, StringComparison.Ordinal)) > 0;
+        if (save && (created || pendingCleared))
+            _config.Save();
+        return created || pendingCleared;
+    }
+
+    private void HandleDeliveryQueued(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<DeliveryStatusPayload>();
+        if (payload is null || string.IsNullOrEmpty(payload.RequestId))
+            return;
+
+        // Keep pending wind/owner requestIds until windResult / settings result / error.
+        _log.Information(
+            "WindUpKey delivery queued type={Type} requestId={RequestId} to={To}",
+            payload.Type,
+            payload.RequestId,
+            payload.To);
+    }
+
+    private void HandleDeliveryDelivered(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<DeliveryStatusPayload>();
+        if (payload is null || string.IsNullOrEmpty(payload.RequestId))
+            return;
+
+        _log.Debug(
+            "WindUpKey delivery delivered type={Type} requestId={RequestId} to={To}",
+            payload.Type,
+            payload.RequestId,
+            payload.To);
     }
 
     private void HandlePairRemove(Envelope envelope)
