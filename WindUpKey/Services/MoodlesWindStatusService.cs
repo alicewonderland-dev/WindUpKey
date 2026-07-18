@@ -75,6 +75,7 @@ public sealed class MoodlesWindStatusService : IDisposable
     private MethodInfo? _prepareToApply;
     private MethodInfo? _addOrUpdate;
     private MethodInfo? _cancelGuid;
+    private MethodInfo? _containsGuid;
 
     public MoodlesWindStatusService(
         IDalamudPluginInterface pi,
@@ -143,6 +144,44 @@ public sealed class MoodlesWindStatusService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Call once login has left BetweenAreas. Re-applies wind charge moodle if Moodles
+    /// does not already have the desired status (e.g. after logout wiped local moodles).
+    /// </summary>
+    public void OnLoggedIn()
+    {
+        if (_disposed)
+            return;
+
+        try
+        {
+            SyncDesiredState(forceApply: true, skipIfPresent: true);
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "Moodles wind status login apply failed");
+        }
+    }
+
+    /// <summary>
+    /// Call after leaving BetweenAreas. Re-applies the desired status because Moodles can
+    /// retain stale manager state while no longer displaying the status after a transition.
+    /// </summary>
+    public void OnAreaTransition()
+    {
+        if (_disposed)
+            return;
+
+        try
+        {
+            SyncDesiredState(forceApply: true);
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "Moodles wind status area transition apply failed");
+        }
+    }
+
     private void OnMoodlesReady()
     {
         _loggedUnavailable = false;
@@ -156,6 +195,7 @@ public sealed class MoodlesWindStatusService : IDisposable
         _moodlesAvailable = false;
         _appliedLevel = null;
         _addOrUpdate = null;
+        _containsGuid = null;
     }
 
     private void TryProbeMoodles()
@@ -186,7 +226,7 @@ public sealed class MoodlesWindStatusService : IDisposable
         }
     }
 
-    private void SyncDesiredState(bool forceApply = false)
+    private void SyncDesiredState(bool forceApply = false, bool skipIfPresent = false)
     {
         if (!_moodlesAvailable)
             TryProbeMoodles();
@@ -205,6 +245,12 @@ public sealed class MoodlesWindStatusService : IDisposable
         }
 
         var level = ResolveLevel(_timer.RemainingForWinder());
+        if (skipIfPresent && TryContainsStatus(player, LevelMeta(level).Guid))
+        {
+            _appliedLevel = level;
+            return;
+        }
+
         if (!forceApply && _appliedLevel == level)
             return;
 
@@ -231,6 +277,7 @@ public sealed class MoodlesWindStatusService : IDisposable
             if (_moodlesAsm is null)
             {
                 _addOrUpdate = null;
+                _containsGuid = null;
                 return;
             }
 
@@ -247,6 +294,7 @@ public sealed class MoodlesWindStatusService : IDisposable
                 || prepareOptionsType is null)
             {
                 _addOrUpdate = null;
+                _containsGuid = null;
                 return;
             }
 
@@ -279,10 +327,18 @@ public sealed class MoodlesWindStatusService : IDisposable
                     && m.GetParameters() is { Length: 2 } p
                     && p[0].ParameterType == typeof(Guid)
                     && p[1].ParameterType == typeof(bool));
+
+            _containsGuid = managerType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(m =>
+                    m.Name == "ContainsStatus"
+                    && m.GetParameters() is { Length: 1 } p
+                    && p[0].ParameterType == typeof(Guid)
+                    && m.ReturnType == typeof(bool));
         }
         catch (Exception ex)
         {
             _addOrUpdate = null;
+            _containsGuid = null;
             _log.Debug(ex, "Moodles reflection bind failed");
         }
     }
@@ -298,7 +354,7 @@ public sealed class MoodlesWindStatusService : IDisposable
             return;
         }
 
-        // Moodles JSON MyStatus shape; NoExpire=true → no countdown for the doll.
+        // Moodles JSON MyStatus shape; NoExpire + AsPermanent → no countdown, survives zone.
         var payload = new MoodleStatusPayload
         {
             GUID = guid,
@@ -316,7 +372,7 @@ public sealed class MoodlesWindStatusService : IDisposable
             Applier = applier,
             Dispeller = string.Empty,
             NoExpire = true,
-            AsPermanent = false,
+            AsPermanent = true,
         };
 
         try
@@ -401,6 +457,32 @@ public sealed class MoodlesWindStatusService : IDisposable
 
         foreach (var oldGuid in AllLevelGuids)
             _cancelGuid.Invoke(manager, [oldGuid, true]);
+    }
+
+    private bool TryContainsStatus(IPlayerCharacter player, Guid guid)
+    {
+        try
+        {
+            if (_containsGuid is null || _getMyStatusManager is null)
+                TryBindMoodlesReflection();
+            if (_containsGuid is null || _getMyStatusManager is null)
+                return false;
+
+            var applier = TryLocalApplier(player);
+            if (string.IsNullOrEmpty(applier))
+                return false;
+
+            var manager = _getMyStatusManager.Invoke(null, [applier, false]);
+            if (manager is null)
+                return false;
+
+            return _containsGuid.Invoke(manager, [guid]) is true;
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "Failed to query wind charge moodle presence");
+            return false;
+        }
     }
 
     private void LogUnavailableOnce(string message, Exception? ex = null)

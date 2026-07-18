@@ -752,7 +752,7 @@ public sealed class RelayClient : IDisposable
             ApplyLocalOwnerSettingsUpdate(maxWindHours, autoGroundSit, lockEmoteId, settingsLocked);
             ApplyLocalOwnerSettingsSnapshot(key);
             if (notify)
-                PluginChat.Print(_chat, "Doll settings updated.", PluginChat.Green);
+                PluginChat.Print(_chat, $"Doll settings updated for {GetPairMessageLabel(key)}.", PluginChat.Green);
             return;
         }
 
@@ -786,7 +786,10 @@ public sealed class RelayClient : IDisposable
     {
         _config.UpsertOwnedDoll(dollKey, identity);
         _config.Save();
-        PluginChat.Print(_chat, "You were designated as an owner.", PluginChat.Green);
+        PluginChat.Print(
+            _chat,
+            $"You were designated as an owner by {GetPairMessageLabel(dollKey)}.",
+            PluginChat.Green);
     }
 
     private void ApplyLocalOwnerSettingsUpdate(
@@ -1192,8 +1195,8 @@ public sealed class RelayClient : IDisposable
         }
 
         var pair = _config.FindPairByKey(fromKey);
-        var winderIdentity = pair is { Identity: { Length: > 0 } }
-            ? pair.Identity
+        var winderIdentity = pair is not null
+            ? pair.GetMessageLabel()
             : fromSelf
                 ? _cachedIdentity
                 : null;
@@ -1237,8 +1240,8 @@ public sealed class RelayClient : IDisposable
         }
 
         var pair = _config.FindPairByKey(fromKey);
-        var winderIdentity = pair is { Identity: { Length: > 0 } }
-            ? pair.Identity
+        var winderIdentity = pair is not null
+            ? pair.GetMessageLabel()
             : fromSelf
                 ? _cachedIdentity
                 : null;
@@ -1275,10 +1278,7 @@ public sealed class RelayClient : IDisposable
             _sounds.PlayWind(TimeSpan.FromHours(windHours));
 
         var remaining = TimeSpan.FromSeconds(Math.Max(0, payload.RemainingSeconds));
-        var pair = _config.FindPairByKey(fromKey);
-        var label = pair is { Identity: { Length: > 0 } }
-            ? pair.Identity
-            : fromKey;
+        var label = GetPairMessageLabel(fromKey);
         _notifier.NotifyWinderRemaining(label, remaining);
     }
 
@@ -1344,7 +1344,7 @@ public sealed class RelayClient : IDisposable
     /// </summary>
     private void RememberPartnerIdentity(PairedPartner pair, string targetIdentity)
     {
-        if (!string.IsNullOrWhiteSpace(pair.Identity))
+        if (pair.IsIdentitySaved || !string.IsNullOrWhiteSpace(pair.Identity))
             return;
 
         var normalized = PlayerIdentity.Normalize(targetIdentity);
@@ -1353,6 +1353,14 @@ public sealed class RelayClient : IDisposable
 
         pair.Identity = normalized;
         _config.Save();
+    }
+
+    private string GetPairMessageLabel(string pairingKey)
+    {
+        var key = PairingKeyUtil.Normalize(pairingKey);
+        var pair = _config.FindPairByKey(key);
+        var label = pair?.GetMessageLabel();
+        return string.IsNullOrWhiteSpace(label) ? key : label;
     }
 
     private bool TryTakePendingWind(string? requestId, out double hours)
@@ -1593,13 +1601,15 @@ public sealed class RelayClient : IDisposable
             ClearPresence(oldKey);
         }
 
-        if (!string.IsNullOrWhiteSpace(payload.Identity))
+        // Preserve an explicitly saved empty label; it means the user opted out of Name@World.
+        if (!(pair.IsIdentitySaved && string.IsNullOrEmpty(pair.Identity))
+            && !string.IsNullOrWhiteSpace(payload.Identity))
             pair.Identity = PlayerIdentity.Normalize(payload.Identity);
 
         _config.Save();
         _log.Information("WindUpKey partner key rotated {Old} -> {New}", oldKey, newKey);
 
-        var label = string.IsNullOrWhiteSpace(pair.Identity) ? newKey : pair.Identity;
+        var label = pair.GetMessageLabel();
         PluginChat.Print(_chat, $"Partner key updated for {label}.", PluginChat.Green);
     }
 
@@ -1694,12 +1704,13 @@ public sealed class RelayClient : IDisposable
         if (!PairingKeyUtil.IsValid(dollKey))
             return;
 
+        var label = GetPairMessageLabel(dollKey);
         if (!_config.RemoveOwnedDoll(dollKey))
             return;
 
         _config.Save();
         ClearOwnerSettings(dollKey);
-        PluginChat.Print(_chat, "Your ownership of a doll was cleared.", PluginChat.Grey);
+        PluginChat.Print(_chat, $"Your ownership of {label} was cleared.", PluginChat.Grey);
     }
 
     private async Task HandleInboundOwnerSettingsQueryAsync(Envelope envelope, CancellationToken ct)
@@ -1852,7 +1863,10 @@ public sealed class RelayClient : IDisposable
         }
 
         if (notify)
-            PluginChat.Print(_chat, "Doll settings updated.", PluginChat.Green);
+            PluginChat.Print(
+                _chat,
+                $"Doll settings updated for {GetPairMessageLabel(dollKey)}.",
+                PluginChat.Green);
     }
 
     private void RememberPendingOwnerRequest(string requestId, string dollKey, bool notifyOnAck = false)

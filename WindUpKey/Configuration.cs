@@ -9,7 +9,7 @@ namespace WindUpKey;
 [Serializable]
 public class Configuration : IPluginConfiguration
 {
-    public const int CurrentVersion = 7;
+    public const int CurrentVersion = 8;
 
     /// <summary>Orphan profile from pre-v6 flat config until the first logged-in ContentId claims it.</summary>
     public const string PendingProfileKey = "pending";
@@ -149,6 +149,8 @@ public class Configuration : IPluginConfiguration
 
     public void Migrate()
     {
+        var migrateExistingIdentityLabels = Version < 8;
+
         if (Version < 1)
             Version = 1;
 
@@ -157,6 +159,13 @@ public class Configuration : IPluginConfiguration
         PendingPartnerKeys ??= [];
         PendingKeyRotations ??= [];
         OwnedDolls ??= [];
+
+        NormalizePartnerLabels(PairedPartners, migrateExistingIdentityLabels);
+        foreach (var profile in Profiles.Values)
+        {
+            if (profile?.PairedPartners is not null)
+                NormalizePartnerLabels(profile.PairedPartners, migrateExistingIdentityLabels);
+        }
 
         if (MaxWindHours <= 0)
             MaxWindHours = 72;
@@ -244,6 +253,7 @@ public class Configuration : IPluginConfiguration
         NormalizePendingKeys();
         NormalizePendingRotations();
         NormalizeOwnedDolls();
+        NormalizePartnerLabels(PairedPartners);
         return new CharacterProfile
         {
             PairingKey = PairingKey,
@@ -319,6 +329,7 @@ public class Configuration : IPluginConfiguration
         NormalizePendingKeys();
         NormalizePendingRotations();
         NormalizeOwnedDolls();
+        NormalizePartnerLabels(PairedPartners);
         StripLegacySelfTestingIdentity();
     }
 
@@ -373,12 +384,30 @@ public class Configuration : IPluginConfiguration
             .ToList();
     }
 
+    private static void NormalizePartnerLabels(
+        List<PairedPartner> partners,
+        bool markExistingIdentitySaved = false)
+    {
+        foreach (var partner in partners)
+        {
+            partner.Identity = partner.Identity?.Trim() ?? string.Empty;
+            partner.Nickname = partner.Nickname?.Trim() ?? string.Empty;
+            partner.Title = partner.Title?.Trim() ?? string.Empty;
+
+            if (markExistingIdentitySaved && partner.Identity.Length > 0)
+                partner.IsIdentitySaved = true;
+        }
+    }
+
     private void StripLegacySelfTestingIdentity()
     {
         foreach (var partner in PairedPartners)
         {
             if (string.Equals(partner.Identity, "Self (testing)", StringComparison.OrdinalIgnoreCase))
+            {
                 partner.Identity = string.Empty;
+                partner.IsIdentitySaved = false;
+            }
         }
     }
 

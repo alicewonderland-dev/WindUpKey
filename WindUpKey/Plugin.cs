@@ -154,6 +154,7 @@ public sealed class Plugin : IDalamudPlugin
     private void OpenConfig() => _configWindow.IsOpen = true;
 
     private bool _pendingLoginServices;
+    private bool _wasBetweenAreas;
 
     private void OnFrameworkUpdate(IFramework framework)
     {
@@ -172,11 +173,17 @@ public sealed class Plugin : IDalamudPlugin
             {
                 _pendingLoginServices = false;
                 _lowWind.OnLoggedIn();
+                // Moodles may have been cleared on logout; re-apply once world is stable.
+                _moodlesStatus.OnLoggedIn();
             }
+
+            if (_wasBetweenAreas)
+                _moodlesStatus.OnAreaTransition();
 
             _moodlesStatus.Tick();
         }
 
+        _wasBetweenAreas = loading;
         _lockController.Tick();
     }
 
@@ -185,7 +192,7 @@ public sealed class Plugin : IDalamudPlugin
         _pendingLoginServices = true;
         _relay.Start();
         _timer.OnLoggedIn();
-        // LowWind.OnLoggedIn deferred until !BetweenAreas (see OnFrameworkUpdate).
+        // LowWind / Moodles OnLoggedIn deferred until !BetweenAreas (see OnFrameworkUpdate).
     }
 
     private void OnLogout(int type, int code)

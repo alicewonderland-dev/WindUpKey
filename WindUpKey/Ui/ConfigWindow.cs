@@ -22,6 +22,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly ChangelogWindow _changelogWindow;
     private readonly string _pluginVersion;
     private readonly Dictionary<string, string> _partnerKeyDrafts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _pairLabelDrafts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, OwnerSettingsDraft> _ownerDrafts = new(StringComparer.Ordinal);
     private string _pairKeyDraft = string.Empty;
     private bool _hardcoreConfirm;
@@ -381,9 +382,11 @@ public sealed class ConfigWindow : Window, IDisposable
                 var hasValidPartnerKey = PairingKeyUtil.IsValid(actionPartnerKey);
                 ImGui.PushID(i);
 
-                var header = string.IsNullOrWhiteSpace(partner.Identity)
+                var pairLabel = partner.GetMessageLabel();
+                var header = string.IsNullOrWhiteSpace(pairLabel)
+                             || string.Equals(pairLabel, partner.PartnerKey, StringComparison.Ordinal)
                     ? partner.PartnerKey
-                    : $"{partner.Identity}  ({partner.PartnerKey})";
+                    : $"{pairLabel}  ({partner.PartnerKey})";
 
                 _relay.EnsurePresenceFresh(partner.PartnerKey);
 
@@ -440,22 +443,50 @@ public sealed class ConfigWindow : Window, IDisposable
                     ImGui.EndPopup();
                 }
 
-                var identity = partner.Identity ?? string.Empty;
-                ImGui.SetNextItemWidth(220);
-                var identityChanged = ImGui.InputText("##name_world", ref identity, 96);
-                ImGui.SameLine();
-                ImGui.TextUnformatted("Name@World");
-                ImGui.SameLine();
-                if (ImGui.SmallButton("From target") && TryReadTargetIdentity(out var fromTarget))
-                {
-                    identity = fromTarget;
-                    identityChanged = true;
-                }
+                DrawPairLabelField(
+                    partner,
+                    "Name@World",
+                    "name_world",
+                    partner.Identity,
+                    partner.IsIdentitySaved,
+                    96,
+                    saved =>
+                    {
+                        partner.Identity = saved;
+                        partner.IsIdentitySaved = true;
+                        _config.Save();
+                    },
+                    allowTarget: true);
 
-                if (identityChanged)
+                DrawPairLabelField(
+                    partner,
+                    "Nickname",
+                    "nickname",
+                    partner.Nickname,
+                    partner.IsNicknameSaved,
+                    64,
+                    saved =>
+                    {
+                        partner.Nickname = saved;
+                        partner.IsNicknameSaved = true;
+                        _config.Save();
+                    });
+
+                if (_config.IsDoll && partner.IsOwner)
                 {
-                    partner.Identity = identity.Trim();
-                    _config.Save();
+                    DrawPairLabelField(
+                        partner,
+                        "Title",
+                        "title",
+                        partner.Title,
+                        partner.IsTitleSaved,
+                        64,
+                        saved =>
+                        {
+                            partner.Title = saved;
+                            partner.IsTitleSaved = true;
+                            _config.Save();
+                        });
                 }
 
                 if (_config.IsDoll)
@@ -550,6 +581,99 @@ public sealed class ConfigWindow : Window, IDisposable
         }
     }
 
+    private void DrawPairLabelField(
+        PairedPartner partner,
+        string label,
+        string id,
+        string? value,
+        bool isSaved,
+        int maxLength,
+        Action<string> onSave,
+        bool allowTarget = false)
+    {
+        value ??= string.Empty;
+        var draftKey = $"{partner.PartnerKey}\u001F{id}";
+
+        ImGui.TextUnformatted($"{label}:");
+        ImGui.SameLine();
+
+        if (!isSaved)
+        {
+            if (!_pairLabelDrafts.TryGetValue(draftKey, out var draft))
+                draft = value;
+
+            ImGui.SetNextItemWidth(190);
+            if (ImGui.InputText($"##{id}_new", ref draft, maxLength))
+                _pairLabelDrafts[draftKey] = draft;
+            else
+                _pairLabelDrafts[draftKey] = draft;
+
+            ImGui.SameLine();
+            if (ImGui.SmallButton($"Save##{id}_new"))
+            {
+                onSave(draft.Trim());
+                _pairLabelDrafts.Remove(draftKey);
+            }
+
+            if (allowTarget)
+            {
+                ImGui.SameLine();
+                if (ImGui.SmallButton($"From target##{id}_new") && TryReadTargetIdentity(out var fromTarget))
+                    _pairLabelDrafts[draftKey] = fromTarget;
+            }
+        }
+        else
+        {
+            if (string.IsNullOrEmpty(value))
+                ImGui.TextDisabled("Not set");
+            else
+                ImGui.TextUnformatted(value);
+
+            ImGui.SameLine();
+            if (ImGui.SmallButton($"Edit##{id}"))
+            {
+                _pairLabelDrafts[draftKey] = value;
+                ImGui.OpenPopup($"edit_{id}");
+            }
+        }
+
+        if (!ImGui.BeginPopup($"edit_{id}"))
+            return;
+
+        if (!_pairLabelDrafts.TryGetValue(draftKey, out var popupDraft))
+            popupDraft = value;
+
+        ImGui.TextUnformatted(label);
+        ImGui.SetNextItemWidth(240);
+        if (ImGui.InputText($"##{id}_edit", ref popupDraft, maxLength))
+            _pairLabelDrafts[draftKey] = popupDraft;
+        else
+            _pairLabelDrafts[draftKey] = popupDraft;
+
+        if (allowTarget && ImGui.SmallButton($"From target##{id}_edit")
+                        && TryReadTargetIdentity(out var popupTarget))
+        {
+            popupDraft = popupTarget;
+            _pairLabelDrafts[draftKey] = popupDraft;
+        }
+
+        if (ImGui.Button($"Save##{id}_edit"))
+        {
+            onSave(popupDraft.Trim());
+            _pairLabelDrafts.Remove(draftKey);
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button($"Cancel##{id}_edit"))
+        {
+            _pairLabelDrafts.Remove(draftKey);
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.EndPopup();
+    }
+
     private void DrawPartnerPresenceLabel(string partnerKey)
     {
         ImGui.SameLine();
@@ -614,9 +738,13 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.PushID(i);
             _relay.EnsurePresenceFresh(doll.DollKey);
 
-            var header = string.IsNullOrWhiteSpace(doll.Identity)
+            var ownedPair = _config.FindPairByKey(doll.DollKey);
+            var ownedLabel = ownedPair?.GetChosenName();
+            if (string.IsNullOrWhiteSpace(ownedLabel))
+                ownedLabel = string.IsNullOrWhiteSpace(doll.Identity) ? doll.DollKey : doll.Identity;
+            var header = string.Equals(ownedLabel, doll.DollKey, StringComparison.Ordinal)
                 ? doll.DollKey
-                : $"{doll.Identity}  ({doll.DollKey})";
+                : $"{ownedLabel}  ({doll.DollKey})";
 
             // Collapsed by default. Stable id keeps expand state per doll.
             if (!ImGui.CollapsingHeader($"{header}###owned_{doll.DollKey}"))
