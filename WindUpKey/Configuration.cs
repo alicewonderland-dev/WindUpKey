@@ -18,6 +18,12 @@ public class Configuration : IPluginConfiguration
 
     public string RelayUrl { get; set; } = RelayDefaults.RelayUrl;
 
+    /// <summary>
+    /// Last Funnel URL that accepted a WebSocket (Linux or Windows host).
+    /// Used to prefer that host on the next connect; never shown in UI.
+    /// </summary>
+    public string LastSuccessfulRelayUrl { get; set; } = string.Empty;
+
     /// <summary>Shared relay token. Never log this value.</summary>
     public string RelayToken { get; set; } = RelayDefaults.RelayToken;
 
@@ -413,7 +419,14 @@ public class Configuration : IPluginConfiguration
 
     public void ApplyRelayDefaults()
     {
-        RelayUrl = RelayDefaults.RelayUrl;
+        // Keep RelayUrl on the sticky host when it is still a compiled candidate;
+        // otherwise fall back to the primary Funnel URL.
+        var preferred = LastSuccessfulRelayUrl;
+        RelayUrl = !string.IsNullOrWhiteSpace(preferred)
+                   && RelayDefaults.RelayUrls.Any(u =>
+                       string.Equals(u, preferred, StringComparison.OrdinalIgnoreCase))
+            ? preferred
+            : RelayDefaults.RelayUrl;
         RelayToken = RelayDefaults.RelayToken;
     }
 

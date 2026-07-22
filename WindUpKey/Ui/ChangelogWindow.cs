@@ -12,6 +12,11 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.2.0 — Relay hosts",
+            [
+                "The plugin can reach either the Linux or Windows relay host and prefers the last one that worked.",
+            ]),
+        new(
             "0.2.1.0 — Pair labels",
             [
                 "Pairs can have local nicknames, and dolls can assign local titles to owners.",
@@ -29,13 +34,6 @@ public sealed class ChangelogWindow : Window
             "0.2.0.1 — Stability",
             [
                 "Fixed a bug that could cause intermittent crashes or unexpected behavior.",
-            ]),
-        new(
-            "0.2.0.0 — Commendations",
-            [
-                "Dolls can gain winding time after receiving commendations from a completed duty.",
-                "The bonus is based on duty length. Multiple commendations award time once and change the winding sound.",
-                "Added a Change Log button on the About tab.",
             ]),
     ];
 
@@ -55,8 +53,10 @@ public sealed class ChangelogWindow : Window
             if (i > 0)
                 ImGui.Spacing();
 
-            ImGui.TextUnformatted(entry.Title);
-            ImGui.Separator();
+            ImGui.SetNextItemOpen(i == 0, ImGuiCond.Once);
+            if (!ImGui.CollapsingHeader($"{entry.Title}###changelog_{i}"))
+                continue;
+
             foreach (var detail in entry.Details)
                 ImGui.BulletText(detail);
         }

@@ -960,40 +960,55 @@ public sealed class RelayClient : IDisposable
         if (!PairingKeyUtil.IsValid(_config.PairingKey))
             throw new InvalidOperationException("Pairing key unavailable before register.");
 
-        var baseUrl = _config.RelayUrl;
-        var safeHost = SafeHost(baseUrl);
-        _lastStatus = $"Connecting ({safeHost})…";
-        _log.Information("WindUpKey connect attempt host={Host}", safeHost);
+        var candidates = RelayDefaults.OrderedRelayUrls(_config.LastSuccessfulRelayUrl).ToArray();
+        if (candidates.Length == 0)
+            throw new InvalidOperationException("No relay hosts configured.");
 
-        var uri = BuildUri(baseUrl);
-        var socket = new ClientWebSocket();
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
-        await socket.ConnectAsync(uri, timeoutCts.Token).ConfigureAwait(false);
+        Exception? lastError = null;
+        ClientWebSocket? socket = null;
+        string? connectedUrl = null;
 
-        if (Volatile.Read(ref _loopGeneration) != generation || ct.IsCancellationRequested)
+        foreach (var baseUrl in candidates)
         {
-            socket.Dispose();
             ct.ThrowIfCancellationRequested();
-            throw new OperationCanceledException("Relay loop was superseded.", ct);
-        }
+            var safeHost = SafeHost(baseUrl);
+            _lastStatus = $"Connecting ({safeHost})…";
+            _log.Information("WindUpKey connect attempt host={Host}", safeHost);
 
-        ClientWebSocket? replaced;
-        lock (_socketGate)
-        {
-            if (Volatile.Read(ref _loopGeneration) != generation || ct.IsCancellationRequested)
+            try
             {
-                socket.Dispose();
-                ct.ThrowIfCancellationRequested();
-                throw new OperationCanceledException("Relay loop was superseded.", ct);
+                socket = await OpenWebSocketAsync(baseUrl, generation, ct).ConfigureAwait(false);
+                connectedUrl = baseUrl;
+                break;
             }
-
-            replaced = _socket;
-            _socket = socket;
-            _socketGeneration = generation;
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+                _log.Warning(ex, "WindUpKey connect failed host={Host}", safeHost);
+            }
         }
-        replaced?.Dispose();
-        _log.Information("WindUpKey WebSocket open host={Host} state={State}", safeHost, socket.State);
+
+        if (socket is null || connectedUrl is null)
+        {
+            throw lastError ?? new InvalidOperationException("Unable to reach any relay host.");
+        }
+
+        var connectedHost = SafeHost(connectedUrl);
+        _log.Information("WindUpKey WebSocket open host={Host} state={State}", connectedHost, socket.State);
+
+        await _framework.RunOnTick(() =>
+        {
+            _config.RelayUrl = connectedUrl;
+            if (!string.Equals(_config.LastSuccessfulRelayUrl, connectedUrl, StringComparison.Ordinal))
+            {
+                _config.LastSuccessfulRelayUrl = connectedUrl;
+                _config.Save();
+            }
+        }, cancellationToken: ct).ConfigureAwait(false);
 
         var register = new RegisterPayload
         {
@@ -1037,6 +1052,48 @@ public sealed class RelayClient : IDisposable
         foreach (var pending in _config.PendingKeyRotations.ToArray())
             await RequestPresenceAsync(pending.PartnerKey).ConfigureAwait(false);
 
+        return socket;
+    }
+
+    private async Task<ClientWebSocket> OpenWebSocketAsync(string baseUrl, int generation, CancellationToken ct)
+    {
+        var uri = BuildUri(baseUrl);
+        var socket = new ClientWebSocket();
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        // Keep per-host attempts bounded so failover to the other Funnel stays responsive.
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(8));
+        try
+        {
+            await socket.ConnectAsync(uri, timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+
+        if (Volatile.Read(ref _loopGeneration) != generation || ct.IsCancellationRequested)
+        {
+            socket.Dispose();
+            ct.ThrowIfCancellationRequested();
+            throw new OperationCanceledException("Relay loop was superseded.", ct);
+        }
+
+        ClientWebSocket? replaced;
+        lock (_socketGate)
+        {
+            if (Volatile.Read(ref _loopGeneration) != generation || ct.IsCancellationRequested)
+            {
+                socket.Dispose();
+                ct.ThrowIfCancellationRequested();
+                throw new OperationCanceledException("Relay loop was superseded.", ct);
+            }
+
+            replaced = _socket;
+            _socket = socket;
+            _socketGeneration = generation;
+        }
+        replaced?.Dispose();
         return socket;
     }
 
