@@ -9,7 +9,7 @@ namespace WindUpKey;
 [Serializable]
 public class Configuration : IPluginConfiguration
 {
-    public const int CurrentVersion = 8;
+    public const int CurrentVersion = 9;
 
     /// <summary>Orphan profile from pre-v6 flat config until the first logged-in ContentId claims it.</summary>
     public const string PendingProfileKey = "pending";
@@ -46,27 +46,27 @@ public class Configuration : IPluginConfiguration
     public DateTimeOffset? HardcoreLastClearedUtc { get; set; }
 
     /// <summary>
-    /// Pairing keys that may enable debug/testing features
-    /// (Alice Selena@Sargatanas, Scotti Pixie@Sargatanas).
+    /// ContentId hex values that may enable debug/testing features
+    /// (Alice Selena@Sargatanas). Add further tester ContentIds as needed.
     /// </summary>
-    public static readonly string[] DebugOwnerPairingKeys = ["WZ9T4UEC", "DDHJMLL0"];
+    public static readonly string[] DebugOwnerContentIds = ["004000174AA8BCC2"];
 
     /// <summary>When true, unlocks debug/testing features (self-wind, unwind UI, /windup check, /windup debug).</summary>
     public bool DebugMode { get; set; }
 
-    /// <summary>True when the local pairing key is a debug owner.</summary>
-    public bool IsDebugOwner => IsDebugOwnerKey(PairingKey);
+    /// <summary>True when the active character ContentId is a debug owner.</summary>
+    public bool IsDebugOwner => IsDebugOwnerContentId(ActiveContentId);
 
-    /// <summary>Debug features require both the toggle and an owner pairing key.</summary>
+    /// <summary>Debug features require both the toggle and an owner ContentId.</summary>
     public bool IsDebugEnabled => DebugMode && IsDebugOwner;
 
-    public static bool IsDebugOwnerKey(string? pairingKey)
+    public static bool IsDebugOwnerContentId(string? contentIdHex)
     {
-        if (string.IsNullOrEmpty(pairingKey))
+        if (string.IsNullOrEmpty(contentIdHex))
             return false;
-        foreach (var key in DebugOwnerPairingKeys)
+        foreach (var id in DebugOwnerContentIds)
         {
-            if (string.Equals(pairingKey, key, StringComparison.Ordinal))
+            if (string.Equals(contentIdHex, id, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
 
@@ -83,11 +83,11 @@ public class Configuration : IPluginConfiguration
 
     /// <summary>
     /// Stable 8-character A–Z0–9 key for mutual pairing.
-    /// Derived from a one-way hash of the local Name@World (see <see cref="PairingKeyUtil.FromIdentity"/>).
+    /// Derived from a one-way hash of the local ContentId (see <see cref="PairingKeyUtil.FromContentId"/>).
     /// </summary>
     public string PairingKey { get; set; } = string.Empty;
 
-    /// <summary>Last Name@World used to derive <see cref="PairingKey"/> (local only).</summary>
+    /// <summary>Last Name@World for local labels only (not used for pairing-key derivation).</summary>
     public string LastKnownIdentity { get; set; } = string.Empty;
 
     public List<PairedPartner> PairedPartners { get; set; } = [];
@@ -195,7 +195,7 @@ public class Configuration : IPluginConfiguration
         if (Version < 5)
             Version = 5;
 
-        // Pairing key is seeded from Name@World only when empty; do not invent a random one here.
+        // Pairing key is seeded from ContentId when empty; do not invent a random one here.
         if (!PairingKeyUtil.IsValid(PairingKey))
             PairingKey = string.Empty;
 
@@ -212,9 +212,40 @@ public class Configuration : IPluginConfiguration
                 FlushActiveToProfiles();
         }
 
+        // v9: pairing keys seed from ContentId (was Name@World). Clear old keys and pairs.
+        if (Version < 9)
+            ClearPairingStateForContentIdMigration();
+
         // Always force compiled-in relay endpoint so users cannot drift or see/edit it.
         ApplyRelayDefaults();
         Version = CurrentVersion;
+    }
+
+    /// <summary>
+    /// Drops Name@World-derived keys and partner lists so ContentId keys can reseed cleanly.
+    /// </summary>
+    private void ClearPairingStateForContentIdMigration()
+    {
+        ClearActivePairingState();
+        foreach (var profile in Profiles.Values)
+        {
+            if (profile is null)
+                continue;
+            profile.PairingKey = string.Empty;
+            profile.PairedPartners = [];
+            profile.PendingPartnerKeys = [];
+            profile.PendingKeyRotations = [];
+            profile.OwnedDolls = [];
+        }
+    }
+
+    private void ClearActivePairingState()
+    {
+        PairingKey = string.Empty;
+        PairedPartners = [];
+        PendingPartnerKeys = [];
+        PendingKeyRotations = [];
+        OwnedDolls = [];
     }
 
     /// <summary>
@@ -436,16 +467,10 @@ public class Configuration : IPluginConfiguration
         if (string.IsNullOrEmpty(normalized))
             return null;
 
-        var byIdentity = PairedPartners.FirstOrDefault(p =>
+        // Pairing keys are ContentId-derived; Name@World is only a local label on the pair.
+        return PairedPartners.FirstOrDefault(p =>
             !string.IsNullOrEmpty(p.Identity)
             && string.Equals(PlayerIdentity.Normalize(p.Identity), normalized, StringComparison.OrdinalIgnoreCase));
-        if (byIdentity is not null)
-            return byIdentity;
-
-        // Pairing stores PartnerKey only; Identity is optional/local. Context menu still has
-        // Name@World, so derive the pairing key and match like the rest of the wire path.
-        var derived = PairingKeyUtil.FromIdentity(normalized);
-        return FindPairByKey(derived);
     }
 
     public PairedPartner? FindPairByKey(string pairingKey)

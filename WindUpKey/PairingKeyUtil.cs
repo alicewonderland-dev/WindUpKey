@@ -1,7 +1,6 @@
 using System;
 using System.Security.Cryptography;
 using System.Text;
-using WindUpKey.Protocol;
 
 namespace WindUpKey;
 
@@ -11,22 +10,22 @@ public static class PairingKeyUtil
     public const int Length = 8;
 
     /// <summary>
-    /// App pepper so codes are not a raw Name@World hash (username stays one-way).
+    /// App pepper so codes are not a raw ContentId hash (id stays one-way).
+    /// v2: ContentId seed (v1 was Name@World).
     /// </summary>
-    private const string Pepper = "WindUpKey/pairing/v1";
+    private const string Pepper = "WindUpKey/pairing/v2";
 
     /// <summary>
-    /// One-way 8-character key derived from Name@World (identity cannot be recovered).
-    /// Used only to seed <c>PairingKey</c> when a profile has no valid key (first login or
-    /// config wipe). After seeding, the stored key must not change on rename/world transfer.
+    /// One-way 8-character key derived from ContentId (id cannot be recovered).
+    /// Same character always yields the same key across rename, world transfer, and config wipe.
     /// </summary>
-    public static string FromIdentity(string nameAtWorld)
+    public static string FromContentId(ulong contentId)
     {
-        var normalized = PlayerIdentity.Normalize(nameAtWorld).ToLowerInvariant();
-        if (string.IsNullOrEmpty(normalized))
+        if (contentId == 0)
             return string.Empty;
 
-        var input = Encoding.UTF8.GetBytes(Pepper + "\0" + normalized);
+        var hex = contentId.ToString("X16");
+        var input = Encoding.UTF8.GetBytes(Pepper + "\0" + hex);
         Span<byte> hash = stackalloc byte[32];
         SHA256.HashData(input, hash);
 
@@ -34,6 +33,16 @@ public static class PairingKeyUtil
         for (var i = 0; i < Length; i++)
             chars[i] = Alphabet[hash[i] % Alphabet.Length];
         return new string(chars);
+    }
+
+    /// <summary>Parses a ContentId hex string (e.g. profile key) and derives the pairing key.</summary>
+    public static string FromContentIdHex(string? contentIdHex)
+    {
+        if (string.IsNullOrWhiteSpace(contentIdHex))
+            return string.Empty;
+        if (!ulong.TryParse(contentIdHex.Trim(), System.Globalization.NumberStyles.HexNumber, null, out var contentId))
+            return string.Empty;
+        return FromContentId(contentId);
     }
 
     public static string Normalize(string? key)

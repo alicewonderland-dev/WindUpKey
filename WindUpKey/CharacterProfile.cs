@@ -9,7 +9,7 @@ public sealed class CharacterProfile
 {
     public string PairingKey { get; set; } = string.Empty;
 
-    /// <summary>Last Name@World used to derive <see cref="PairingKey"/> (local only).</summary>
+    /// <summary>Last Name@World for local labels only (not used for pairing-key derivation).</summary>
     public string LastKnownIdentity { get; set; } = string.Empty;
 
     public List<PairedPartner> PairedPartners { get; set; } = [];
@@ -57,7 +57,7 @@ public sealed class CharacterProfile
     public DateTimeOffset? LowWindLastWarningUtc { get; set; }
 }
 
-/// <summary>Queued <c>keyRotated</c> announce to a partner after a local Name@World change.</summary>
+/// <summary>Queued <c>keyRotated</c> announce to a partner after a local key change.</summary>
 [Serializable]
 public sealed class PendingKeyRotation
 {

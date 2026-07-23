@@ -258,7 +258,7 @@ public sealed class RelayClient : IDisposable
             }
         }
 
-        SyncPairingKeyFromIdentity();
+        SyncPairingKeyFromContentId();
         UpdateUnreachableTracking();
 
         if (Interlocked.Increment(ref _tickLogCounter) % 300 == 1)
@@ -296,30 +296,31 @@ public sealed class RelayClient : IDisposable
     }
 
     /// <summary>
-    /// Seeds <see cref="Configuration.PairingKey"/> from Name@World only when empty/invalid.
-    /// Rename and world transfer update <see cref="Configuration.LastKnownIdentity"/> only —
-    /// the stored pairing key stays put so partners keep routing.
+    /// Keeps <see cref="Configuration.PairingKey"/> aligned with the active ContentId.
+    /// Rename and world transfer only update <see cref="Configuration.LastKnownIdentity"/> —
+    /// ContentId (and thus the key) is unchanged.
     /// Safe to call on the framework thread (may Save).
     /// </summary>
-    private void SyncPairingKeyFromIdentity()
+    private void SyncPairingKeyFromContentId()
     {
-        if (_cachedIdentity is null)
+        if (_cachedIdentity is not null)
+            _config.LastKnownIdentity = _cachedIdentity;
+
+        if (string.IsNullOrEmpty(_config.ActiveContentId))
             return;
 
-        _config.LastKnownIdentity = _cachedIdentity;
-
-        if (PairingKeyUtil.IsValid(_config.PairingKey))
-            return;
-
-        var derived = PairingKeyUtil.FromIdentity(_cachedIdentity);
+        var derived = PairingKeyUtil.FromContentIdHex(_config.ActiveContentId);
         if (!PairingKeyUtil.IsValid(derived))
+            return;
+
+        if (string.Equals(_config.PairingKey, derived, StringComparison.Ordinal))
             return;
 
         _config.PairingKey = derived;
         _config.Save();
-        _log.Information("WindUpKey pairing key seeded from identity");
+        _log.Information("WindUpKey pairing key synced from ContentId");
 
-        // Re-register if we connected before the key was available.
+        // Re-register if we connected before the key was available / changed.
         if (IsConnected)
             CloseSocket();
     }
@@ -942,19 +943,21 @@ public sealed class RelayClient : IDisposable
         {
             _config.ApplyRelayDefaults();
             var identity = _cachedIdentity;
-            if (identity is null)
+            if (identity is not null)
+                _config.LastKnownIdentity = identity;
+
+            if (string.IsNullOrEmpty(_config.ActiveContentId))
                 return;
 
-            _config.LastKnownIdentity = identity;
-            if (PairingKeyUtil.IsValid(_config.PairingKey))
+            var derived = PairingKeyUtil.FromContentIdHex(_config.ActiveContentId);
+            if (!PairingKeyUtil.IsValid(derived))
                 return;
 
-            var derived = PairingKeyUtil.FromIdentity(identity);
-            if (PairingKeyUtil.IsValid(derived))
-            {
-                _config.PairingKey = derived;
-                _config.Save();
-            }
+            if (string.Equals(_config.PairingKey, derived, StringComparison.Ordinal))
+                return;
+
+            _config.PairingKey = derived;
+            _config.Save();
         }, cancellationToken: ct).ConfigureAwait(false);
 
         if (!PairingKeyUtil.IsValid(_config.PairingKey))

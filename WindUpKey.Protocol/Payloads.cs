@@ -146,8 +146,8 @@ public sealed class PresenceResultPayload
 
 /// <summary>
 /// Legacy: announces that the sender's pairing key changed.
-/// Modern clients keep a frozen pairing key across rename/world transfer; this remains
-/// for manual/legacy rotation. Recipients trust only when <see cref="OldKey"/> matches an existing pair.
+/// Modern clients derive a stable key from ContentId (rename/world transfer do not change it);
+/// this remains for manual/legacy rotation. Recipients trust only when <see cref="OldKey"/> matches an existing pair.
 /// Optional <see cref="Identity"/> is for the partner's local label only and must not be stored by the relay.
 /// </summary>
 public sealed class KeyRotatedPayload

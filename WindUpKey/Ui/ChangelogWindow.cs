@@ -12,6 +12,12 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.2.1 — Pairing keys",
+            [
+                "Pairing keys are now based on your character ContentId, so they stay the same after rename, world transfer, or a config wipe.",
+                "Existing pairs need to be re-added once with the new keys.",
+            ]),
+        new(
             "0.2.2.0 — Relay hosts",
             [
                 "The plugin can reach either the Linux or Windows relay host and prefers the last one that worked.",
@@ -29,11 +35,6 @@ public sealed class ChangelogWindow : Window
                 "Pairing keys no longer change when you rename or transfer worlds, as long as your plugin config is kept.",
                 "Winds and other partner messages can wait on the relay while someone is offline, then deliver when they return.",
                 "After a config wipe with the same character name and world, the relay can restore paired partner keys. Consent still needs to be turned back on.",
-            ]),
-        new(
-            "0.2.0.1 — Stability",
-            [
-                "Fixed a bug that could cause intermittent crashes or unexpected behavior.",
             ]),
     ];
 

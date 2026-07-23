@@ -1,6 +1,6 @@
 # Wind-Up Key
 
-Current version: **0.2.2.0**
+Current version: **0.2.2.1**
 
 A (hopefully) simple plugin. Become the wind-up doll of your dreams, or assist dolls by helping to wind them.
 
@@ -18,7 +18,7 @@ A (hopefully) simple plugin. Become the wind-up doll of your dreams, or assist d
 
 ## Features
 
-- Per-character Doll and Winder roles with secure partner pairing (pairing keys survive rename/world transfer while local config remains; a config wipe only keeps the same key if the character name and world are unchanged, and an updated relay can restore partner keys without restoring consent).
+- Per-character Doll and Winder roles with secure partner pairing (pairing keys are derived from ContentId, so they stay the same across rename, world transfer, and config wipe; an updated relay can restore partner keys without restoring consent).
 - Local pair nicknames and doll-assigned owner titles, including personalized pair-related messages.
 - Context-menu and remote winding with configurable consent; offline winds queue on the relay until the doll is back.
 - Automatic failover between alternate relay hosts, preferring the last host that connected successfully.
