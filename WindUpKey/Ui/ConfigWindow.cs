@@ -509,6 +509,25 @@ public sealed class ConfigWindow : Window, IDisposable
                     if (partner.IsOwner)
                     {
                         ImGui.TextDisabled("Can wind me / Can unwind me: always allowed for owners.");
+#if WINDUP_TESTING
+                        if (_config.HardcoreMode)
+                        {
+                            ImGui.BeginDisabled();
+                            var hardcoreCall = true;
+                            ImGui.Checkbox("Can call me", ref hardcoreCall);
+                            ImGui.EndDisabled();
+                            ImGui.TextDisabled("Hardcore is on — owners may always call you.");
+                        }
+                        else
+                        {
+                            var canCall = partner.CanCallMe;
+                            if (ImGui.Checkbox("Can call me", ref canCall))
+                            {
+                                partner.CanCallMe = canCall;
+                                _config.Save();
+                            }
+                        }
+#endif
                     }
                     else
                     {
@@ -834,10 +853,59 @@ public sealed class ConfigWindow : Window, IDisposable
 
             ImGui.TextDisabled("When locked, these settings cannot be changed until unlocked. Only owners can unlock.");
 
+#if WINDUP_TESTING
+            ImGui.Spacing();
+            DrawOwnerCallButton(doll.DollKey, snap);
+#endif
+
             ImGui.PopID();
             ImGui.Spacing();
         }
     }
+
+#if WINDUP_TESTING
+    private void DrawOwnerCallButton(string dollKey, OwnerSettingsSnapshot snap)
+    {
+        var online = _relay.GetPartnerPresence(dollKey) == PartnerPresence.Online;
+        var canCall = snap.CanCall;
+        var travelReady = snap.TravelReady;
+        var inWorld = Plugin.ObjectTable.LocalPlayer is not null && Plugin.ClientState.IsLoggedIn;
+        var enabled = online && canCall && travelReady && inWorld && _relay.IsConnected;
+
+        if (!enabled)
+            ImGui.BeginDisabled();
+
+        if (ImGui.Button("Call"))
+            _ = _relay.SendCallAsync(dollKey);
+
+        if (!enabled)
+            ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        ImGui.TextDisabled("?");
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.BeginTooltip();
+            if (!travelReady)
+            {
+                ImGui.TextUnformatted("Requires the doll to have these plugins installed and enabled:");
+                ImGui.BulletText("Lifestream");
+                ImGui.BulletText("vnavmesh");
+            }
+            else if (!canCall)
+                ImGui.TextUnformatted("This doll has not allowed you to call them (or Hardcore is off without Can call me).");
+            else if (!online)
+                ImGui.TextUnformatted("Doll must be online.");
+            else if (!inWorld)
+                ImGui.TextUnformatted("You must be in the world to call.");
+            else if (!_relay.IsConnected)
+                ImGui.TextUnformatted("Relay is not connected yet.");
+            else
+                ImGui.TextUnformatted("Call the doll to travel near your current position.");
+            ImGui.EndTooltip();
+        }
+    }
+#endif
 
     private void PushOwnerSettings(string dollKey, OwnerSettingsDraft draft, bool notify = true)
     {

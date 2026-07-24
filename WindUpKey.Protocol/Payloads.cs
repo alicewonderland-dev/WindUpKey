@@ -249,6 +249,14 @@ public sealed class OwnerSettingsResultPayload
 
     [JsonPropertyName("emotes")]
     public List<OwnerEmoteInfo> Emotes { get; set; } = [];
+
+    /// <summary>Doll allows this owner to call (Hardcore forces true on the doll).</summary>
+    [JsonPropertyName("canCall")]
+    public bool CanCall { get; set; }
+
+    /// <summary>True when Lifestream and vnavmesh IPC are available on the doll.</summary>
+    [JsonPropertyName("travelReady")]
+    public bool TravelReady { get; set; }
 }
 
 public sealed class OwnerSettingsUpdatePayload
@@ -303,6 +311,97 @@ public sealed class OwnerSettingsAckPayload
     public bool SettingsLocked { get; set; }
 }
 
+/// <summary>Owner requests that the doll travel near the given world position.</summary>
+public sealed class CallPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Owner pairing key (set/overwritten by relay).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Doll pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    [JsonPropertyName("worldId")]
+    public uint WorldId { get; set; }
+
+    [JsonPropertyName("worldName")]
+    public string WorldName { get; set; } = string.Empty;
+
+    [JsonPropertyName("territoryId")]
+    public uint TerritoryId { get; set; }
+
+    [JsonPropertyName("x")]
+    public float X { get; set; }
+
+    [JsonPropertyName("y")]
+    public float Y { get; set; }
+
+    [JsonPropertyName("z")]
+    public float Z { get; set; }
+}
+
+public static class CallAckStatuses
+{
+    public const string Traveling = "traveling";
+    public const string Crafting = "crafting";
+    public const string Instance = "instance";
+    public const string Combat = "combat";
+    public const string Busy = "busy";
+}
+
+public sealed class CallAckPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Doll pairing key.</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Owner pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    /// <summary>One of <see cref="CallAckStatuses"/>.</summary>
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = string.Empty;
+
+    [JsonPropertyName("message")]
+    public string Message { get; set; } = string.Empty;
+}
+
+public static class CallResultStatuses
+{
+    public const string Arrived = "arrived";
+    public const string Failed = "failed";
+    public const string Cancelled = "cancelled";
+}
+
+public sealed class CallResultPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Doll pairing key.</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Owner pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    /// <summary>One of <see cref="CallResultStatuses"/>.</summary>
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = string.Empty;
+
+    [JsonPropertyName("message")]
+    public string Message { get; set; } = string.Empty;
+}
+
 public sealed class ErrorPayload
 {
     [JsonPropertyName("requestId")]
@@ -329,6 +428,9 @@ public static class ErrorCodes
     public const string PairFailed = "pair_failed";
     public const string PairKeyCollision = "pair_key_collision";
     public const string RateLimited = "rate_limited";
+    public const string CrossDc = "cross_dc";
+    public const string TravelUnavailable = "travel_unavailable";
+    public const string Busy = "busy";
 }
 
 /// <summary>Helpers for Name@World identity strings (clientside only).</summary>

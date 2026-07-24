@@ -28,6 +28,12 @@ public static class MessageTypes
     public const string OwnerSettingsResult = "ownerSettingsResult";
     public const string OwnerSettingsUpdate = "ownerSettingsUpdate";
     public const string OwnerSettingsAck = "ownerSettingsAck";
+    /// <summary>Owner → doll: request auto-travel near the owner's position (Testing).</summary>
+    public const string Call = "call";
+    /// <summary>Doll → owner: call accepted or deferred.</summary>
+    public const string CallAck = "callAck";
+    /// <summary>Doll → owner: call finished (arrived / failed / cancelled).</summary>
+    public const string CallResult = "callResult";
     /// <summary>Relay → client: established peer pairing keys (no consent flags).</summary>
     public const string PairSync = "pairSync";
     /// <summary>Relay → sender: offline message accepted into durable outbox.</summary>

@@ -23,6 +23,7 @@ public sealed class WindTimerService
     private int _loginSitAttempts;
     private bool _relaySafetyBypass;
     private bool _relaySafetyBypassAnnounced;
+    private bool _callTravelBypass;
 
     public WindTimerService(
         Configuration config,
@@ -50,10 +51,10 @@ public sealed class WindTimerService
         _config.ExpiryUtc is null || _config.ExpiryUtc.Value <= DateTimeOffset.UtcNow;
 
     /// <summary>
-    /// Movement/teleport lock policy. False while the relay safety bypass is active
-    /// (host unreachable) even if the timer is empty — ExpiryUtc is left unchanged.
+    /// Movement/teleport lock policy. False while the relay safety bypass or an active
+    /// owner-call travel bypass is active even if the timer is empty — ExpiryUtc is left unchanged.
     /// </summary>
-    public bool IsLocked => _config.IsDoll && IsTimerEmpty && !_relaySafetyBypass;
+    public bool IsLocked => _config.IsDoll && IsTimerEmpty && !_relaySafetyBypass && !_callTravelBypass;
 
     /// <summary>
     /// Called from the composition root each framework tick before <see cref="Tick"/>.
@@ -72,7 +73,7 @@ public sealed class WindTimerService
         }
 
         // Only announce when this would have locked the doll (timer empty).
-        if (!_relaySafetyBypassAnnounced && _config.IsDoll && IsTimerEmpty)
+        if (!_relaySafetyBypassAnnounced && _config.IsDoll && IsTimerEmpty && !_callTravelBypass)
         {
             _relaySafetyBypassAnnounced = true;
             PluginChat.Print(
@@ -80,6 +81,17 @@ public sealed class WindTimerService
                 "Host unreachable — movement unlocked until the relay reconnects.",
                 PluginChat.Yellow);
         }
+    }
+
+    /// <summary>
+    /// Temporarily suspends unwound movement/teleport locks while answering an owner call.
+    /// Does not change <see cref="Configuration.ExpiryUtc"/>.
+    /// </summary>
+    public void SetCallTravelBypass(bool bypass)
+    {
+        if (bypass == _callTravelBypass)
+            return;
+        _callTravelBypass = bypass;
     }
 
     /// <summary>Call on login (or plugin load while already logged in). Sits if currently unwound.</summary>

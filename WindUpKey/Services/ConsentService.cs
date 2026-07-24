@@ -24,4 +24,15 @@ public sealed class ConsentService(Configuration config)
         var pair = config.FindPairByKey(fromPairingKey);
         return pair is { IsOwner: true };
     }
+
+    /// <summary>
+    /// Receiving doll: owner may call when Hardcore is on, or when CanCallMe is set for that owner.
+    /// </summary>
+    public bool CanReceiveCallFromKey(string fromPairingKey)
+    {
+        var pair = config.FindPairByKey(fromPairingKey);
+        if (pair is not { IsOwner: true })
+            return false;
+        return config.HardcoreMode || pair.CanCallMe;
+    }
 }

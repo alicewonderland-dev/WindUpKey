@@ -26,6 +26,8 @@ public sealed class OwnerSettingsSnapshot
     public bool AutoGroundSit { get; set; }
     public ushort LockEmoteId { get; set; }
     public bool SettingsLocked { get; set; }
+    public bool CanCall { get; set; }
+    public bool TravelReady { get; set; }
     public List<(ushort Id, string Name)> Emotes { get; set; } = [];
     public string? LastError { get; set; }
     public bool HasData { get; set; }
@@ -60,6 +62,10 @@ public sealed class RelayClient : IDisposable
     private readonly IWindNotifier _notifier;
     private readonly SoundEffectService _sounds;
     private readonly GameCommandRunner _commands;
+
+#if WINDUP_TESTING
+    private CallTravelService? _callTravel;
+#endif
 
     private ClientWebSocket? _socket;
     private readonly object _socketGate = new();
@@ -117,6 +123,59 @@ public sealed class RelayClient : IDisposable
         _sounds = sounds;
         _commands = commands;
     }
+
+#if WINDUP_TESTING
+    public void AttachCallTravel(CallTravelService callTravel) => _callTravel = callTravel;
+
+    public void TickCallTravel() => _callTravel?.Tick();
+
+    public async Task SendCallAsync(string dollKey)
+    {
+        var key = PairingKeyUtil.Normalize(dollKey);
+        if (!PairingKeyUtil.IsValid(key))
+            return;
+
+        if (_objectTable.LocalPlayer is not { } player)
+        {
+            PluginChat.PrintError(_chat, "You must be in the world to call a doll.");
+            return;
+        }
+
+        if (!IsConnected)
+        {
+            PluginChat.PrintError(_chat, "Not connected to the relay yet.");
+            return;
+        }
+
+        var world = player.CurrentWorld.ValueNullable;
+        var worldId = player.CurrentWorld.RowId;
+        var worldName = world?.Name.ToString() ?? string.Empty;
+        var requestId = Guid.NewGuid().ToString("N");
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.Call, new CallPayload
+        {
+            RequestId = requestId,
+            From = _config.PairingKey,
+            To = key,
+            WorldId = worldId,
+            WorldName = worldName,
+            TerritoryId = _clientState.TerritoryType,
+            X = player.Position.X,
+            Y = player.Position.Y,
+            Z = player.Position.Z,
+        }), CancellationToken.None).ConfigureAwait(false);
+
+        PluginChat.Print(_chat, $"Calling {GetPairMessageLabel(key)}…", PluginChat.Yellow);
+    }
+
+    public Task SendCallAckAsync(CallAckPayload payload) =>
+        SendEnvelopeAsync(Envelope.Create(MessageTypes.CallAck, payload), CancellationToken.None);
+
+    public Task SendCallResultAsync(CallResultPayload payload) =>
+        SendEnvelopeAsync(Envelope.Create(MessageTypes.CallResult, payload), CancellationToken.None);
+
+    public void CancelActiveCall() => _callTravel?.CancelActiveCall();
+#endif
 
     public bool IsConnected => _socket?.State == WebSocketState.Open;
 
@@ -831,6 +890,8 @@ public sealed class RelayClient : IDisposable
                 LockEmoteId = _config.EffectiveLockEmoteId,
                 SettingsLocked = _config.OwnerSettingsLocked,
                 Emotes = emotes,
+                CanCall = true,
+                TravelReady = TravelPluginsReady(),
                 LastError = null,
                 HasData = true,
             };
@@ -1215,6 +1276,17 @@ public sealed class RelayClient : IDisposable
             case MessageTypes.OwnerSettingsAck:
                 HandleOwnerSettingsAck(envelope);
                 break;
+#if WINDUP_TESTING
+            case MessageTypes.Call:
+                await HandleInboundCallAsync(envelope, ct).ConfigureAwait(false);
+                break;
+            case MessageTypes.CallAck:
+                HandleCallAck(envelope);
+                break;
+            case MessageTypes.CallResult:
+                HandleCallResult(envelope);
+                break;
+#endif
             case MessageTypes.Ping:
                 await SendEnvelopeAsync(Envelope.Create(MessageTypes.Pong, new { }), ct).ConfigureAwait(false);
                 break;
@@ -1810,8 +1882,108 @@ public sealed class RelayClient : IDisposable
             LockEmoteId = _config.EffectiveLockEmoteId,
             SettingsLocked = _config.OwnerSettingsLocked,
             Emotes = emotes,
+            CanCall = _consent.CanReceiveCallFromKey(fromKey),
+            TravelReady = TravelPluginsReady(),
         }), ct).ConfigureAwait(false);
     }
+
+    private bool TravelPluginsReady()
+    {
+#if WINDUP_TESTING
+        return _callTravel?.IsTravelReady ?? false;
+#else
+        return false;
+#endif
+    }
+
+#if WINDUP_TESTING
+    private async Task HandleInboundCallAsync(Envelope envelope, CancellationToken ct)
+    {
+        var payload = envelope.GetPayload<CallPayload>();
+        if (payload is null)
+            return;
+
+        var fromKey = PairingKeyUtil.Normalize(payload.From);
+        if (!PairingKeyUtil.IsValid(fromKey))
+            return;
+
+        if (!_consent.IsPairedByKey(fromKey))
+            return;
+
+        if (!_config.IsDoll || !_consent.CanReceiveCallFromKey(fromKey))
+        {
+            await SendEnvelopeAsync(Envelope.Create(MessageTypes.Error, new ErrorPayload
+            {
+                RequestId = payload.RequestId,
+                To = fromKey,
+                Code = ErrorCodes.NotAllowed,
+                Message = "Unable to call that doll.",
+            }), ct).ConfigureAwait(false);
+            return;
+        }
+
+        if (_callTravel is null)
+        {
+            await SendEnvelopeAsync(Envelope.Create(MessageTypes.Error, new ErrorPayload
+            {
+                RequestId = payload.RequestId,
+                To = fromKey,
+                Code = ErrorCodes.TravelUnavailable,
+                Message = "Call travel is unavailable.",
+            }), ct).ConfigureAwait(false);
+            return;
+        }
+
+        await _callTravel.RequestAsync(payload).ConfigureAwait(false);
+    }
+
+    private void HandleCallAck(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<CallAckPayload>();
+        if (payload is null)
+            return;
+
+        var dollKey = PairingKeyUtil.Normalize(payload.From);
+        var label = GetPairMessageLabel(dollKey);
+        var status = payload.Status ?? string.Empty;
+        var msg = status switch
+        {
+            CallAckStatuses.Crafting => $"{label} is crafting — waiting.",
+            CallAckStatuses.Instance => $"{label} is in an instance — waiting.",
+            CallAckStatuses.Combat => $"{label} is in combat — waiting for them to accept.",
+            CallAckStatuses.Busy => $"{label} cannot move yet — waiting for them to accept.",
+            CallAckStatuses.Traveling => $"{label} is answering your call.",
+            _ => $"{label} acknowledged your call ({status}).",
+        };
+        PluginChat.Print(_chat, msg, PluginChat.Yellow);
+    }
+
+    private void HandleCallResult(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<CallResultPayload>();
+        if (payload is null)
+            return;
+
+        var dollKey = PairingKeyUtil.Normalize(payload.From);
+        var label = GetPairMessageLabel(dollKey);
+        var status = payload.Status ?? string.Empty;
+        if (string.Equals(status, CallResultStatuses.Arrived, StringComparison.Ordinal))
+        {
+            PluginChat.Print(_chat, $"{label} has arrived nearby.", PluginChat.Green);
+            return;
+        }
+
+        if (string.Equals(status, CallResultStatuses.Cancelled, StringComparison.Ordinal))
+        {
+            PluginChat.Print(_chat, $"{label} cancelled the call.", PluginChat.Grey);
+            return;
+        }
+
+        var detail = string.IsNullOrWhiteSpace(payload.Message) ? status : payload.Message;
+        PluginChat.Print(_chat, $"Call to {label} failed: {detail}", PluginChat.Yellow);
+        SetOwnerSettingsError(dollKey, detail);
+    }
+#endif
 
     private async Task HandleInboundOwnerSettingsUpdateAsync(Envelope envelope, CancellationToken ct)
     {
@@ -1888,6 +2060,8 @@ public sealed class RelayClient : IDisposable
                 Emotes = (payload.Emotes ?? [])
                     .Select(e => (e.Id, e.Name ?? string.Empty))
                     .ToList(),
+                CanCall = payload.CanCall,
+                TravelReady = payload.TravelReady,
                 LastError = null,
                 HasData = true,
             };
@@ -2003,6 +2177,8 @@ public sealed class RelayClient : IDisposable
             LockEmoteId = snap.LockEmoteId,
             SettingsLocked = snap.SettingsLocked,
             Emotes = snap.Emotes.ToList(),
+            CanCall = snap.CanCall,
+            TravelReady = snap.TravelReady,
             LastError = snap.LastError,
             HasData = snap.HasData,
         };

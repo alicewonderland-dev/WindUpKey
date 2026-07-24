@@ -9,7 +9,8 @@
 
   <!-- Testing channel must be a higher version than Release for Dalamud to serve it. -->
   <PropertyGroup Condition="'$(Configuration)' == 'Testing'">
-    <Version>0.2.2.2</Version>
+    <Version>0.2.2.3</Version>
+    <DefineConstants>$(DefineConstants);WINDUP_TESTING</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>

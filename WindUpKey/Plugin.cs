@@ -47,6 +47,10 @@ public sealed class Plugin : IDalamudPlugin
     private readonly SoundEffectService _sounds;
     private readonly RelayClient _relay;
     private readonly MoodlesWindStatusService _moodlesStatus;
+#if WINDUP_TESTING
+    private readonly CallPromptWindow _callPrompt;
+    private readonly CallTravelService _callTravel;
+#endif
     private readonly List<IWindUpSource> _sources = [];
 
     public Plugin()
@@ -78,6 +82,24 @@ public sealed class Plugin : IDalamudPlugin
         _moodlesStatus = new MoodlesWindStatusService(
             PluginInterface, ClientState, ObjectTable, Configuration, _timer, lowWindMessages, Log);
 
+#if WINDUP_TESTING
+        _callPrompt = new CallPromptWindow();
+        _callTravel = new CallTravelService(
+            PluginInterface,
+            ClientState,
+            ObjectTable,
+            Condition,
+            DataManager,
+            ChatGui,
+            Log,
+            Configuration,
+            _timer,
+            _callPrompt,
+            ack => _relay.SendCallAckAsync(ack),
+            result => _relay.SendCallResultAsync(result));
+        _relay.AttachCallTravel(_callTravel);
+#endif
+
         _changelogWindow = new ChangelogWindow();
         _configWindow = new ConfigWindow(
             Configuration,
@@ -90,6 +112,9 @@ public sealed class Plugin : IDalamudPlugin
             PluginInterface.Manifest.AssemblyVersion.ToString());
         _windowSystem.AddWindow(_configWindow);
         _windowSystem.AddWindow(_changelogWindow);
+#if WINDUP_TESTING
+        _windowSystem.AddWindow(_callPrompt);
+#endif
 
         var contextMenuSource = new ContextMenuWindSource(ContextMenu, ClientState, Configuration, _relay, Log);
         _sources.Add(contextMenuSource);
@@ -102,7 +127,11 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
             HelpMessage =
-                "Open Wind-Up Key config.\n/windup safeword <word> uses your safeword.\n/windup unlock clears Hardcore and all owners (confirmation required).",
+                "Open Wind-Up Key config.\n/windup safeword <word> uses your safeword.\n/windup unlock clears Hardcore and all owners (confirmation required)."
+#if WINDUP_TESTING
+                + "\n/windup stopcall cancels an active owner call."
+#endif
+                ,
         });
 
         PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
@@ -144,6 +173,9 @@ public sealed class Plugin : IDalamudPlugin
         _sources.Clear();
 
         _relay.Dispose();
+#if WINDUP_TESTING
+        _callTravel.Dispose();
+#endif
         _moodlesStatus.Dispose();
         _sounds.Dispose();
         _lockController.Dispose();
@@ -164,6 +196,9 @@ public sealed class Plugin : IDalamudPlugin
         _relay.Tick();
         _timer.SetRelaySafetyBypass(_relay.ShouldSuspendMovementLocks);
         _timer.Tick();
+#if WINDUP_TESTING
+        _relay.TickCallTravel();
+#endif
         _lowWind.Tick();
 
         // Moodles reflection during zone load can crash the client; wait until stable.
@@ -197,6 +232,9 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnLogout(int type, int code)
     {
+#if WINDUP_TESTING
+        _relay.CancelActiveCall();
+#endif
         _lockController.UninstallHooks();
         _relay.Stop();
     }
@@ -213,6 +251,15 @@ public sealed class Plugin : IDalamudPlugin
         var space = trimmed.IndexOf(' ');
         var verb = space < 0 ? trimmed : trimmed[..space];
         var rest = space < 0 ? string.Empty : trimmed[(space + 1)..].Trim();
+
+#if WINDUP_TESTING
+        if (string.Equals(verb, "stopcall", StringComparison.OrdinalIgnoreCase))
+        {
+            _relay.CancelActiveCall();
+            PluginChat.Print(ChatGui, "Call cancelled.", PluginChat.Grey);
+            return;
+        }
+#endif
 
         if (string.Equals(verb, "unlock", StringComparison.OrdinalIgnoreCase))
         {
