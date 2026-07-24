@@ -5,6 +5,7 @@
     "Description": "A (hopefully) simple plugin. Dolls need winding, and winders can wind up dolls.",
     "InternalName": "WindUpKey",
     "AssemblyVersion": "0.2.2.1",
+    "TestingAssemblyVersion": "0.2.2.3",
     "RepoUrl": "https://github.com/alicewonderland-dev/WindUpKey",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 15,
@@ -13,7 +14,8 @@
     "IconUrl": "https://raw.githubusercontent.com/alicewonderland-dev/WindUpKey/master/key.png",
     "DownloadLinkInstall": "https://github.com/alicewonderland-dev/WindUpKey/releases/download/v0.2.2.1/WindUpKey.zip",
     "DownloadLinkUpdate": "https://github.com/alicewonderland-dev/WindUpKey/releases/download/v0.2.2.1/WindUpKey.zip",
-    "LastUpdate": 1784847577,
+    "DownloadLinkTesting": "https://github.com/alicewonderland-dev/WindUpKey/releases/download/v0.2.2.3/WindUpKey-Testing.zip",
+    "LastUpdate": 1784930945,
     "Tags": [
       "rp",
       "wind-up",
