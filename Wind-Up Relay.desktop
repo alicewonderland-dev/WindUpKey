@@ -1,0 +1,12 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Wind-Up Relay
+Comment=Start the Wind-Up Key relay host and Tailscale Funnel
+Exec="/home/alice/Projects/Apps/Wind-Up Key Plugin/Start-WindUpHost.sh"
+Path=/home/alice/Projects/Apps/Wind-Up Key Plugin
+Icon=/home/alice/Projects/Apps/Wind-Up Key Plugin/key.png
+Terminal=false
+Categories=Network;
+StartupNotify=true
