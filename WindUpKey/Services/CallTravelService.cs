@@ -209,12 +209,15 @@ public sealed class CallTravelService : IDisposable
                     TickWaitingAccept();
                     break;
                 case TravelPhase.ChangingWorld:
+                    _timer.SetCallTravelMuteDestination(_pending.Position);
                     TickChangingWorld();
                     break;
                 case TravelPhase.Teleporting:
+                    _timer.SetCallTravelMuteDestination(_pending.Position);
                     TickTeleporting();
                     break;
                 case TravelPhase.Pathing:
+                    _timer.SetCallTravelMuteDestination(_pending.Position);
                     TickPathing();
                     break;
             }
@@ -272,6 +275,7 @@ public sealed class CallTravelService : IDisposable
         if (IsCrafting() || IsInInstance())
         {
             _prompt.IsOpen = false;
+            _timer.SetCallTravelInputMute(false);
             _phase = TravelPhase.WaitingGates;
             return;
         }
@@ -312,6 +316,7 @@ public sealed class CallTravelService : IDisposable
 
         _prompt.IsOpen = false;
         _ = AckAsync(CallAckStatuses.Traveling);
+        _timer.SetCallTravelInputMute(true, _pending.Position);
 
         var localWorld = _objects.LocalPlayer?.CurrentWorld.RowId ?? 0;
         if (localWorld != 0 && localWorld != _pending.WorldId)
@@ -449,6 +454,7 @@ public sealed class CallTravelService : IDisposable
 
         StopOurPath();
         _weOwnTravel = false;
+        _timer.SetCallTravelInputMute(false);
         ShowPrompt(CallPromptReason.Failed, canAccept: !IsInCombat() && !IsExternallyBusy());
         _phase = TravelPhase.WaitingAccept;
         _ = AckAsync(CallAckStatuses.Busy);
@@ -500,6 +506,7 @@ public sealed class CallTravelService : IDisposable
         _phase = TravelPhase.Idle;
         _prompt.IsOpen = false;
         _timer.SetCallTravelBypass(false);
+        _timer.SetCallTravelInputMute(false);
         _pending = null;
         _ = sendResult;
     }

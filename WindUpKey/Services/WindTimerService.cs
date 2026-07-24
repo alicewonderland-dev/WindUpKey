@@ -92,7 +92,16 @@ public sealed class WindTimerService
         if (bypass == _callTravelBypass)
             return;
         _callTravelBypass = bypass;
+        if (!bypass)
+            _lock.SetInputMute(false);
     }
+
+    /// <summary>Mute player/controller steer during call auto-travel; keeps Lifestream/vnav free to move.</summary>
+    public void SetCallTravelInputMute(bool mute, System.Numerics.Vector3? destination = null) =>
+        _lock.SetInputMute(mute, destination);
+
+    public void SetCallTravelMuteDestination(System.Numerics.Vector3 destination) =>
+        _lock.SetInputMuteDestination(destination);
 
     /// <summary>Call on login (or plugin load while already logged in). Sits if currently unwound.</summary>
     public void OnLoggedIn()

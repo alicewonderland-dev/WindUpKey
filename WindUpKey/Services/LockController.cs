@@ -1,4 +1,6 @@
 using System;
+using System.Numerics;
+using System.Reflection;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
@@ -14,9 +16,11 @@ namespace WindUpKey.Services;
 /// Patch-fragile hooks live only here. When locked (and not in an instance / not yet in-world):
 /// suppress walk/fly/turn input (before game processes it — keeps groundsit), hard-freeze facing,
 /// block jump (incl. spacebar), block teleport/return, and re-apply groundsit if stood up.
-/// Hooks install only while the doll is locked and in-world; they are removed when wound
-/// or on logout. After login/zone/`BetweenAreas`, wait a short settle before install; mid-world
-/// unwind installs immediately. Installing passthrough hooks at login still crashed the client.
+/// Call-travel input mute suppresses player/controller steer and jump without freezing facing or
+/// blocking teleport/return, so Lifestream and vnavmesh can still drive the character.
+/// Hooks install only while the doll is locked, input-muted, or briefly nudging; they are removed
+/// when idle unlocked and on logout. After login/zone/`BetweenAreas`, wait a short settle before
+/// install; mid-world unlock nudge / mute installs immediately.
 /// </summary>
 public sealed unsafe class LockController : IDisposable
 {
@@ -34,6 +38,9 @@ public sealed unsafe class LockController : IDisposable
     private readonly Configuration _config;
 
     private bool _locked;
+    /// <summary>Mute player/controller steer during owner-call auto-travel (Testing).</summary>
+    private bool _inputMute;
+    private Vector3? _muteDestination;
     private float _frozenRotation;
     private bool _hasFrozenRotation;
     private bool _applyingFrozenRotation;
@@ -42,6 +49,15 @@ public sealed unsafe class LockController : IDisposable
     private int _nudgeForwardTicks;
     /// <summary>Deferred <c>/sit</c> stand (must run on framework tick — wind arrives off-thread).</summary>
     private bool _pendingSitStand;
+
+    private bool _vnavMuteTweaksApplied;
+    private bool? _savedVnavIgnoreUserInput;
+    private bool? _savedVnavCancelOnUserInput;
+    private PropertyInfo? _vnavIgnoreUserInputProp;
+    private PropertyInfo? _vnavUserInputProp;
+    private PropertyInfo? _vnavCancelOnUserInputProp;
+    private object? _vnavOverrideMovement;
+    private object? _vnavConfig;
 
     private Hook<RMIWalkDelegate>? _rmiWalkHook;
     private Hook<RMIFlyDelegate>? _rmiFlyHook;
@@ -115,6 +131,31 @@ public sealed unsafe class LockController : IDisposable
         // Do not read ObjectTable here — SetLocked can run during plugin ctor off the main thread.
         // Facing is captured on the next Framework Tick when RestrictionsActive.
     }
+
+    /// <summary>
+    /// Mute player and controller steer/jump during owner-call auto-travel without freezing facing
+    /// or blocking teleport/return (Lifestream / vnavmesh keep control).
+    /// </summary>
+    public void SetInputMute(bool mute, Vector3? destination = null)
+    {
+        if (mute)
+            _muteDestination = destination ?? _muteDestination;
+
+        if (mute == _inputMute)
+            return;
+
+        _inputMute = mute;
+        if (mute)
+            ApplyVnavMuteTweaks();
+        else
+        {
+            _muteDestination = null;
+            RestoreVnavMuteTweaks();
+        }
+    }
+
+    /// <summary>Update the point input-mute walk injection steers toward while muted.</summary>
+    public void SetInputMuteDestination(Vector3 destination) => _muteDestination = destination;
 
     /// <summary>
     /// After rewind: stand from sit/groundsit via <c>/sit</c> (get-up anim), or cancel other
@@ -198,8 +239,8 @@ public sealed unsafe class LockController : IDisposable
 
         EnsureHooksInstalled();
 
-        // Hooks are only needed while locked (or briefly for an unlock pose nudge).
-        if (_hooksInstalled && !_locked && _nudgeForwardTicks <= 0)
+        // Hooks are only needed while locked, input-muted, or briefly for an unlock pose nudge.
+        if (_hooksInstalled && !_locked && !_inputMute && _nudgeForwardTicks <= 0)
             UninstallHooks();
 
         if (!RestrictionsActive)
@@ -224,6 +265,13 @@ public sealed unsafe class LockController : IDisposable
     /// </summary>
     private bool RestrictionsActive =>
         _locked
+        && _clientState.IsLoggedIn
+        && !IsInInstance()
+        && _objectTable.LocalPlayer is not null;
+
+    /// <summary>Call-travel mute: in-world only, same safety gates as lock (no title/char-select).</summary>
+    private bool InputMuteActive =>
+        _inputMute
         && _clientState.IsLoggedIn
         && !IsInInstance()
         && _objectTable.LocalPlayer is not null;
@@ -258,7 +306,7 @@ public sealed unsafe class LockController : IDisposable
             return;
         }
 
-        var needHooks = _locked || _nudgeForwardTicks > 0;
+        var needHooks = _locked || _inputMute || _nudgeForwardTicks > 0;
         if (!needHooks)
         {
             // Still in-world while wound — keep eligibility so the next lock skips settle.
@@ -267,8 +315,8 @@ public sealed unsafe class LockController : IDisposable
             return;
         }
 
-        // Already in-world (or unlock nudge): install immediately.
-        if (_hooksWereEligible || (_nudgeForwardTicks > 0 && !_locked))
+        // Already in-world (or unlock nudge / mute): install immediately.
+        if (_hooksWereEligible || ((_nudgeForwardTicks > 0 || _inputMute) && !_locked))
         {
             _hooksWereEligible = true;
             InstallHooksNow();
@@ -300,6 +348,7 @@ public sealed unsafe class LockController : IDisposable
     /// </summary>
     public void UninstallHooks()
     {
+        RestoreVnavMuteTweaks();
         DisposeHooks();
         _hooksInstalled = false;
         _hookSettleFrames = 0;
@@ -444,6 +493,23 @@ public sealed unsafe class LockController : IDisposable
 
         _rmiWalkHook!.Original(self, sumLeft, sumForward, sumTurnLeft, haveBackwardOrStrafe, a6, bAdditiveUnk);
 
+        if (InputMuteActive)
+        {
+            // Strip keyboard and controller steer aggregated into RMI, then re-apply walk toward
+            // the call destination so vnav/Lifestream are not fighting player input.
+            *sumLeft = 0;
+            *sumForward = 0;
+            *sumTurnLeft = 0;
+            if (haveBackwardOrStrafe != null)
+                *haveBackwardOrStrafe = 0;
+            if (a6 != null)
+                *a6 = 0;
+
+            TryInjectMuteWalk(sumLeft, sumForward);
+            TryClearVnavUserInputFlag();
+            return;
+        }
+
         // One frame of forward input cancels sit / looping emotes after rewind.
         if (_nudgeForwardTicks > 0)
         {
@@ -472,6 +538,14 @@ public sealed unsafe class LockController : IDisposable
         }
 
         _rmiFlyHook!.Original(self, flyInput);
+
+        if (InputMuteActive && flyInput != null)
+        {
+            var floats = (float*)flyInput;
+            for (var i = 0; i < 6; i++)
+                floats[i] = 0;
+            TryClearVnavUserInputFlag();
+        }
     }
 
     private bool UseActionDetour(
@@ -484,7 +558,11 @@ public sealed unsafe class LockController : IDisposable
         uint comboRouteId,
         bool* outOptAreaTargeted)
     {
+        // Input mute must not block teleport/return — Lifestream needs them.
         if (RestrictionsActive && IsRestrictedAction(actionType, actionId))
+            return false;
+
+        if (InputMuteActive && IsJumpAction(actionType, actionId))
             return false;
 
         return _useActionHook!.Original(
@@ -510,21 +588,21 @@ public sealed unsafe class LockController : IDisposable
 
     private bool IsInputIdPressedDetour(InputData* self, InputId inputId)
     {
-        if (RestrictionsActive && IsJumpInput(inputId))
+        if ((RestrictionsActive || InputMuteActive) && IsJumpInput(inputId))
             return false;
         return _isInputIdPressedHook!.Original(self, inputId);
     }
 
     private bool IsInputIdDownDetour(InputData* self, InputId inputId)
     {
-        if (RestrictionsActive && IsJumpInput(inputId))
+        if ((RestrictionsActive || InputMuteActive) && IsJumpInput(inputId))
             return false;
         return _isInputIdDownHook!.Original(self, inputId);
     }
 
     private bool IsInputIdHeldDetour(InputData* self, InputId inputId)
     {
-        if (RestrictionsActive && IsJumpInput(inputId))
+        if ((RestrictionsActive || InputMuteActive) && IsJumpInput(inputId))
             return false;
         return _isInputIdHeldHook!.Original(self, inputId);
     }
@@ -554,6 +632,15 @@ public sealed unsafe class LockController : IDisposable
     private static bool IsJumpInput(InputId inputId) =>
         inputId is InputId.JUMP or InputId.PAD_JUMPANDCANCELCAST;
 
+    private static bool IsJumpAction(ActionType actionType, uint actionId)
+    {
+        if (actionType == ActionType.GeneralAction)
+            return actionId == GeneralActionJump;
+        if (actionType == ActionType.Action)
+            return actionId == 5; // Jump
+        return false;
+    }
+
     private static bool IsRestrictedAction(ActionType actionType, uint actionId)
     {
         if (actionType == ActionType.GeneralAction)
@@ -561,6 +648,221 @@ public sealed unsafe class LockController : IDisposable
 
         if (actionType == ActionType.Action)
             return actionId is 5 or 6 or 7;
+
+        return false;
+    }
+
+    private void TryInjectMuteWalk(float* sumLeft, float* sumForward)
+    {
+        if (_muteDestination is not { } dest)
+            return;
+
+        var player = _objectTable.LocalPlayer;
+        if (player is null)
+            return;
+
+        var delta = dest - player.Position;
+        delta.Y = 0;
+        if (delta.LengthSquared() < 0.05f * 0.05f)
+            return;
+
+        var desired = MathF.Atan2(delta.X, delta.Z);
+        var rel = desired - player.Rotation;
+        // Wrap to [-pi, pi]
+        while (rel > MathF.PI)
+            rel -= MathF.PI * 2;
+        while (rel < -MathF.PI)
+            rel += MathF.PI * 2;
+
+        *sumLeft = MathF.Sin(rel);
+        *sumForward = MathF.Cos(rel);
+    }
+
+    private void ApplyVnavMuteTweaks()
+    {
+        if (_vnavMuteTweaksApplied)
+            return;
+
+        try
+        {
+            EnsureVnavReflection();
+            if (_vnavOverrideMovement is not null && _vnavIgnoreUserInputProp is not null)
+            {
+                _savedVnavIgnoreUserInput = _vnavIgnoreUserInputProp.GetValue(_vnavOverrideMovement) is bool ignore ? ignore : null;
+                _vnavIgnoreUserInputProp.SetValue(_vnavOverrideMovement, true);
+            }
+
+            if (_vnavConfig is not null && _vnavCancelOnUserInputProp is not null)
+            {
+                _savedVnavCancelOnUserInput = _vnavCancelOnUserInputProp.GetValue(_vnavConfig) is bool cancel ? cancel : null;
+                _vnavCancelOnUserInputProp.SetValue(_vnavConfig, false);
+            }
+
+            TryClearVnavUserInputFlag();
+            _vnavMuteTweaksApplied = true;
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "WindUpKey: vnavmesh mute tweaks unavailable");
+        }
+    }
+
+    private void RestoreVnavMuteTweaks()
+    {
+        if (!_vnavMuteTweaksApplied)
+            return;
+
+        try
+        {
+            if (_vnavOverrideMovement is not null && _vnavIgnoreUserInputProp is not null && _savedVnavIgnoreUserInput is { } ignore)
+                _vnavIgnoreUserInputProp.SetValue(_vnavOverrideMovement, ignore);
+
+            if (_vnavConfig is not null && _vnavCancelOnUserInputProp is not null && _savedVnavCancelOnUserInput is { } cancel)
+                _vnavCancelOnUserInputProp.SetValue(_vnavConfig, cancel);
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "WindUpKey: failed restoring vnavmesh mute tweaks");
+        }
+        finally
+        {
+            _vnavMuteTweaksApplied = false;
+            _savedVnavIgnoreUserInput = null;
+            _savedVnavCancelOnUserInput = null;
+        }
+    }
+
+    private void TryClearVnavUserInputFlag()
+    {
+        try
+        {
+            EnsureVnavReflection();
+            if (_vnavOverrideMovement is not null)
+                _vnavUserInputProp?.SetValue(_vnavOverrideMovement, false);
+        }
+        catch
+        {
+            // optional
+        }
+    }
+
+    private void EnsureVnavReflection()
+    {
+        if (_vnavOverrideMovement is not null && _vnavConfig is not null)
+            return;
+
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            var name = asm.GetName().Name;
+            if (name is not ("vnavmesh" or "ffxiv_navmesh"))
+                continue;
+
+            Type? configType = null;
+            foreach (var type in asm.GetTypes())
+            {
+                if (type.Name == "OverrideMovement")
+                {
+                    _vnavIgnoreUserInputProp ??= type.GetProperty("IgnoreUserInput", BindingFlags.Instance | BindingFlags.Public);
+                    _vnavUserInputProp ??= type.GetProperty("UserInput", BindingFlags.Instance | BindingFlags.Public);
+                }
+
+                if ((type.Name is "Config" or "Configuration") && _vnavCancelOnUserInputProp is null)
+                {
+                    var prop = type.GetProperty("CancelMoveOnUserInput", BindingFlags.Instance | BindingFlags.Public);
+                    if (prop is null)
+                        continue;
+                    _vnavCancelOnUserInputProp = prop;
+                    configType = type;
+                }
+            }
+
+            if (configType is not null && _vnavConfig is null)
+            {
+                foreach (var t in asm.GetTypes())
+                {
+                    if (t.Name != "Service")
+                        continue;
+                    var cfgProp = t.GetProperty("Config", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (cfgProp?.GetValue(null) is { } cfg && configType.IsInstanceOfType(cfg))
+                    {
+                        _vnavConfig = cfg;
+                        break;
+                    }
+                }
+            }
+
+            if (_vnavOverrideMovement is null)
+            {
+                foreach (var type in asm.GetTypes())
+                {
+                    if (type.Name is not ("Service" or "Plugin"))
+                        continue;
+
+                    foreach (var field in type.GetFields(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
+                    {
+                        object? root;
+                        try
+                        {
+                            root = field.GetValue(null);
+                        }
+                        catch
+                        {
+                            continue;
+                        }
+
+                        if (root is not null && TryFindOverrideMovement(root, depth: 0, out var found))
+                        {
+                            _vnavOverrideMovement = found;
+                            _vnavIgnoreUserInputProp ??= found.GetType().GetProperty("IgnoreUserInput", BindingFlags.Instance | BindingFlags.Public);
+                            _vnavUserInputProp ??= found.GetType().GetProperty("UserInput", BindingFlags.Instance | BindingFlags.Public);
+                            break;
+                        }
+                    }
+
+                    if (_vnavOverrideMovement is not null)
+                        break;
+                }
+            }
+
+            break;
+        }
+    }
+
+    private static bool TryFindOverrideMovement(object root, int depth, out object found)
+    {
+        found = null!;
+        if (depth > 5)
+            return false;
+
+        if (root.GetType().Name == "OverrideMovement")
+        {
+            found = root;
+            return true;
+        }
+
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        foreach (var field in root.GetType().GetFields(flags))
+        {
+            object? child;
+            try
+            {
+                child = field.GetValue(root);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (child is null || child is string || child.GetType().IsPrimitive)
+                continue;
+
+            if (child.GetType().Namespace?.StartsWith("System", StringComparison.Ordinal) == true
+                && child.GetType().Name is not ("FollowPath" or "OverrideMovement"))
+                continue;
+
+            if (TryFindOverrideMovement(child, depth + 1, out found))
+                return true;
+        }
 
         return false;
     }
@@ -614,5 +916,5 @@ public sealed unsafe class LockController : IDisposable
         }
     }
 
-    public void Dispose() => DisposeHooks();
+    public void Dispose() => UninstallHooks();
 }
