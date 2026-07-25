@@ -844,8 +844,13 @@ public sealed class RelayClient : IDisposable
 
     private void ApplyLocalOwnerGrant(string dollKey, string? identity)
     {
+        // Presence sync resends ownerGrant while both sides are online; only announce first grant.
+        var isNew = _config.FindOwnedDoll(dollKey) is null;
         _config.UpsertOwnedDoll(dollKey, identity);
         _config.Save();
+        if (!isNew)
+            return;
+
         PluginChat.Print(
             _chat,
             $"You were designated as an owner by {GetPairMessageLabel(dollKey)}.",
@@ -1110,6 +1115,29 @@ public sealed class RelayClient : IDisposable
                 MyKey = _config.PairingKey,
                 TheirKey = peer,
             }), ct).ConfigureAwait(false);
+        }
+
+        // Re-assert ownership once on connect (covers grants made while disconnected).
+        // Relay outbox already delivers live grants to offline owners; do not resend on presence polls.
+        if (_config.IsDoll)
+        {
+            foreach (var partner in _config.PairedPartners.ToArray())
+            {
+                if (partner is not { IsOwner: true })
+                    continue;
+                var peer = PairingKeyUtil.Normalize(partner.PartnerKey);
+                if (!PairingKeyUtil.IsValid(peer))
+                    continue;
+                if (string.Equals(peer, _config.PairingKey, StringComparison.Ordinal))
+                    continue;
+
+                await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerGrant, new OwnerGrantPayload
+                {
+                    From = _config.PairingKey,
+                    To = peer,
+                    Identity = LocalOwnerIdentityLabel(),
+                }), ct).ConfigureAwait(false);
+            }
         }
 
         // Presence-driven keyRotated flush (send when peer answers online).
@@ -1641,33 +1669,7 @@ public sealed class RelayClient : IDisposable
         if (payload.StillPaired == false)
             SilentRemovePartner(peerKey);
         else if (payload.Online)
-        {
             _ = TrySendPendingKeyRotationAsync(peerKey, CancellationToken.None);
-            _ = TryResendOwnerGrantAsync(peerKey);
-        }
-    }
-
-    private async Task TryResendOwnerGrantAsync(string partnerKey)
-    {
-        if (!_config.IsDoll || !IsConnected)
-            return;
-
-        var peer = PairingKeyUtil.Normalize(partnerKey);
-        var pair = _config.FindPairByKey(peer);
-        if (pair is not { IsOwner: true })
-            return;
-
-        if (string.Equals(peer, _config.PairingKey, StringComparison.Ordinal))
-            return;
-
-        await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerGrant, new OwnerGrantPayload
-        {
-            From = _config.PairingKey,
-            To = peer,
-            Identity = string.IsNullOrWhiteSpace(_config.LastKnownIdentity)
-                ? _cachedIdentity
-                : _config.LastKnownIdentity,
-        }), CancellationToken.None).ConfigureAwait(false);
     }
 
     private void HandleKeyRotated(Envelope envelope)

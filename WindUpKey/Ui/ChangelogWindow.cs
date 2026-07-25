@@ -12,6 +12,11 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.2.4 — Owner grant spam (Testing)",
+            [
+                "Designating an owner no longer floods them with repeated ownership messages while the config window is open.",
+            ]),
+        new(
             "0.2.2.3 — Owner call (Testing)",
             [
                 "Owners can Call a doll to travel near them when the doll allows it (always allowed in Hardcore).",
@@ -28,13 +33,6 @@ public sealed class ChangelogWindow : Window
             "0.2.2.0 — Relay hosts",
             [
                 "The plugin can reach either the Linux or Windows relay host and prefers the last one that worked.",
-            ]),
-        new(
-            "0.2.1.0 — Pair labels",
-            [
-                "Pairs can have local nicknames, and dolls can assign local titles to owners.",
-                "Pair-related messages use the chosen title and name.",
-                "Wind charge Moodles are restored more reliably after login and area changes.",
             ]),
     ];
 
