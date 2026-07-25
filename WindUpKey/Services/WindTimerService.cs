@@ -94,14 +94,21 @@ public sealed class WindTimerService
         _callTravelBypass = bypass;
         if (!bypass)
             _lock.SetInputMute(false);
+        // Unlock immediately — do not wait for the next framework Tick SyncLockState, or the
+        // first Teleport UseAction is still RestrictionsActive and the cast never starts.
+        SyncLockState();
     }
 
-    /// <summary>Mute player/controller steer during call auto-travel; keeps Lifestream/vnav free to move.</summary>
+    /// <summary>Mute jump during Call auto-travel; walk/fly stay free for Lifestream and vnavmesh.</summary>
     public void SetCallTravelInputMute(bool mute, System.Numerics.Vector3? destination = null) =>
         _lock.SetInputMute(mute, destination);
 
     public void SetCallTravelMuteDestination(System.Numerics.Vector3 destination) =>
         _lock.SetInputMuteDestination(destination);
+
+    /// <summary>During Call pathing, allow Jump for takeoff and apply vnav IgnoreUserInput tweaks.</summary>
+    public void SetCallTravelPathingPassThrough(bool enabled) =>
+        _lock.SetInputMuteAutomationPassThrough(enabled);
 
     /// <summary>Call on login (or plugin load while already logged in). Sits if currently unwound.</summary>
     public void OnLoggedIn()

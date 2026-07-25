@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using Lumina.Excel.Sheets;
 
@@ -73,66 +74,99 @@ public readonly struct HousingCallLocation
             _ => null,
         };
 
-    /// <summary>Reads ward/division/plot from HousingManager. Safe no-op outside housing.</summary>
-    public static unsafe bool TryRead(uint currentTerritoryId, TerritoryType? territoryRow, out HousingCallLocation location)
+    /// <summary>
+    /// Reads ward/division/plot from HousingManager. Inside private houses, GetCurrentWard often
+    /// returns -1 — use <see cref="HousingManager.GetCurrentIndoorHouseId"/> / HouseId instead.
+    /// Pass <paramref name="data"/> so indoor territories can resolve city via PlaceNameRegion.
+    /// </summary>
+    public static unsafe bool TryRead(
+        uint currentTerritoryId,
+        TerritoryType? territoryRow,
+        out HousingCallLocation location,
+        IDataManager? data = null)
     {
         location = default;
         var h = HousingManager.Instance();
         if (h is null)
             return false;
 
-        var wardIndex = h->GetCurrentWard();
-        if (wardIndex < 0)
-            return false;
+        var sheet = data?.GetExcelSheet<TerritoryType>();
+        if (territoryRow is null && sheet?.TryGetRow(currentTerritoryId, out var currentRow) == true)
+            territoryRow = currentRow;
 
-        var division = h->GetCurrentDivision();
-        if (division is not (1 or 2))
-            return false;
-
-        var rawPlot = h->GetCurrentPlot();
         var indoor = h->IsInside();
-        var isApartment = rawPlot is -128 or -127;
-        // ClientStructs: -128 main apt wing, -127 subdivision apt wing.
-        if (rawPlot == -127)
-            division = 2;
-        else if (rawPlot == -128)
-            division = 1;
-
-        var city = TryGetCityForTerritory(currentTerritoryId)
-                   ?? (territoryRow is { } row ? TryGetCityByPlaceNameRegion(row.PlaceNameRegion.RowId) : null);
+        int ward;
+        int division;
+        var plot = 0;
+        var apartment = 0;
+        bool isApartment;
         var outdoorTerritory = currentTerritoryId;
-        if (indoor || !IsResidentialTerritory(currentTerritoryId))
+
+        if (indoor)
         {
-            var original = HousingManager.GetOriginalHouseTerritoryTypeId();
-            if (original != 0)
+            if (!TryReadIndoor(h, currentTerritoryId, out ward, out division, out plot, out apartment, out isApartment, out outdoorTerritory))
+                return false;
+        }
+        else
+        {
+            var wardIndex = h->GetCurrentWard();
+            if (wardIndex < 0)
+                return false;
+
+            division = h->GetCurrentDivision();
+            if (division is not (1 or 2))
+                return false;
+
+            var rawPlot = h->GetCurrentPlot();
+            isApartment = rawPlot is -128 or -127;
+            // ClientStructs: -128 main apt wing, -127 subdivision apt wing.
+            if (rawPlot == -127)
+                division = 2;
+            else if (rawPlot == -128)
+                division = 1;
+
+            ward = wardIndex + 1;
+            if (isApartment)
             {
-                outdoorTerritory = original;
-                city ??= TryGetCityForTerritory(original);
+                var room = h->GetCurrentRoom();
+                if (room > 0)
+                    apartment = room;
             }
+            else if (rawPlot >= 0)
+            {
+                plot = rawPlot + 1;
+            }
+        }
+
+        var city = TryGetCityForTerritory(outdoorTerritory)
+                   ?? TryGetCityForTerritory(currentTerritoryId)
+                   ?? (territoryRow is { } row ? TryGetCityByPlaceNameRegion(row.PlaceNameRegion.RowId) : null);
+
+        if ((city is null or 0) && sheet is not null
+            && outdoorTerritory != 0
+            && outdoorTerritory != currentTerritoryId
+            && sheet.TryGetRow(outdoorTerritory, out var outdoorRow))
+        {
+            city = TryGetCityByPlaceNameRegion(outdoorRow.PlaceNameRegion.RowId)
+                   ?? TryGetCityForTerritory(outdoorTerritory);
         }
 
         if (city is null or 0)
             return false;
 
         outdoorTerritory = TryGetResidentialTerritoryForCity(city.Value) ?? outdoorTerritory;
-
-        var plot = 0;
-        var apartment = 0;
-        if (isApartment)
+        if (!IsResidentialTerritory(outdoorTerritory))
         {
-            var room = h->GetCurrentRoom();
-            if (room > 0)
-                apartment = room;
-        }
-        else if (rawPlot >= 0)
-        {
-            plot = rawPlot + 1;
+            var mapped = TryGetResidentialTerritoryForCity(city.Value);
+            if (mapped is null)
+                return false;
+            outdoorTerritory = mapped.Value;
         }
 
         location = new HousingCallLocation
         {
             City = city.Value,
-            Ward = wardIndex + 1,
+            Ward = ward,
             Division = division,
             Plot = plot,
             Apartment = apartment,
@@ -141,5 +175,95 @@ public readonly struct HousingCallLocation
             OutdoorTerritoryId = outdoorTerritory,
         };
         return location.IsHousing;
+    }
+
+    private static unsafe bool TryReadIndoor(
+        HousingManager* h,
+        uint currentTerritoryId,
+        out int ward,
+        out int division,
+        out int plot,
+        out int apartment,
+        out bool isApartment,
+        out uint outdoorTerritory)
+    {
+        ward = 0;
+        division = 0;
+        plot = 0;
+        apartment = 0;
+        isApartment = false;
+        outdoorTerritory = currentTerritoryId;
+
+        var houseId = h->GetCurrentIndoorHouseId();
+        if (houseId.Id == 0)
+            houseId = h->GetCurrentHouseId();
+
+        var original = HousingManager.GetOriginalHouseTerritoryTypeId();
+        if (original != 0)
+            outdoorTerritory = original;
+        else if (houseId.TerritoryTypeId != 0)
+            outdoorTerritory = houseId.TerritoryTypeId;
+
+        // Manager ward is often -1 indoors; HouseId.WardIndex is the reliable source.
+        var wardIndex = h->GetCurrentWard();
+        if (wardIndex < 0 && houseId.Id != 0)
+            wardIndex = (sbyte)houseId.WardIndex;
+        if (wardIndex < 0)
+            return false;
+
+        ward = wardIndex + 1;
+
+        var rawPlot = h->GetCurrentPlot();
+        isApartment = rawPlot is -128 or -127 || (houseId.Id != 0 && houseId.IsApartment);
+
+        if (isApartment)
+        {
+            if (rawPlot == -127)
+                division = 2;
+            else if (rawPlot == -128)
+                division = 1;
+            else if (houseId.Id != 0)
+                division = houseId.ApartmentDivision + 1; // 0/1 → main/sub
+            else
+                division = h->GetCurrentDivision();
+
+            if (division is not (1 or 2))
+                return false;
+
+            var room = h->GetCurrentRoom();
+            if (room > 0)
+                apartment = room;
+            else if (houseId.Id != 0 && houseId.RoomNumber is > 0 and < 0x3FF)
+                apartment = houseId.RoomNumber;
+        }
+        else
+        {
+            division = h->GetCurrentDivision();
+            if (rawPlot >= 0)
+            {
+                plot = rawPlot + 1;
+            }
+            else if (houseId.Id != 0)
+            {
+                // HouseId plot index is 0-based; subdivision may be encoded as 30–59.
+                var plotIndex = houseId.PlotIndex;
+                if (plotIndex >= 30)
+                {
+                    division = 2;
+                    plot = plotIndex - 30 + 1;
+                }
+                else
+                {
+                    plot = plotIndex + 1;
+                    if (division is not (1 or 2))
+                        division = 1;
+                }
+            }
+
+            if (division is not (1 or 2))
+                return false;
+        }
+
+        return ward > 0;
     }
 }

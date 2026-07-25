@@ -16,8 +16,8 @@ namespace WindUpKey.Services;
 /// Patch-fragile hooks live only here. When locked (and not in an instance / not yet in-world):
 /// suppress walk/fly/turn input (before game processes it — keeps groundsit), hard-freeze facing,
 /// block jump (incl. spacebar), block teleport/return, and re-apply groundsit if stood up.
-/// Call-travel input mute suppresses player/controller steer and jump without freezing facing or
-/// blocking teleport/return, so Lifestream and vnavmesh can still drive the character.
+/// Call-travel input mute suppresses player jump without freezing facing or blocking
+/// teleport/return/walk/fly, so Lifestream housing travel and vnavmesh can still drive the character.
 /// Hooks install only while the doll is locked, input-muted, or briefly nudging; they are removed
 /// when idle unlocked and on logout. After login/zone/`BetweenAreas`, wait a short settle before
 /// install; mid-world unlock nudge / mute installs immediately.
@@ -40,6 +40,11 @@ public sealed unsafe class LockController : IDisposable
     private bool _locked;
     /// <summary>Mute player/controller steer during owner-call auto-travel (Testing).</summary>
     private bool _inputMute;
+    /// <summary>
+    /// When muted for Call pathing: allow Jump (vnav takeoff) and apply vnav IgnoreUserInput tweaks.
+    /// Cleared when mute ends or pathing ends.
+    /// </summary>
+    private bool _muteAutomationPassThrough;
     private Vector3? _muteDestination;
     private float _frozenRotation;
     private bool _hasFrozenRotation;
@@ -133,25 +138,44 @@ public sealed unsafe class LockController : IDisposable
     }
 
     /// <summary>
-    /// Mute player and controller steer/jump during owner-call auto-travel without freezing facing
-    /// or blocking teleport/return (Lifestream / vnavmesh keep control).
+    /// Mute jump during owner-call auto-travel without freezing facing or blocking
+    /// teleport/return/walk/fly (Lifestream housing travel and vnavmesh keep control).
     /// </summary>
     public void SetInputMute(bool mute, Vector3? destination = null)
     {
         if (mute)
-            _muteDestination = destination ?? _muteDestination;
+        {
+            // Null destination clears any leftover steer target from older builds.
+            _muteDestination = destination;
+        }
 
         if (mute == _inputMute)
             return;
 
         _inputMute = mute;
-        if (mute)
-            ApplyVnavMuteTweaks();
-        else
+        if (!mute)
         {
             _muteDestination = null;
+            _muteAutomationPassThrough = false;
             RestoreVnavMuteTweaks();
         }
+    }
+
+    /// <summary>
+    /// Call pathing phase: allow Jump for vnav takeoff and apply vnavmesh IgnoreUserInput tweaks.
+    /// RMI walk/fly are never zeroed during Call mute (Lifestream needs them for housing travel).
+    /// </summary>
+    public void SetInputMuteAutomationPassThrough(bool passThrough)
+    {
+        var enable = passThrough && _inputMute;
+        if (enable == _muteAutomationPassThrough)
+            return;
+
+        _muteAutomationPassThrough = enable;
+        if (enable)
+            ApplyVnavMuteTweaks();
+        else
+            RestoreVnavMuteTweaks();
     }
 
     /// <summary>Update the point input-mute walk injection steers toward while muted.</summary>
@@ -495,18 +519,9 @@ public sealed unsafe class LockController : IDisposable
 
         if (InputMuteActive)
         {
-            // Strip keyboard and controller steer aggregated into RMI, then re-apply walk toward
-            // the call destination so vnav/Lifestream are not fighting player input.
-            *sumLeft = 0;
-            *sumForward = 0;
-            *sumTurnLeft = 0;
-            if (haveBackwardOrStrafe != null)
-                *haveBackwardOrStrafe = 0;
-            if (a6 != null)
-                *a6 = 0;
-
-            TryInjectMuteWalk(sumLeft, sumForward);
-            TryClearVnavUserInputFlag();
+            // Never zero walk/strafe during Call mute. Lifestream GoToHousingAddress walks to
+            // ward aetherytes / plots through these hooks; stripping axes stranded housing Calls.
+            // (Wall-running was from injecting toward the owner destination — that inject is gone.)
             return;
         }
 
@@ -539,13 +554,9 @@ public sealed unsafe class LockController : IDisposable
 
         _rmiFlyHook!.Original(self, flyInput);
 
-        if (InputMuteActive && flyInput != null)
-        {
-            var floats = (float*)flyInput;
-            for (var i = 0; i < 6; i++)
-                floats[i] = 0;
-            TryClearVnavUserInputFlag();
-        }
+        // Call input-mute must not zero fly axes: that cancels aetheryte teleport while mounted,
+        // blocks Lifestream housing approach, and blocks vnavmesh flight.
+        // (RestrictionsActive still zeroes fly when unwound-locked.)
     }
 
     private bool UseActionDetour(
@@ -562,7 +573,8 @@ public sealed unsafe class LockController : IDisposable
         if (RestrictionsActive && IsRestrictedAction(actionType, actionId))
             return false;
 
-        if (InputMuteActive && IsJumpAction(actionType, actionId))
+        // During Call pathing, vnavmesh may ExecuteJump to take off while mounted — do not block it.
+        if (InputMuteActive && !_muteAutomationPassThrough && IsJumpAction(actionType, actionId))
             return false;
 
         return _useActionHook!.Original(
@@ -588,24 +600,32 @@ public sealed unsafe class LockController : IDisposable
 
     private bool IsInputIdPressedDetour(InputData* self, InputId inputId)
     {
-        if ((RestrictionsActive || InputMuteActive) && IsJumpInput(inputId))
+        if (ShouldBlockJumpInput() && IsJumpInput(inputId))
             return false;
         return _isInputIdPressedHook!.Original(self, inputId);
     }
 
     private bool IsInputIdDownDetour(InputData* self, InputId inputId)
     {
-        if ((RestrictionsActive || InputMuteActive) && IsJumpInput(inputId))
+        if (ShouldBlockJumpInput() && IsJumpInput(inputId))
             return false;
         return _isInputIdDownHook!.Original(self, inputId);
     }
 
     private bool IsInputIdHeldDetour(InputData* self, InputId inputId)
     {
-        if ((RestrictionsActive || InputMuteActive) && IsJumpInput(inputId))
+        if (ShouldBlockJumpInput() && IsJumpInput(inputId))
             return false;
         return _isInputIdHeldHook!.Original(self, inputId);
     }
+
+    /// <summary>
+    /// Block jump while locked, or while Call-muted before pathing. Pathing pass-through must allow
+    /// jump so vnavmesh can take off from a mount on a flight path.
+    /// </summary>
+    private bool ShouldBlockJumpInput() =>
+        RestrictionsActive
+        || (InputMuteActive && !_muteAutomationPassThrough);
 
     private void EnforceGroundSit()
     {
@@ -634,11 +654,9 @@ public sealed unsafe class LockController : IDisposable
 
     private static bool IsJumpAction(ActionType actionType, uint actionId)
     {
-        if (actionType == ActionType.GeneralAction)
-            return actionId == GeneralActionJump;
-        if (actionType == ActionType.Action)
-            return actionId == 5; // Jump
-        return false;
+        // Jump is a General Action. Action 5 is Teleport — never treat it as jump or Call mute
+        // blocks Lifestream aetheryte casts.
+        return actionType == ActionType.GeneralAction && actionId == GeneralActionJump;
     }
 
     private static bool IsRestrictedAction(ActionType actionType, uint actionId)
@@ -650,32 +668,6 @@ public sealed unsafe class LockController : IDisposable
             return actionId is 5 or 6 or 7;
 
         return false;
-    }
-
-    private void TryInjectMuteWalk(float* sumLeft, float* sumForward)
-    {
-        if (_muteDestination is not { } dest)
-            return;
-
-        var player = _objectTable.LocalPlayer;
-        if (player is null)
-            return;
-
-        var delta = dest - player.Position;
-        delta.Y = 0;
-        if (delta.LengthSquared() < 0.05f * 0.05f)
-            return;
-
-        var desired = MathF.Atan2(delta.X, delta.Z);
-        var rel = desired - player.Rotation;
-        // Wrap to [-pi, pi]
-        while (rel > MathF.PI)
-            rel -= MathF.PI * 2;
-        while (rel < -MathF.PI)
-            rel += MathF.PI * 2;
-
-        *sumLeft = MathF.Sin(rel);
-        *sumForward = MathF.Cos(rel);
     }
 
     private void ApplyVnavMuteTweaks()

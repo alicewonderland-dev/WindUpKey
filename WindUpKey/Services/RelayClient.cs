@@ -57,6 +57,7 @@ public sealed class RelayClient : IDisposable
     private readonly IFramework _framework;
     private readonly IPluginLog _log;
     private readonly IChatGui _chat;
+    private readonly IDataManager _data;
     private readonly ConsentService _consent;
     private readonly WindTimerService _timer;
     private readonly IWindNotifier _notifier;
@@ -105,6 +106,7 @@ public sealed class RelayClient : IDisposable
         IFramework framework,
         IPluginLog log,
         IChatGui chat,
+        IDataManager data,
         ConsentService consent,
         WindTimerService timer,
         IWindNotifier notifier,
@@ -117,6 +119,7 @@ public sealed class RelayClient : IDisposable
         _framework = framework;
         _log = log;
         _chat = chat;
+        _data = data;
         _consent = consent;
         _timer = timer;
         _notifier = notifier;
@@ -166,7 +169,7 @@ public sealed class RelayClient : IDisposable
             Z = player.Position.Z,
         };
 
-        if (HousingCallLocation.TryRead(territoryId, territoryRow: null, out var housing))
+        if (HousingCallLocation.TryRead(territoryId, territoryRow: null, out var housing, _data))
         {
             payload.HousingCity = housing.City;
             payload.HousingWard = housing.Ward;
@@ -177,6 +180,15 @@ public sealed class RelayClient : IDisposable
             payload.HousingIndoor = housing.Indoor;
             // Wards/subdivisions share TerritoryType — send the outdoor district id for travel.
             payload.TerritoryId = housing.OutdoorTerritoryId;
+        }
+        else if (_config.IsDebugEnabled)
+        {
+            _log.Debug(
+                "Call snapshot: HousingCallLocation.TryRead failed (terr={Territory} pos=({X:0.0},{Y:0.0},{Z:0.0}))",
+                territoryId,
+                player.Position.X,
+                player.Position.Y,
+                player.Position.Z);
         }
 
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.Call, payload), CancellationToken.None)
