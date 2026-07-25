@@ -12,6 +12,11 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.2.7 — Call owner plugins (Testing)",
+            [
+                "Calling a doll no longer requires Lifestream or vnavmesh on the owner. Only the doll answering the Call needs those plugins.",
+            ]),
+        new(
             "0.2.2.6 — Call cancel retry (Testing)",
             [
                 "Cancelling or failing a Call now aborts leftover Lifestream/vnavmesh work so the next Call and Accept retry can start cleanly.",
@@ -26,13 +31,6 @@ public sealed class ChangelogWindow : Window
             "0.2.2.4 — Owner grant spam (Testing)",
             [
                 "Designating an owner no longer floods them with repeated ownership messages while the config window is open.",
-            ]),
-        new(
-            "0.2.2.3 — Owner call (Testing)",
-            [
-                "Owners can Call a doll to travel near them when the doll allows it (always allowed in Hardcore).",
-                "Requires Lifestream and vnavmesh on the doll. Same-data-center world travel is supported; cross-DC is not.",
-                "Calls wait for crafting and duties, and show a presence prompt for combat, blocked movement, or travel failure.",
             ]),
     ];
 

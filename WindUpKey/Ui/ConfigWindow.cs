@@ -911,7 +911,8 @@ public sealed class ConfigWindow : Window, IDisposable
         var canCall = snap.CanCall;
         var travelReady = snap.TravelReady;
         var inWorld = Plugin.ObjectTable.LocalPlayer is not null && Plugin.ClientState.IsLoggedIn;
-        var enabled = online && canCall && travelReady && inWorld && _relay.IsConnected;
+        // Travel plugins are required only on the receiving doll — never to initiate a Call.
+        var enabled = online && canCall && inWorld && _relay.IsConnected;
 
         if (!enabled)
             ImGui.BeginDisabled();
@@ -927,13 +928,7 @@ public sealed class ConfigWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
         {
             ImGui.BeginTooltip();
-            if (!travelReady)
-            {
-                ImGui.TextUnformatted("Requires the doll to have these plugins installed and enabled:");
-                ImGui.BulletText("Lifestream");
-                ImGui.BulletText("vnavmesh");
-            }
-            else if (!canCall)
+            if (!canCall)
                 ImGui.TextUnformatted("This doll has not allowed you to call them (or Hardcore is off without Can call me).");
             else if (!online)
                 ImGui.TextUnformatted("Doll must be online.");
@@ -942,7 +937,15 @@ public sealed class ConfigWindow : Window, IDisposable
             else if (!_relay.IsConnected)
                 ImGui.TextUnformatted("Relay is not connected yet.");
             else
+            {
                 ImGui.TextUnformatted("Call the doll to travel near your current position.");
+                if (!travelReady)
+                {
+                    ImGui.TextUnformatted("The doll needs these installed to answer (you do not, even if you are also a doll):");
+                    ImGui.BulletText("Lifestream");
+                    ImGui.BulletText("vnavmesh");
+                }
+            }
             ImGui.EndTooltip();
         }
     }

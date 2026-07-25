@@ -227,7 +227,7 @@ public sealed class OwnerSettingsResultPayload
     [JsonPropertyName("canCall")]
     public bool CanCall { get; set; }
 
-    /// <summary>True when Lifestream and vnavmesh IPC are available on the doll.</summary>
+    /// <summary>True when Lifestream and vnavmesh IPC are available on the doll (receive-side only; callers ignore this).</summary>
     [JsonPropertyName("travelReady")]
     public bool TravelReady { get; set; }
 }
