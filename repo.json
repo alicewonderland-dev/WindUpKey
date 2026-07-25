@@ -6,6 +6,7 @@
     "InternalName": "WindUpKey",
     "AssemblyVersion": "0.2.2.1",
     "TestingAssemblyVersion": "0.2.2.3",
+    "TestingDalamudApiLevel": 15,
     "RepoUrl": "https://github.com/alicewonderland-dev/WindUpKey",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 15,
@@ -15,7 +16,7 @@
     "DownloadLinkInstall": "https://github.com/alicewonderland-dev/WindUpKey/releases/download/v0.2.2.1/WindUpKey.zip",
     "DownloadLinkUpdate": "https://github.com/alicewonderland-dev/WindUpKey/releases/download/v0.2.2.1/WindUpKey.zip",
     "DownloadLinkTesting": "https://github.com/alicewonderland-dev/WindUpKey/releases/download/v0.2.2.3/WindUpKey-Testing.zip",
-    "LastUpdate": 1784930945,
+    "LastUpdate": 1784933005,
     "Tags": [
       "rp",
       "wind-up",
