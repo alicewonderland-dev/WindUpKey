@@ -16,9 +16,6 @@ public sealed class CharacterProfile
 
     public List<string> PendingPartnerKeys { get; set; } = [];
 
-    /// <summary>Outbound key-rotation announces waiting for an online peer.</summary>
-    public List<PendingKeyRotation> PendingKeyRotations { get; set; } = [];
-
     /// <summary>Dolls this character owns (from remote ownerGrant).</summary>
     public List<OwnedDoll> OwnedDolls { get; set; } = [];
 
@@ -55,18 +52,4 @@ public sealed class CharacterProfile
     public double LowWindTriggerLowSeconds { get; set; }
 
     public DateTimeOffset? LowWindLastWarningUtc { get; set; }
-}
-
-/// <summary>Queued <c>keyRotated</c> announce to a partner after a local key change.</summary>
-[Serializable]
-public sealed class PendingKeyRotation
-{
-    public string PartnerKey { get; set; } = string.Empty;
-
-    public string OldKey { get; set; } = string.Empty;
-
-    public string NewKey { get; set; } = string.Empty;
-
-    /// <summary>Changer's new Name@World for the partner's local label.</summary>
-    public string Identity { get; set; } = string.Empty;
 }

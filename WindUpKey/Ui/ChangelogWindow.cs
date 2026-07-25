@@ -12,6 +12,17 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.2.6 — Call cancel retry (Testing)",
+            [
+                "Cancelling or failing a Call now aborts leftover Lifestream/vnavmesh work so the next Call and Accept retry can start cleanly.",
+            ]),
+        new(
+            "0.2.2.5 — Call housing travel (Testing)",
+            [
+                "Call travel now distinguishes housing wards and subdivisions (they share a zone id).",
+                "Dolls use Lifestream housing travel to the owner's ward before pathing, so vnavmesh is not fed coordinates from the wrong ward.",
+            ]),
+        new(
             "0.2.2.4 — Owner grant spam (Testing)",
             [
                 "Designating an owner no longer floods them with repeated ownership messages while the config window is open.",
@@ -22,17 +33,6 @@ public sealed class ChangelogWindow : Window
                 "Owners can Call a doll to travel near them when the doll allows it (always allowed in Hardcore).",
                 "Requires Lifestream and vnavmesh on the doll. Same-data-center world travel is supported; cross-DC is not.",
                 "Calls wait for crafting and duties, and show a presence prompt for combat, blocked movement, or travel failure.",
-            ]),
-        new(
-            "0.2.2.1 — Pairing keys",
-            [
-                "Pairing keys are now based on your character ContentId, so they stay the same after rename, world transfer, or a config wipe.",
-                "Existing pairs need to be re-added once with the new keys.",
-            ]),
-        new(
-            "0.2.2.0 — Relay hosts",
-            [
-                "The plugin can reach either the Linux or Windows relay host and prefers the last one that worked.",
             ]),
     ];
 

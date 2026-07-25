@@ -21,7 +21,6 @@ public static class MessageTypes
     public const string PairRemove = "pairRemove";
     public const string PresenceQuery = "presenceQuery";
     public const string PresenceResult = "presenceResult";
-    public const string KeyRotated = "keyRotated";
     public const string OwnerGrant = "ownerGrant";
     public const string OwnerRevoked = "ownerRevoked";
     public const string OwnerSettingsQuery = "ownerSettingsQuery";

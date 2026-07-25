@@ -1,5 +1,6 @@
 #if WINDUP_TESTING
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using System.Threading.Tasks;
 using Dalamud.Game.ClientState.Conditions;
@@ -7,6 +8,7 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Ipc.Exceptions;
 using Dalamud.Plugin.Services;
+using FFXIVClientStructs.FFXIV.Client.Game;
 using Lumina.Excel.Sheets;
 using WindUpKey.Protocol;
 using WindUpKey.Ui;
@@ -22,6 +24,16 @@ public sealed class CallTravelService : IDisposable
     private const float ArrivedSlopYalms = 1.5f;
     private static readonly TimeSpan TravelStepTimeout = TimeSpan.FromMinutes(3);
 
+    // Lifestream ResidentialAethernet.ApartmentSubdivisionAetherytes — used to hop main→subdivision.
+    private static readonly Dictionary<int, uint> SubdivisionAetheryteByCity = new()
+    {
+        [HousingCallLocation.CityLimsa] = 1966096, // Mist — The Topmast Subdivision
+        [HousingCallLocation.CityUldah] = 1966128, // Goblet — The Sultana's Breath Subdivision
+        [HousingCallLocation.CityGridania] = 1966112, // Lavender Beds — Lily Hills Subdivision
+        [HousingCallLocation.CityKugane] = 1966142, // Shirogane — Kobai Goten Subdivision
+        [HousingCallLocation.CityFoundation] = 1966157, // Empyreum — Ingleside Subdivision
+    };
+
     private readonly IDalamudPluginInterface _pi;
     private readonly IClientState _clientState;
     private readonly IObjectTable _objects;
@@ -36,9 +48,12 @@ public sealed class CallTravelService : IDisposable
     private readonly Func<CallResultPayload, Task> _sendResult;
 
     private ICallGateSubscriber<bool>? _lsIsBusy;
+    private ICallGateSubscriber<object>? _lsAbort;
     private ICallGateSubscriber<uint, bool>? _lsChangeWorldById;
     private ICallGateSubscriber<string, bool>? _lsChangeWorld;
     private ICallGateSubscriber<uint, byte, bool>? _lsTeleport;
+    private ICallGateSubscriber<(string, int, int, int, int, int, int, bool, bool, string), object>? _lsGoToHousing;
+    private ICallGateSubscriber<uint, bool>? _lsHousingAethernetById;
     private ICallGateSubscriber<bool>? _vnavReady;
     private ICallGateSubscriber<Vector3, bool, float, bool>? _vnavMoveCloseTo;
     private ICallGateSubscriber<bool>? _vnavPathRunning;
@@ -50,6 +65,9 @@ public sealed class CallTravelService : IDisposable
     private PendingCall? _pending;
     private bool _weOwnTravel;
     private bool _craftNotified;
+    private bool _subdivisionHopAttempted;
+    private bool _localDebugCall;
+    private CallPayload? _debugStoredPoint;
     private DateTimeOffset _stepStartedUtc;
     private TravelPhase _phase = TravelPhase.Idle;
 
@@ -71,6 +89,16 @@ public sealed class CallTravelService : IDisposable
         public required string WorldName { get; init; }
         public required uint TerritoryId { get; init; }
         public required Vector3 Position { get; init; }
+        public int HousingCity { get; init; }
+        public int HousingWard { get; init; }
+        public int HousingDivision { get; init; }
+        public int HousingPlot { get; init; }
+        public int HousingApartment { get; init; }
+        public bool HousingIsApartment { get; init; }
+        public bool HousingIndoor { get; init; }
+
+        public bool IsHousingCall =>
+            HousingWard > 0 && HousingCity != 0 && HousingDivision is 1 or 2;
     }
 
     public CallTravelService(
@@ -108,6 +136,9 @@ public sealed class CallTravelService : IDisposable
 
     public bool HasActiveCall => _pending is not null;
 
+    /// <summary>True when <see cref="TryStoreDebugPoint"/> has captured a recall target this session.</summary>
+    public bool HasDebugStoredPoint => _debugStoredPoint is not null;
+
     public void Dispose()
     {
         if (_disposed)
@@ -125,63 +156,138 @@ public sealed class CallTravelService : IDisposable
         _ = FinishAsync(CallResultStatuses.Cancelled, "Call cancelled.");
     }
 
-    public async Task RequestAsync(CallPayload payload)
+    /// <summary>
+    /// Debug: snapshot the local player's current call destination (position + housing ward/division).
+    /// </summary>
+    public bool TryStoreDebugPoint()
+    {
+        if (_disposed)
+            return false;
+
+        if (_objects.LocalPlayer is not { } player || !_clientState.IsLoggedIn)
+        {
+            PluginChat.PrintError(_chat, "You must be in the world to store a call point.");
+            return false;
+        }
+
+        var world = player.CurrentWorld.ValueNullable;
+        var territoryId = _clientState.TerritoryType;
+        var stored = new CallPayload
+        {
+            RequestId = string.Empty,
+            From = _config.PairingKey,
+            To = _config.PairingKey,
+            WorldId = player.CurrentWorld.RowId,
+            WorldName = world?.Name.ToString() ?? string.Empty,
+            TerritoryId = territoryId,
+            X = player.Position.X,
+            Y = player.Position.Y,
+            Z = player.Position.Z,
+        };
+
+        if (HousingCallLocation.TryRead(territoryId, territoryRow: null, out var housing))
+        {
+            stored.HousingCity = housing.City;
+            stored.HousingWard = housing.Ward;
+            stored.HousingDivision = housing.Division;
+            stored.HousingPlot = housing.Plot;
+            stored.HousingApartment = housing.Apartment;
+            stored.HousingIsApartment = housing.IsApartment;
+            stored.HousingIndoor = housing.Indoor;
+            stored.TerritoryId = housing.OutdoorTerritoryId;
+        }
+
+        _debugStoredPoint = stored;
+        PluginChat.Print(_chat, FormatDebugStoredSummary(stored), PluginChat.Green);
+        return true;
+    }
+
+    /// <summary>
+    /// Debug: start Call travel to the last stored point (local only — no relay).
+    /// No-op when nothing has been stored.
+    /// </summary>
+    public bool TryRecallDebugPoint()
+    {
+        if (_disposed || _debugStoredPoint is null)
+            return false;
+
+        if (!_config.IsDoll)
+        {
+            PluginChat.PrintError(_chat, "Call recall is only available as a Doll.");
+            return false;
+        }
+
+        var payload = CloneCallPayload(_debugStoredPoint);
+        payload.RequestId = Guid.NewGuid().ToString("N");
+        payload.From = PairingKeyUtil.IsValid(_config.PairingKey)
+            ? _config.PairingKey
+            : "DEBUGCALL";
+        payload.To = payload.From;
+        _ = RequestAsync(payload, localDebug: true);
+        return true;
+    }
+
+    public Task RequestAsync(CallPayload payload) => RequestAsync(payload, localDebug: false);
+
+    private async Task RequestAsync(CallPayload payload, bool localDebug)
     {
         if (_disposed || payload is null)
             return;
 
         if (_pending is not null)
         {
-            await _sendResult(new CallResultPayload
-            {
-                RequestId = payload.RequestId,
-                From = _config.PairingKey,
-                To = PairingKeyUtil.Normalize(payload.From),
-                Status = CallResultStatuses.Failed,
-                Message = "Already answering another call.",
-            }).ConfigureAwait(false);
+            await SendResultOrLocalAsync(payload, CallResultStatuses.Failed, "Already answering another call.", localDebug)
+                .ConfigureAwait(false);
             return;
         }
 
         if (!IsTravelReady)
         {
-            await _sendResult(new CallResultPayload
-            {
-                RequestId = payload.RequestId,
-                From = _config.PairingKey,
-                To = PairingKeyUtil.Normalize(payload.From),
-                Status = CallResultStatuses.Failed,
-                Message = "Lifestream and vnavmesh are required.",
-            }).ConfigureAwait(false);
+            await SendResultOrLocalAsync(payload, CallResultStatuses.Failed, "Lifestream and vnavmesh are required.", localDebug)
+                .ConfigureAwait(false);
             return;
         }
 
         if (!SameDataCenter(payload.WorldId))
         {
-            await _sendResult(new CallResultPayload
-            {
-                RequestId = payload.RequestId,
-                From = _config.PairingKey,
-                To = PairingKeyUtil.Normalize(payload.From),
-                Status = CallResultStatuses.Failed,
-                Message = "Cannot travel across data centers.",
-            }).ConfigureAwait(false);
+            await SendResultOrLocalAsync(payload, CallResultStatuses.Failed, "Cannot travel across data centers.", localDebug)
+                .ConfigureAwait(false);
             return;
         }
 
+        var ownerKey = PairingKeyUtil.Normalize(payload.From);
+        if (string.IsNullOrEmpty(ownerKey))
+            ownerKey = localDebug ? "DEBUGCALL" : string.Empty;
+        if (string.IsNullOrEmpty(ownerKey))
+            return;
+
+        _localDebugCall = localDebug;
         _pending = new PendingCall
         {
             RequestId = payload.RequestId,
-            OwnerKey = PairingKeyUtil.Normalize(payload.From),
+            OwnerKey = ownerKey,
             WorldId = payload.WorldId,
             WorldName = payload.WorldName?.Trim() ?? string.Empty,
             TerritoryId = payload.TerritoryId,
             Position = new Vector3(payload.X, payload.Y, payload.Z),
+            HousingCity = payload.HousingCity,
+            HousingWard = payload.HousingWard,
+            HousingDivision = payload.HousingDivision,
+            HousingPlot = payload.HousingPlot,
+            HousingApartment = payload.HousingApartment,
+            HousingIsApartment = payload.HousingIsApartment,
+            HousingIndoor = payload.HousingIndoor,
         };
         _craftNotified = false;
+        _subdivisionHopAttempted = false;
         _weOwnTravel = false;
         _phase = TravelPhase.WaitingGates;
+        // Prior cancel/fail must not leave Lifestream mid-task or Accept stays dead.
+        AbortCallAutomation();
         _timer.SetCallTravelBypass(true);
+
+        if (localDebug)
+            PluginChat.Print(_chat, "Debug call recall started.", PluginChat.Yellow);
 
         var status = ClassifyGateStatus();
         await AckAsync(status).ConfigureAwait(false);
@@ -285,7 +391,9 @@ public sealed class CallTravelService : IDisposable
         {
             CallPromptReason.Combat => !IsInCombat() && !IsExternallyBusy(),
             CallPromptReason.Busy => !IsExternallyBusy() && !IsInCombat(),
-            CallPromptReason.Failed => !IsInCombat() && !IsExternallyBusy() && IsTravelReady,
+            // Failed retries abort leftover automation on Accept — don't keep the button locked
+            // because Lifestream is still draining from the attempt that just failed.
+            CallPromptReason.Failed => !IsInCombat() && IsTravelReady,
             _ => !IsInCombat() && !IsExternallyBusy(),
         };
 
@@ -300,7 +408,16 @@ public sealed class CallTravelService : IDisposable
             return;
 
         _prompt.IsOpen = false;
-        if (IsCrafting() || IsInInstance() || IsInCombat() || IsExternallyBusy())
+        AbortCallAutomation();
+
+        if (IsCrafting() || IsInInstance() || IsInCombat())
+        {
+            _phase = TravelPhase.WaitingGates;
+            return;
+        }
+
+        // After a failed attempt, leftover Lifestream/vnav must not bounce us back to Busy.
+        if (_prompt.Reason != CallPromptReason.Failed && IsExternallyBusy())
         {
             _phase = TravelPhase.WaitingGates;
             return;
@@ -315,6 +432,7 @@ public sealed class CallTravelService : IDisposable
             return;
 
         _prompt.IsOpen = false;
+        _subdivisionHopAttempted = false;
         _ = AckAsync(CallAckStatuses.Traveling);
         _timer.SetCallTravelInputMute(true, _pending.Position);
 
@@ -363,9 +481,14 @@ public sealed class CallTravelService : IDisposable
         if (_pending is null)
             return;
 
-        var territory = _clientState.TerritoryType;
-        if (territory == _pending.TerritoryId)
+        if (IsAtCallDestination())
         {
+            if (_pending.IsHousingCall && _pending.HousingIndoor)
+            {
+                _ = FinishAsync(CallResultStatuses.Arrived, "Arrived near owner.");
+                return;
+            }
+
             if (!TryStartPath(_pending.Position))
             {
                 EnterFailedPrompt();
@@ -378,7 +501,15 @@ public sealed class CallTravelService : IDisposable
             return;
         }
 
-        if (!TryTeleportNear(_pending.TerritoryId, _pending.Position))
+        if (_pending.IsHousingCall)
+        {
+            if (!TryGoToHousing(_pending))
+            {
+                EnterFailedPrompt();
+                return;
+            }
+        }
+        else if (!TryTeleportNear(_pending.TerritoryId, _pending.Position))
         {
             EnterFailedPrompt();
             return;
@@ -403,8 +534,24 @@ public sealed class CallTravelService : IDisposable
         if (IsBetweenAreas() || IsLifestreamBusy())
             return;
 
-        if (_clientState.TerritoryType != _pending.TerritoryId)
+        if (_pending.IsHousingCall)
+        {
+            if (!IsAtHousingWard())
+            {
+                TryHopToSubdivisionIfNeeded();
+                return;
+            }
+
+            if (_pending.HousingIndoor)
+            {
+                _ = FinishAsync(CallResultStatuses.Arrived, "Arrived near owner.");
+                return;
+            }
+        }
+        else if (_clientState.TerritoryType != _pending.TerritoryId)
+        {
             return;
+        }
 
         if (!TryStartPath(_pending.Position))
         {
@@ -422,6 +569,14 @@ public sealed class CallTravelService : IDisposable
             return;
 
         if (DateTimeOffset.UtcNow - _stepStartedUtc > TravelStepTimeout)
+        {
+            StopOurPath();
+            EnterFailedPrompt();
+            return;
+        }
+
+        // Left the correct housing instance mid-path — stop rather than wall-running.
+        if (_pending.IsHousingCall && !IsAtHousingWard())
         {
             StopOurPath();
             EnterFailedPrompt();
@@ -452,10 +607,9 @@ public sealed class CallTravelService : IDisposable
         if (_pending is null)
             return;
 
-        StopOurPath();
-        _weOwnTravel = false;
+        AbortCallAutomation();
         _timer.SetCallTravelInputMute(false);
-        ShowPrompt(CallPromptReason.Failed, canAccept: !IsInCombat() && !IsExternallyBusy());
+        ShowPrompt(CallPromptReason.Failed, canAccept: !IsInCombat() && IsTravelReady);
         _phase = TravelPhase.WaitingAccept;
         _ = AckAsync(CallAckStatuses.Busy);
     }
@@ -472,6 +626,9 @@ public sealed class CallTravelService : IDisposable
         if (_pending is null)
             return;
 
+        if (_localDebugCall)
+            return;
+
         await _sendAck(new CallAckPayload
         {
             RequestId = _pending.RequestId,
@@ -485,9 +642,21 @@ public sealed class CallTravelService : IDisposable
     private async Task FinishAsync(string status, string message)
     {
         var pending = _pending;
+        var localDebug = _localDebugCall;
         CancelInternal(sendResult: false);
         if (pending is null)
             return;
+
+        if (localDebug)
+        {
+            if (string.Equals(status, CallResultStatuses.Arrived, StringComparison.Ordinal))
+                PluginChat.Print(_chat, "Debug call recall arrived.", PluginChat.Green);
+            else if (string.Equals(status, CallResultStatuses.Cancelled, StringComparison.Ordinal))
+                PluginChat.Print(_chat, "Debug call recall cancelled.", PluginChat.Grey);
+            else
+                PluginChat.Print(_chat, $"Debug call recall failed: {message}", PluginChat.Yellow);
+            return;
+        }
 
         await _sendResult(new CallResultPayload
         {
@@ -499,16 +668,97 @@ public sealed class CallTravelService : IDisposable
         }).ConfigureAwait(false);
     }
 
+    private async Task SendResultOrLocalAsync(CallPayload payload, string status, string message, bool localDebug)
+    {
+        if (localDebug)
+        {
+            PluginChat.Print(_chat, $"Debug call recall failed: {message}", PluginChat.Yellow);
+            await Task.CompletedTask.ConfigureAwait(false);
+            return;
+        }
+
+        await _sendResult(new CallResultPayload
+        {
+            RequestId = payload.RequestId,
+            From = _config.PairingKey,
+            To = PairingKeyUtil.Normalize(payload.From),
+            Status = status,
+            Message = message,
+        }).ConfigureAwait(false);
+    }
+
     private void CancelInternal(bool sendResult)
     {
-        StopOurPath();
-        _weOwnTravel = false;
+        AbortCallAutomation();
         _phase = TravelPhase.Idle;
         _prompt.IsOpen = false;
         _timer.SetCallTravelBypass(false);
         _timer.SetCallTravelInputMute(false);
         _pending = null;
+        _localDebugCall = false;
         _ = sendResult;
+    }
+
+    private static CallPayload CloneCallPayload(CallPayload source) =>
+        new()
+        {
+            RequestId = source.RequestId,
+            From = source.From,
+            To = source.To,
+            WorldId = source.WorldId,
+            WorldName = source.WorldName,
+            TerritoryId = source.TerritoryId,
+            X = source.X,
+            Y = source.Y,
+            Z = source.Z,
+            HousingCity = source.HousingCity,
+            HousingWard = source.HousingWard,
+            HousingDivision = source.HousingDivision,
+            HousingPlot = source.HousingPlot,
+            HousingApartment = source.HousingApartment,
+            HousingIsApartment = source.HousingIsApartment,
+            HousingIndoor = source.HousingIndoor,
+        };
+
+    private static string FormatDebugStoredSummary(CallPayload stored)
+    {
+        if (stored.HousingWard > 0 && stored.HousingCity != 0 && stored.HousingDivision is 1 or 2)
+        {
+            var div = stored.HousingDivision == 2 ? "subdivision" : "main";
+            var extra = stored.HousingIsApartment
+                ? (stored.HousingApartment > 0 ? $", apt {stored.HousingApartment}" : ", apartment")
+                : (stored.HousingPlot > 0 ? $", plot {stored.HousingPlot}" : string.Empty);
+            var indoor = stored.HousingIndoor ? ", indoor" : string.Empty;
+            return $"Stored call point: ward {stored.HousingWard} ({div}{extra}{indoor}), "
+                   + $"pos ({stored.X:F1}, {stored.Y:F1}, {stored.Z:F1}).";
+        }
+
+        return $"Stored call point: territory {stored.TerritoryId}, "
+               + $"pos ({stored.X:F1}, {stored.Y:F1}, {stored.Z:F1}).";
+    }
+
+    /// <summary>Stop vnavmesh and abort Lifestream so a cancelled/failed call cannot block the next one.</summary>
+    private void AbortCallAutomation()
+    {
+        try
+        {
+            _vnavPathStop?.InvokeAction();
+        }
+        catch
+        {
+            // ignore
+        }
+
+        try
+        {
+            _lsAbort?.InvokeAction();
+        }
+        catch
+        {
+            // ignore
+        }
+
+        _weOwnTravel = false;
     }
 
     private string ClassifyGateStatus()
@@ -568,9 +818,12 @@ public sealed class CallTravelService : IDisposable
         try
         {
             _lsIsBusy = _pi.GetIpcSubscriber<bool>("Lifestream.IsBusy");
+            _lsAbort = _pi.GetIpcSubscriber<object>("Lifestream.Abort");
             _lsChangeWorldById = _pi.GetIpcSubscriber<uint, bool>("Lifestream.ChangeWorldById");
             _lsChangeWorld = _pi.GetIpcSubscriber<string, bool>("Lifestream.ChangeWorld");
             _lsTeleport = _pi.GetIpcSubscriber<uint, byte, bool>("Lifestream.Teleport");
+            _lsGoToHousing = _pi.GetIpcSubscriber<(string, int, int, int, int, int, int, bool, bool, string), object>("Lifestream.GoToHousingAddress");
+            _lsHousingAethernetById = _pi.GetIpcSubscriber<uint, bool>("Lifestream.HousingAethernetTeleportById");
             _vnavReady = _pi.GetIpcSubscriber<bool>("vnavmesh.Nav.IsReady");
             _vnavMoveCloseTo = _pi.GetIpcSubscriber<Vector3, bool, float, bool>("vnavmesh.SimpleMove.PathfindAndMoveCloseTo");
             _vnavPathRunning = _pi.GetIpcSubscriber<bool>("vnavmesh.Path.IsRunning");
@@ -648,6 +901,39 @@ public sealed class CallTravelService : IDisposable
         return false;
     }
 
+    private bool TryGoToHousing(PendingCall call)
+    {
+        if (_lsGoToHousing is null)
+            return false;
+
+        var plot = call.HousingPlot > 0 ? call.HousingPlot : 1;
+        var apartment = call.HousingApartment > 0 ? call.HousingApartment : 1;
+        var isSub = call.HousingDivision == 2;
+        var propertyType = call.HousingIsApartment ? 1 : 0; // House=0, Apartment=1
+        var entry = (
+            string.Empty,
+            (int)call.WorldId,
+            call.HousingCity,
+            call.HousingWard,
+            propertyType,
+            plot,
+            apartment,
+            isSub,
+            false,
+            string.Empty);
+
+        try
+        {
+            _lsGoToHousing.InvokeAction(entry);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "Lifestream GoToHousingAddress failed");
+            return false;
+        }
+    }
+
     private bool TryTeleportNear(uint territoryId, Vector3 dest)
     {
         if (!TryFindNearestAetheryte(territoryId, dest, out var aetheryteId))
@@ -693,13 +979,85 @@ public sealed class CallTravelService : IDisposable
         }
     }
 
+    private bool IsAtCallDestination()
+    {
+        if (_pending is null)
+            return false;
+        if (_pending.IsHousingCall)
+            return IsAtHousingWard();
+        return _clientState.TerritoryType == _pending.TerritoryId;
+    }
+
+    private unsafe bool IsAtHousingWard()
+    {
+        if (_pending is null || !_pending.IsHousingCall)
+            return false;
+
+        var expectedTerritory = HousingCallLocation.TryGetResidentialTerritoryForCity(_pending.HousingCity)
+                                ?? _pending.TerritoryId;
+        if (_clientState.TerritoryType != expectedTerritory)
+            return false;
+
+        var h = HousingManager.Instance();
+        if (h is null)
+            return false;
+
+        var ward = h->GetCurrentWard() + 1;
+        if (ward != _pending.HousingWard)
+            return false;
+
+        var division = h->GetCurrentDivision();
+        var rawPlot = h->GetCurrentPlot();
+        if (rawPlot == -127)
+            division = 2;
+        else if (rawPlot == -128)
+            division = 1;
+
+        return division == _pending.HousingDivision;
+    }
+
+    private unsafe void TryHopToSubdivisionIfNeeded()
+    {
+        if (_pending is null || _subdivisionHopAttempted || !_pending.IsHousingCall)
+            return;
+        if (_pending.HousingDivision != 2)
+            return;
+
+        var h = HousingManager.Instance();
+        if (h is null)
+            return;
+
+        var ward = h->GetCurrentWard() + 1;
+        if (ward != _pending.HousingWard)
+            return;
+        if (h->GetCurrentDivision() == 2)
+            return;
+
+        if (!SubdivisionAetheryteByCity.TryGetValue(_pending.HousingCity, out var aetheryteId))
+            return;
+
+        _subdivisionHopAttempted = true;
+        try
+        {
+            if (_lsHousingAethernetById?.InvokeFunc(aetheryteId) == true)
+                _stepStartedUtc = DateTimeOffset.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "Lifestream HousingAethernetTeleportById failed");
+        }
+    }
+
     private bool TryFindNearestAetheryte(uint territoryId, Vector3 dest, out uint aetheryteId)
     {
         aetheryteId = 0;
-        _ = dest;
         var sheet = _data.GetExcelSheet<Aetheryte>();
         if (sheet is null)
             return false;
+
+        var bestDist = float.MaxValue;
+        uint bestId = 0;
+        var any = false;
 
         foreach (var row in sheet)
         {
@@ -707,11 +1065,93 @@ public sealed class CallTravelService : IDisposable
                 continue;
             if (row.Territory.RowId != territoryId)
                 continue;
-            aetheryteId = row.RowId;
-            return aetheryteId != 0;
+
+            any = true;
+            var pos = TryGetAetheryteWorldPos(row);
+            if (pos is null)
+            {
+                if (bestId == 0)
+                    bestId = row.RowId;
+                continue;
+            }
+
+            var d = Vector2.Distance(new Vector2(dest.X, dest.Z), new Vector2(pos.Value.X, pos.Value.Y));
+            if (d < bestDist)
+            {
+                bestDist = d;
+                bestId = row.RowId;
+            }
         }
 
-        return false;
+        if (bestId == 0 && any)
+        {
+            foreach (var row in sheet)
+            {
+                if (!row.IsAetheryte || row.Territory.RowId != territoryId)
+                    continue;
+                bestId = row.RowId;
+                break;
+            }
+        }
+
+        aetheryteId = bestId;
+        return aetheryteId != 0;
+    }
+
+    private Vector2? TryGetAetheryteWorldPos(Aetheryte row)
+    {
+        try
+        {
+            // Map markers with DataType 3 are aetherytes; DataKey is the aetheryte row id.
+            var markers = _data.GetSubrowExcelSheet<MapMarker>();
+            if (markers is null)
+                return null;
+
+            foreach (var subrow in markers.Flatten())
+            {
+                if (subrow.DataType != 3 || subrow.DataKey.RowId != row.RowId)
+                    continue;
+
+                var mapSheet = _data.GetExcelSheet<Map>();
+                if (mapSheet is null || !mapSheet.TryGetRow(subrow.RowId, out var map))
+                {
+                    // Subrow sheet RowId is the Map row for some Lumina versions; fall back via territory.
+                    map = default;
+                    var found = false;
+                    if (mapSheet is not null)
+                    {
+                        foreach (var m in mapSheet)
+                        {
+                            if (m.TerritoryType.RowId != row.Territory.RowId)
+                                continue;
+                            map = m;
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if (!found)
+                        return ConvertMarker(subrow.X, subrow.Y, 100);
+                }
+
+                var scale = map.SizeFactor == 0 ? 100f : map.SizeFactor;
+                return ConvertMarker(subrow.X, subrow.Y, scale);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "Aetheryte map marker lookup failed");
+        }
+
+        return null;
+    }
+
+    private static Vector2 ConvertMarker(int markerX, int markerY, float scale)
+    {
+        var num = scale / 100f;
+        var x = (markerX - 1024f) / num;
+        var y = (markerY - 1024f) / num;
+        return new Vector2(x, y);
     }
 }
 #endif

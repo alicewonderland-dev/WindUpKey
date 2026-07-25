@@ -151,19 +151,36 @@ public sealed class RelayClient : IDisposable
         var worldId = player.CurrentWorld.RowId;
         var worldName = world?.Name.ToString() ?? string.Empty;
         var requestId = Guid.NewGuid().ToString("N");
+        var territoryId = _clientState.TerritoryType;
 
-        await SendEnvelopeAsync(Envelope.Create(MessageTypes.Call, new CallPayload
+        var payload = new CallPayload
         {
             RequestId = requestId,
             From = _config.PairingKey,
             To = key,
             WorldId = worldId,
             WorldName = worldName,
-            TerritoryId = _clientState.TerritoryType,
+            TerritoryId = territoryId,
             X = player.Position.X,
             Y = player.Position.Y,
             Z = player.Position.Z,
-        }), CancellationToken.None).ConfigureAwait(false);
+        };
+
+        if (HousingCallLocation.TryRead(territoryId, territoryRow: null, out var housing))
+        {
+            payload.HousingCity = housing.City;
+            payload.HousingWard = housing.Ward;
+            payload.HousingDivision = housing.Division;
+            payload.HousingPlot = housing.Plot;
+            payload.HousingApartment = housing.Apartment;
+            payload.HousingIsApartment = housing.IsApartment;
+            payload.HousingIndoor = housing.Indoor;
+            // Wards/subdivisions share TerritoryType — send the outdoor district id for travel.
+            payload.TerritoryId = housing.OutdoorTerritoryId;
+        }
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.Call, payload), CancellationToken.None)
+            .ConfigureAwait(false);
 
         PluginChat.Print(_chat, $"Calling {GetPairMessageLabel(key)}…", PluginChat.Yellow);
     }
@@ -175,6 +192,12 @@ public sealed class RelayClient : IDisposable
         SendEnvelopeAsync(Envelope.Create(MessageTypes.CallResult, payload), CancellationToken.None);
 
     public void CancelActiveCall() => _callTravel?.CancelActiveCall();
+
+    public bool HasDebugCallPoint => _callTravel?.HasDebugStoredPoint == true;
+
+    public bool TryStoreDebugCallPoint() => _callTravel?.TryStoreDebugPoint() == true;
+
+    public bool TryRecallDebugCallPoint() => _callTravel?.TryRecallDebugPoint() == true;
 #endif
 
     public bool IsConnected => _socket?.State == WebSocketState.Open;
@@ -1140,10 +1163,6 @@ public sealed class RelayClient : IDisposable
             }
         }
 
-        // Presence-driven keyRotated flush (send when peer answers online).
-        foreach (var pending in _config.PendingKeyRotations.ToArray())
-            await RequestPresenceAsync(pending.PartnerKey).ConfigureAwait(false);
-
         return socket;
     }
 
@@ -1282,9 +1301,6 @@ public sealed class RelayClient : IDisposable
                 break;
             case MessageTypes.PresenceResult:
                 HandlePresenceResult(envelope);
-                break;
-            case MessageTypes.KeyRotated:
-                HandleKeyRotated(envelope);
                 break;
             case MessageTypes.OwnerGrant:
                 HandleOwnerGrant(envelope);
@@ -1479,7 +1495,7 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
-        // keyRotated offline (no requestId) — keep PendingKeyRotations and retry on presence.
+        // Offline fire-and-forget (no requestId) — nothing to surface to the winder.
         if (payload.Code == ErrorCodes.TargetOffline && string.IsNullOrEmpty(payload.RequestId))
             return;
 
@@ -1668,133 +1684,6 @@ public sealed class RelayClient : IDisposable
 
         if (payload.StillPaired == false)
             SilentRemovePartner(peerKey);
-        else if (payload.Online)
-            _ = TrySendPendingKeyRotationAsync(peerKey, CancellationToken.None);
-    }
-
-    private void HandleKeyRotated(Envelope envelope)
-    {
-        var payload = envelope.GetPayload<KeyRotatedPayload>();
-        if (payload is null)
-            return;
-
-        var oldKey = PairingKeyUtil.Normalize(payload.OldKey);
-        var newKey = PairingKeyUtil.Normalize(payload.NewKey);
-        if (!PairingKeyUtil.IsValid(oldKey) || !PairingKeyUtil.IsValid(newKey))
-            return;
-
-        var ownedUpdated = _config.TryReplaceOwnedDollKey(oldKey, newKey, payload.Identity);
-        if (ownedUpdated)
-        {
-            lock (_ownerSettingsLock)
-            {
-                if (_ownerSettingsByDollKey.Remove(oldKey, out var snap))
-                {
-                    snap = CloneOwnerSettings(snap);
-                    // Rebuild under new key — Clone keeps DollKey; fix it.
-                    var moved = new OwnerSettingsSnapshot
-                    {
-                        DollKey = newKey,
-                        MaxWindHours = snap.MaxWindHours,
-                        AutoGroundSit = snap.AutoGroundSit,
-                        LockEmoteId = snap.LockEmoteId,
-                        SettingsLocked = snap.SettingsLocked,
-                        Emotes = snap.Emotes,
-                        LastError = snap.LastError,
-                        HasData = snap.HasData,
-                    };
-                    _ownerSettingsByDollKey[newKey] = moved;
-                }
-            }
-        }
-
-        // Trust only when OldKey matches an existing pair (blocks forged rotations).
-        var pair = _config.FindPairByKey(oldKey);
-        if (pair is null)
-        {
-            if (ownedUpdated)
-            {
-                _config.Save();
-                _log.Information("WindUpKey owned doll key rotated {Old} -> {New}", oldKey, newKey);
-            }
-            else
-                _log.Information("WindUpKey ignored keyRotated: oldKey={Old} not paired", oldKey);
-            return;
-        }
-
-        if (!string.Equals(oldKey, newKey, StringComparison.Ordinal))
-        {
-            if (_config.FindPairByKey(newKey) is not null
-                && !string.Equals(PairingKeyUtil.Normalize(pair.PartnerKey), newKey, StringComparison.Ordinal))
-            {
-                _log.Warning("WindUpKey keyRotated refused: newKey={New} already paired", newKey);
-                return;
-            }
-
-            pair.PartnerKey = newKey;
-            ClearPresence(oldKey);
-        }
-
-        // Preserve an explicitly saved empty label; it means the user opted out of Name@World.
-        if (!(pair.IsIdentitySaved && string.IsNullOrEmpty(pair.Identity))
-            && !string.IsNullOrWhiteSpace(payload.Identity))
-            pair.Identity = PlayerIdentity.Normalize(payload.Identity);
-
-        _config.Save();
-        _log.Information("WindUpKey partner key rotated {Old} -> {New}", oldKey, newKey);
-
-        var label = pair.GetMessageLabel();
-        PluginChat.Print(_chat, $"Partner key updated for {label}.", PluginChat.Green);
-    }
-
-    /// <summary>Updates a partner's pairing key in place (manual rename/transfer fallback).</summary>
-    public bool ReplacePartnerKey(string oldKeyRaw, string newKeyRaw)
-    {
-        var oldKey = PairingKeyUtil.Normalize(oldKeyRaw);
-        if (!_config.TryReplacePartnerKey(oldKeyRaw, newKeyRaw))
-            return false;
-
-        var newKey = PairingKeyUtil.Normalize(newKeyRaw);
-        if (!string.Equals(oldKey, newKey, StringComparison.Ordinal))
-            ClearPresence(oldKey);
-
-        _config.Save();
-        return true;
-    }
-
-    private async Task TrySendPendingKeyRotationAsync(string partnerKey, CancellationToken ct)
-    {
-        var peer = PairingKeyUtil.Normalize(partnerKey);
-        if (!PairingKeyUtil.IsValid(peer) || !IsConnected || !PairingKeyUtil.IsValid(_config.PairingKey))
-            return;
-
-        var pending = _config.PendingKeyRotations.FirstOrDefault(r =>
-            string.Equals(r.PartnerKey, peer, StringComparison.Ordinal));
-        if (pending is null)
-            return;
-
-        // Only announce under the new key we registered with.
-        if (!string.Equals(pending.NewKey, _config.PairingKey, StringComparison.Ordinal))
-            return;
-
-        if (GetPartnerPresence(peer) != PartnerPresence.Online)
-            return;
-
-        var payload = new KeyRotatedPayload
-        {
-            From = _config.PairingKey,
-            To = peer,
-            OldKey = pending.OldKey,
-            NewKey = pending.NewKey,
-            Identity = string.IsNullOrWhiteSpace(pending.Identity) ? null : pending.Identity,
-        };
-
-        await SendEnvelopeAsync(Envelope.Create(MessageTypes.KeyRotated, payload), ct).ConfigureAwait(false);
-
-        _config.PendingKeyRotations.RemoveAll(r =>
-            string.Equals(r.PartnerKey, peer, StringComparison.Ordinal));
-        _config.Save();
-        _log.Information("WindUpKey sent keyRotated to {Peer} ({Old} -> {New})", peer, pending.OldKey, pending.NewKey);
     }
 
     private void SilentRemovePartner(string peerKey)

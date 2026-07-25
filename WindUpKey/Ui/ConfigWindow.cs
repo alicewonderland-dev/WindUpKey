@@ -21,11 +21,17 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly string _lowWindMessagesPath;
     private readonly ChangelogWindow _changelogWindow;
     private readonly string _pluginVersion;
-    private readonly Dictionary<string, string> _partnerKeyDrafts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _pairLabelDrafts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, OwnerSettingsDraft> _ownerDrafts = new(StringComparer.Ordinal);
     private string _pairKeyDraft = string.Empty;
     private bool _hardcoreConfirm;
+    private string? _pairLabelsKey;
+    private Vector2 _pairLabelsPos;
+    private string? _pairPermsKey;
+    private Vector2 _pairPermsPos;
+    private string? _pairOwnerKey;
+    private Vector2 _pairOwnerPos;
+    private static readonly Vector2 PairSettingsWindowOffset = new(12f, 12f);
     private static readonly double[] WindHourPresets = [1.0, 6.0, 12.0, 24.0];
 
     private sealed class OwnerSettingsDraft
@@ -93,12 +99,6 @@ public sealed class ConfigWindow : Window, IDisposable
         if (_config.IsDoll && ImGui.BeginTabItem("Safeword"))
         {
             DrawSafewordTab();
-            ImGui.EndTabItem();
-        }
-
-        if (_config.OwnedDolls.Count > 0 && ImGui.BeginTabItem("Owner"))
-        {
-            DrawOwnerTab();
             ImGui.EndTabItem();
         }
 
@@ -390,214 +390,380 @@ public sealed class ConfigWindow : Window, IDisposable
 
                 _relay.EnsurePresenceFresh(partner.PartnerKey);
 
-                // Collapsed by default (no DefaultOpen). Stable id keeps expand state per key.
-                if (!ImGui.CollapsingHeader($"{header}###pair_{partner.PartnerKey}"))
-                {
-                    DrawPartnerPresenceLabel(partner.PartnerKey);
-                    ImGui.PopID();
-                    continue;
-                }
-
+                var isOwnedDoll = _config.FindOwnedDoll(actionPartnerKey) is not null;
+                var expanded = ImGui.CollapsingHeader($"{header}###pair_{partner.PartnerKey}");
                 DrawPartnerPresenceLabel(partner.PartnerKey);
 
-                var draftKey = partner.PartnerKey ?? string.Empty;
-                if (!_partnerKeyDrafts.TryGetValue(draftKey, out var partnerKeyDraft))
-                    partnerKeyDraft = draftKey;
-
-                ImGui.SetNextItemWidth(120);
-                if (ImGui.InputText("##partner_key", ref partnerKeyDraft, 16))
-                    _partnerKeyDrafts[draftKey] = partnerKeyDraft;
-                else
-                    _partnerKeyDrafts[draftKey] = partnerKeyDraft;
-
-                ImGui.SameLine();
-                ImGui.TextUnformatted("Pairing key");
-                if (!string.Equals(
-                        PairingKeyUtil.Normalize(partnerKeyDraft),
-                        PairingKeyUtil.Normalize(partner.PartnerKey),
-                        StringComparison.Ordinal))
+                if (expanded)
                 {
+                    if (ImGui.Button("Labels"))
+                        TogglePairSettingsWindow(ref _pairLabelsKey, ref _pairLabelsPos, partner.PartnerKey);
+
+                    if (_config.IsDoll)
+                    {
+                        ImGui.SameLine();
+                        if (ImGui.Button("Permissions"))
+                            TogglePairSettingsWindow(ref _pairPermsKey, ref _pairPermsPos, partner.PartnerKey);
+                    }
+
+                    if (isOwnedDoll)
+                    {
+                        ImGui.SameLine();
+                        if (ImGui.Button("Owner"))
+                        {
+                            if (!string.Equals(_pairOwnerKey, partner.PartnerKey, StringComparison.Ordinal))
+                                EnsureOwnerDraft(actionPartnerKey);
+                            TogglePairSettingsWindow(ref _pairOwnerKey, ref _pairOwnerPos, partner.PartnerKey);
+                        }
+                    }
+
+                    ImGui.TextUnformatted("Wind");
                     ImGui.SameLine();
-                    if (ImGui.SmallButton("Apply key"))
-                    {
-                        var oldKey = partner.PartnerKey ?? string.Empty;
-                        if (_relay.ReplacePartnerKey(oldKey, partnerKeyDraft))
-                        {
-                            _partnerKeyDrafts.Remove(oldKey);
-                            var newKey = PairingKeyUtil.Normalize(partnerKeyDraft);
-                            _partnerKeyDrafts[newKey] = newKey;
-                        }
-                        else
-                        {
-                            ImGui.OpenPopup("partner_key_invalid");
-                        }
-                    }
-                }
-
-                var keyPopup = true;
-                if (ImGui.BeginPopupModal("partner_key_invalid", ref keyPopup, ImGuiWindowFlags.AlwaysAutoResize))
-                {
-                    ImGui.TextUnformatted("Could not update key (invalid or already paired).");
-                    if (ImGui.Button("OK", new Vector2(100, 0)))
-                        ImGui.CloseCurrentPopup();
-                    ImGui.EndPopup();
-                }
-
-                DrawPairLabelField(
-                    partner,
-                    "Name@World",
-                    "name_world",
-                    partner.Identity,
-                    partner.IsIdentitySaved,
-                    96,
-                    saved =>
-                    {
-                        partner.Identity = saved;
-                        partner.IsIdentitySaved = true;
-                        _config.Save();
-                    },
-                    allowTarget: true);
-
-                DrawPairLabelField(
-                    partner,
-                    "Nickname",
-                    "nickname",
-                    partner.Nickname,
-                    partner.IsNicknameSaved,
-                    64,
-                    saved =>
-                    {
-                        partner.Nickname = saved;
-                        partner.IsNicknameSaved = true;
-                        _config.Save();
-                    });
-
-                if (_config.IsDoll && partner.IsOwner)
-                {
-                    DrawPairLabelField(
-                        partner,
-                        "Title",
-                        "title",
-                        partner.Title,
-                        partner.IsTitleSaved,
-                        64,
-                        saved =>
-                        {
-                            partner.Title = saved;
-                            partner.IsTitleSaved = true;
-                            _config.Save();
-                        });
-                }
-
-                if (_config.IsDoll)
-                {
-                    if (partner.IsOwner)
-                    {
+                    if (!hasValidPartnerKey)
                         ImGui.BeginDisabled();
-                        var owner = true;
-                        ImGui.Checkbox("Owner", ref owner);
-                        ImGui.EndDisabled();
-                        ImGui.TextDisabled("Owners always may wind/unwind. Clear with /windup unlock.");
-                    }
-                    else
-                    {
-                        var makeOwner = false;
-                        if (ImGui.Checkbox("Owner", ref makeOwner) && makeOwner && hasValidPartnerKey)
-                            _ = _relay.GrantOwnerAsync(actionPartnerKey);
-                    }
+                    DrawWindHourButtons(
+                        hours => _ = _relay.SendWindByKeyAsync(actionPartnerKey, hours),
+                        smallButtons: true);
 
-                    if (partner.IsOwner)
-                    {
-                        ImGui.TextDisabled("Can wind me / Can unwind me: always allowed for owners.");
-#if WINDUP_TESTING
-                        if (_config.HardcoreMode)
-                        {
-                            ImGui.BeginDisabled();
-                            var hardcoreCall = true;
-                            ImGui.Checkbox("Can call me", ref hardcoreCall);
-                            ImGui.EndDisabled();
-                            ImGui.TextDisabled("Hardcore is on — owners may always call you.");
-                        }
-                        else
-                        {
-                            var canCall = partner.CanCallMe;
-                            if (ImGui.Checkbox("Can call me", ref canCall))
-                            {
-                                partner.CanCallMe = canCall;
-                                _config.Save();
-                            }
-                        }
-#endif
-                    }
-                    else
-                    {
-                        var canWind = partner.CanWindMe;
-                        if (ImGui.Checkbox("Can wind me", ref canWind))
-                        {
-                            partner.CanWindMe = canWind;
-                            _config.Save();
-                        }
+                    if (ImGui.SmallButton("Unwind"))
+                        _ = _relay.SendUnwindByKeyAsync(actionPartnerKey);
 
-                        var canUnwind = partner.CanUnwindMe;
-                        if (ImGui.Checkbox("Can unwind me", ref canUnwind))
-                        {
-                            partner.CanUnwindMe = canUnwind;
-                            _config.Save();
-                        }
-                    }
-                }
-
-                ImGui.TextUnformatted("Wind");
-                ImGui.SameLine();
-                if (!hasValidPartnerKey)
-                    ImGui.BeginDisabled();
-                DrawWindHourButtons(
-                    hours => _ = _relay.SendWindByKeyAsync(actionPartnerKey, hours),
-                    smallButtons: true);
-
-                if (ImGui.SmallButton("Unwind"))
-                    _ = _relay.SendUnwindByKeyAsync(actionPartnerKey);
-
-                ImGui.Spacing();
-                var danger = new Vector4(0.75f, 0.18f, 0.18f, 1f);
-                var dangerHover = new Vector4(0.88f, 0.28f, 0.28f, 1f);
-                var dangerActive = new Vector4(0.60f, 0.12f, 0.12f, 1f);
-                ImGui.PushStyleColor(ImGuiCol.Button, danger);
-                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, dangerHover);
-                ImGui.PushStyleColor(ImGuiCol.ButtonActive, dangerActive);
-                if (ImGui.Button("Unpair"))
-                    ImGui.OpenPopup("unpair_confirm");
-                ImGui.PopStyleColor(3);
-                if (!hasValidPartnerKey)
-                    ImGui.EndDisabled();
-
-                var popupOpen = true;
-                if (ImGui.BeginPopupModal("unpair_confirm", ref popupOpen, ImGuiWindowFlags.AlwaysAutoResize))
-                {
-                    ImGui.TextUnformatted($"Unpair {actionPartnerKey}?");
                     ImGui.Spacing();
+                    var danger = new Vector4(0.75f, 0.18f, 0.18f, 1f);
+                    var dangerHover = new Vector4(0.88f, 0.28f, 0.28f, 1f);
+                    var dangerActive = new Vector4(0.60f, 0.12f, 0.12f, 1f);
                     ImGui.PushStyleColor(ImGuiCol.Button, danger);
                     ImGui.PushStyleColor(ImGuiCol.ButtonHovered, dangerHover);
                     ImGui.PushStyleColor(ImGuiCol.ButtonActive, dangerActive);
-                    if (ImGui.Button("Confirm", new Vector2(100, 0)))
-                    {
-                        _ = _relay.UnpairByKeyAsync(actionPartnerKey);
-                        ImGui.CloseCurrentPopup();
-                        i--;
-                    }
-
+                    if (ImGui.Button("Unpair"))
+                        ImGui.OpenPopup("unpair_confirm");
                     ImGui.PopStyleColor(3);
-                    ImGui.SameLine();
-                    if (ImGui.Button("Cancel", new Vector2(100, 0)))
-                        ImGui.CloseCurrentPopup();
+                    if (!hasValidPartnerKey)
+                        ImGui.EndDisabled();
 
-                    ImGui.EndPopup();
+                    var popupOpen = true;
+                    if (ImGui.BeginPopupModal("unpair_confirm", ref popupOpen, ImGuiWindowFlags.AlwaysAutoResize))
+                    {
+                        ImGui.TextUnformatted($"Unpair {actionPartnerKey}?");
+                        ImGui.Spacing();
+                        ImGui.PushStyleColor(ImGuiCol.Button, danger);
+                        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, dangerHover);
+                        ImGui.PushStyleColor(ImGuiCol.ButtonActive, dangerActive);
+                        if (ImGui.Button("Confirm", new Vector2(100, 0)))
+                        {
+                            _ = _relay.UnpairByKeyAsync(actionPartnerKey);
+                            ImGui.CloseCurrentPopup();
+                            i--;
+                        }
+
+                        ImGui.PopStyleColor(3);
+                        ImGui.SameLine();
+                        if (ImGui.Button("Cancel", new Vector2(100, 0)))
+                            ImGui.CloseCurrentPopup();
+
+                        ImGui.EndPopup();
+                    }
                 }
+
+                // Keep settings windows alive even if the pair row is collapsed.
+                DrawPairLabelsWindow(partner);
+                if (_config.IsDoll)
+                    DrawPairPermissionsWindow(partner, actionPartnerKey, hasValidPartnerKey);
+                if (isOwnedDoll)
+                    DrawPairOwnerWindow(actionPartnerKey, partner.PartnerKey);
 
                 ImGui.PopID();
                 ImGui.Spacing();
             }
         }
+    }
+
+    private void TogglePairSettingsWindow(ref string? openKey, ref Vector2 openPos, string partnerKey)
+    {
+        if (string.Equals(openKey, partnerKey, StringComparison.Ordinal))
+        {
+            openKey = null;
+            return;
+        }
+
+        // Only one settings window at a time.
+        _pairLabelsKey = null;
+        _pairPermsKey = null;
+        _pairOwnerKey = null;
+
+        openKey = partnerKey;
+        openPos = ImGui.GetMousePos() + PairSettingsWindowOffset;
+    }
+
+    private static bool BeginPairSettingsWindow(string title, string id, Vector2 appearPos, ref bool open)
+    {
+        ImGui.SetNextWindowPos(appearPos, ImGuiCond.Appearing);
+        return ImGui.Begin($"{title}###{id}", ref open, ImGuiWindowFlags.AlwaysAutoResize);
+    }
+
+    private void DrawPairLabelsWindow(PairedPartner partner)
+    {
+        if (!string.Equals(_pairLabelsKey, partner.PartnerKey, StringComparison.Ordinal))
+            return;
+
+        var open = true;
+        if (!BeginPairSettingsWindow("Labels", $"pair_labels_{partner.PartnerKey}", _pairLabelsPos, ref open))
+        {
+            ImGui.End();
+            if (!open)
+                _pairLabelsKey = null;
+            return;
+        }
+
+        DrawPairLabelField(
+            partner,
+            "Name@World",
+            "name_world",
+            partner.Identity,
+            partner.IsIdentitySaved,
+            96,
+            saved =>
+            {
+                partner.Identity = saved;
+                partner.IsIdentitySaved = true;
+                _config.Save();
+            },
+            allowTarget: true);
+
+        DrawPairLabelField(
+            partner,
+            "Nickname",
+            "nickname",
+            partner.Nickname,
+            partner.IsNicknameSaved,
+            64,
+            saved =>
+            {
+                partner.Nickname = saved;
+                partner.IsNicknameSaved = true;
+                _config.Save();
+            });
+
+        if (_config.IsDoll && partner.IsOwner)
+        {
+            DrawPairLabelField(
+                partner,
+                "Title",
+                "title",
+                partner.Title,
+                partner.IsTitleSaved,
+                64,
+                saved =>
+                {
+                    partner.Title = saved;
+                    partner.IsTitleSaved = true;
+                    _config.Save();
+                });
+        }
+
+        ImGui.Spacing();
+        if (ImGui.Button("Close", new Vector2(100, 0)))
+            open = false;
+
+        ImGui.End();
+        if (!open)
+            _pairLabelsKey = null;
+    }
+
+    private void DrawPairPermissionsWindow(
+        PairedPartner partner,
+        string actionPartnerKey,
+        bool hasValidPartnerKey)
+    {
+        if (!string.Equals(_pairPermsKey, partner.PartnerKey, StringComparison.Ordinal))
+            return;
+
+        var open = true;
+        if (!BeginPairSettingsWindow("Permissions", $"pair_perms_{partner.PartnerKey}", _pairPermsPos, ref open))
+        {
+            ImGui.End();
+            if (!open)
+                _pairPermsKey = null;
+            return;
+        }
+
+        if (partner.IsOwner)
+        {
+            ImGui.BeginDisabled();
+            var owner = true;
+            ImGui.Checkbox("Owner", ref owner);
+            ImGui.EndDisabled();
+            ImGui.TextDisabled("Owners always may wind/unwind. Clear with /windup unlock.");
+        }
+        else
+        {
+            var makeOwner = false;
+            if (ImGui.Checkbox("Owner", ref makeOwner) && makeOwner && hasValidPartnerKey)
+                _ = _relay.GrantOwnerAsync(actionPartnerKey);
+        }
+
+        if (partner.IsOwner)
+        {
+            ImGui.TextDisabled("Can wind me / Can unwind me: always allowed for owners.");
+#if WINDUP_TESTING
+            if (_config.HardcoreMode)
+            {
+                ImGui.BeginDisabled();
+                var hardcoreCall = true;
+                ImGui.Checkbox("Can call me", ref hardcoreCall);
+                ImGui.EndDisabled();
+                ImGui.TextDisabled("Hardcore is on — owners may always call you.");
+            }
+            else
+            {
+                var canCall = partner.CanCallMe;
+                if (ImGui.Checkbox("Can call me", ref canCall))
+                {
+                    partner.CanCallMe = canCall;
+                    _config.Save();
+                }
+            }
+#endif
+        }
+        else
+        {
+            var canWind = partner.CanWindMe;
+            if (ImGui.Checkbox("Can wind me", ref canWind))
+            {
+                partner.CanWindMe = canWind;
+                _config.Save();
+            }
+
+            var canUnwind = partner.CanUnwindMe;
+            if (ImGui.Checkbox("Can unwind me", ref canUnwind))
+            {
+                partner.CanUnwindMe = canUnwind;
+                _config.Save();
+            }
+        }
+
+        ImGui.Spacing();
+        if (ImGui.Button("Close", new Vector2(100, 0)))
+            open = false;
+
+        ImGui.End();
+        if (!open)
+            _pairPermsKey = null;
+    }
+
+    private void EnsureOwnerDraft(string dollKey)
+    {
+        if (_ownerDrafts.ContainsKey(dollKey))
+            return;
+
+        _ownerDrafts[dollKey] = new OwnerSettingsDraft();
+        _ = _relay.QueryOwnerSettingsAsync(dollKey);
+    }
+
+    private void DrawPairOwnerWindow(string dollKey, string partnerKey)
+    {
+        if (!string.Equals(_pairOwnerKey, partnerKey, StringComparison.Ordinal))
+            return;
+
+        var open = true;
+        if (!BeginPairSettingsWindow("Owner Settings", $"pair_owner_{partnerKey}", _pairOwnerPos, ref open))
+        {
+            ImGui.End();
+            if (!open)
+                _pairOwnerKey = null;
+            return;
+        }
+
+        EnsureOwnerDraft(dollKey);
+        var draft = _ownerDrafts[dollKey];
+
+        var snap = _relay.GetOwnerSettings(dollKey);
+        if (snap?.LastError is { Length: > 0 } err)
+            ImGui.TextColored(new Vector4(0.9f, 0.35f, 0.35f, 1f), err);
+
+        if (ImGui.Button("Refresh settings"))
+        {
+            draft.Synced = false;
+            _ = _relay.QueryOwnerSettingsAsync(dollKey);
+        }
+
+        if (snap is not { HasData: true })
+        {
+            ImGui.TextDisabled("Waiting for settings (doll must be online)…");
+            ImGui.Spacing();
+            if (ImGui.Button("Close", new Vector2(100, 0)))
+                open = false;
+            ImGui.End();
+            if (!open)
+                _pairOwnerKey = null;
+            return;
+        }
+
+        if (!draft.Synced)
+        {
+            draft.MaxHours = snap.MaxWindHours;
+            draft.AutoSit = snap.AutoGroundSit;
+            draft.EmoteId = snap.LockEmoteId == 0 ? (ushort)52 : snap.LockEmoteId;
+            draft.Locked = snap.SettingsLocked;
+            draft.Synced = true;
+        }
+
+        ImGui.Spacing();
+        if (draft.Locked)
+            ImGui.BeginDisabled();
+
+        var maxHours = (int)Math.Round(draft.MaxHours);
+        ImGui.SetNextItemWidth(80);
+        if (ImGui.InputInt("Max wind hours", ref maxHours))
+        {
+            draft.MaxHours = Math.Clamp(maxHours, 1, 168);
+            if (!ImGui.IsItemActive())
+                PushOwnerSettings(dollKey, draft);
+        }
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            draft.MaxHours = Math.Clamp(maxHours, 1, 168);
+            PushOwnerSettings(dollKey, draft);
+        }
+
+        if (ImGui.Checkbox("Play emote when unwound", ref draft.AutoSit))
+            PushOwnerSettings(dollKey, draft);
+
+        if (draft.AutoSit)
+        {
+            var emoteId = draft.EmoteId;
+            DrawOwnerEmoteCombo(snap.Emotes, ref emoteId);
+            if (emoteId != draft.EmoteId)
+            {
+                draft.EmoteId = emoteId;
+                PushOwnerSettings(dollKey, draft);
+            }
+        }
+
+        if (draft.Locked)
+            ImGui.EndDisabled();
+
+        if (DrawOwnerLockToggle(draft.Locked))
+        {
+            draft.Locked = !draft.Locked;
+            PushOwnerSettings(dollKey, draft, notify: false);
+        }
+
+        ImGui.TextDisabled("When locked, these settings cannot be changed until unlocked. Only owners can unlock.");
+
+#if WINDUP_TESTING
+        ImGui.Spacing();
+        DrawOwnerCallButton(dollKey, snap);
+#endif
+
+        ImGui.Spacing();
+        if (ImGui.Button("Close", new Vector2(100, 0)))
+            open = false;
+
+        ImGui.End();
+        if (!open)
+            _pairOwnerKey = null;
     }
 
     private void DrawPairLabelField(
@@ -736,131 +902,6 @@ public sealed class ConfigWindow : Window, IDisposable
 
         identity = PlayerIdentity.Format(name, world);
         return true;
-    }
-
-    private void DrawOwnerTab()
-    {
-        ImGui.Spacing();
-        ImGui.TextUnformatted("Owned dolls");
-        ImGui.Separator();
-        ImGui.TextWrapped("Manage max wind hours and unwound emote settings for dolls that designated you as an owner.");
-
-        if (_config.OwnedDolls.Count == 0)
-        {
-            ImGui.TextDisabled("No owned dolls.");
-            return;
-        }
-
-        for (var i = 0; i < _config.OwnedDolls.Count; i++)
-        {
-            var doll = _config.OwnedDolls[i];
-            ImGui.PushID(i);
-            _relay.EnsurePresenceFresh(doll.DollKey);
-
-            var ownedPair = _config.FindPairByKey(doll.DollKey);
-            var ownedLabel = ownedPair?.GetChosenName();
-            if (string.IsNullOrWhiteSpace(ownedLabel))
-                ownedLabel = string.IsNullOrWhiteSpace(doll.Identity) ? doll.DollKey : doll.Identity;
-            var header = string.Equals(ownedLabel, doll.DollKey, StringComparison.Ordinal)
-                ? doll.DollKey
-                : $"{ownedLabel}  ({doll.DollKey})";
-
-            // Collapsed by default. Stable id keeps expand state per doll.
-            if (!ImGui.CollapsingHeader($"{header}###owned_{doll.DollKey}"))
-            {
-                DrawPartnerPresenceLabel(doll.DollKey);
-                ImGui.PopID();
-                continue;
-            }
-
-            DrawPartnerPresenceLabel(doll.DollKey);
-
-            if (!_ownerDrafts.TryGetValue(doll.DollKey, out var draft))
-            {
-                draft = new OwnerSettingsDraft();
-                _ownerDrafts[doll.DollKey] = draft;
-                _ = _relay.QueryOwnerSettingsAsync(doll.DollKey);
-            }
-
-            var snap = _relay.GetOwnerSettings(doll.DollKey);
-            if (snap?.LastError is { Length: > 0 } err)
-                ImGui.TextColored(new Vector4(0.9f, 0.35f, 0.35f, 1f), err);
-
-            if (ImGui.Button("Refresh settings"))
-            {
-                draft.Synced = false;
-                _ = _relay.QueryOwnerSettingsAsync(doll.DollKey);
-            }
-
-            if (snap is not { HasData: true })
-            {
-                ImGui.TextDisabled("Waiting for settings (doll must be online)…");
-                ImGui.PopID();
-                ImGui.Spacing();
-                continue;
-            }
-
-            if (!draft.Synced)
-            {
-                draft.MaxHours = snap.MaxWindHours;
-                draft.AutoSit = snap.AutoGroundSit;
-                draft.EmoteId = snap.LockEmoteId == 0 ? (ushort)52 : snap.LockEmoteId;
-                draft.Locked = snap.SettingsLocked;
-                draft.Synced = true;
-            }
-
-            ImGui.Spacing();
-            if (draft.Locked)
-                ImGui.BeginDisabled();
-
-            var maxHours = (int)Math.Round(draft.MaxHours);
-            ImGui.SetNextItemWidth(80);
-            if (ImGui.InputInt("Max wind hours", ref maxHours))
-            {
-                draft.MaxHours = Math.Clamp(maxHours, 1, 168);
-                if (!ImGui.IsItemActive())
-                    PushOwnerSettings(doll.DollKey, draft);
-            }
-
-            if (ImGui.IsItemDeactivatedAfterEdit())
-            {
-                draft.MaxHours = Math.Clamp(maxHours, 1, 168);
-                PushOwnerSettings(doll.DollKey, draft);
-            }
-
-            if (ImGui.Checkbox("Play emote when unwound", ref draft.AutoSit))
-                PushOwnerSettings(doll.DollKey, draft);
-
-            if (draft.AutoSit)
-            {
-                var emoteId = draft.EmoteId;
-                DrawOwnerEmoteCombo(snap.Emotes, ref emoteId);
-                if (emoteId != draft.EmoteId)
-                {
-                    draft.EmoteId = emoteId;
-                    PushOwnerSettings(doll.DollKey, draft);
-                }
-            }
-
-            if (draft.Locked)
-                ImGui.EndDisabled();
-
-            if (DrawOwnerLockToggle(draft.Locked))
-            {
-                draft.Locked = !draft.Locked;
-                PushOwnerSettings(doll.DollKey, draft, notify: false);
-            }
-
-            ImGui.TextDisabled("When locked, these settings cannot be changed until unlocked. Only owners can unlock.");
-
-#if WINDUP_TESTING
-            ImGui.Spacing();
-            DrawOwnerCallButton(doll.DollKey, snap);
-#endif
-
-            ImGui.PopID();
-            ImGui.Spacing();
-        }
     }
 
 #if WINDUP_TESTING
@@ -1111,6 +1152,25 @@ public sealed class ConfigWindow : Window, IDisposable
 
         if (!_config.IsDoll)
             return;
+
+#if WINDUP_TESTING
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Call travel");
+        if (ImGui.Button("Store"))
+            _relay.TryStoreDebugCallPoint();
+
+        ImGui.SameLine();
+        if (!_relay.HasDebugCallPoint)
+            ImGui.BeginDisabled();
+        if (ImGui.Button("Recall"))
+            _relay.TryRecallDebugCallPoint();
+        if (!_relay.HasDebugCallPoint)
+            ImGui.EndDisabled();
+
+        ImGui.TextDisabled(_relay.HasDebugCallPoint
+            ? "Recall travels to the last stored point (local; no relay)."
+            : "Store a point first, then Recall acts like an owner call to that spot.");
+#endif
 
         ImGui.Spacing();
         ImGui.TextUnformatted("Self wind");

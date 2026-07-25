@@ -144,33 +144,6 @@ public sealed class PresenceResultPayload
     public bool? StillPaired { get; set; }
 }
 
-/// <summary>
-/// Legacy: announces that the sender's pairing key changed.
-/// Modern clients derive a stable key from ContentId (rename/world transfer do not change it);
-/// this remains for manual/legacy rotation. Recipients trust only when <see cref="OldKey"/> matches an existing pair.
-/// Optional <see cref="Identity"/> is for the partner's local label only and must not be stored by the relay.
-/// </summary>
-public sealed class KeyRotatedPayload
-{
-    /// <summary>Sender's new pairing key (set/overwritten by relay).</summary>
-    [JsonPropertyName("from")]
-    public string From { get; set; } = string.Empty;
-
-    /// <summary>Partner pairing key to notify.</summary>
-    [JsonPropertyName("to")]
-    public string To { get; set; } = string.Empty;
-
-    [JsonPropertyName("oldKey")]
-    public string OldKey { get; set; } = string.Empty;
-
-    [JsonPropertyName("newKey")]
-    public string NewKey { get; set; } = string.Empty;
-
-    /// <summary>Optional new Name@World for the partner's local label only.</summary>
-    [JsonPropertyName("identity")]
-    public string? Identity { get; set; }
-}
-
 /// <summary>Doll designates the recipient as an owner.</summary>
 public sealed class OwnerGrantPayload
 {
@@ -342,6 +315,37 @@ public sealed class CallPayload
 
     [JsonPropertyName("z")]
     public float Z { get; set; }
+
+    /// <summary>
+    /// Lifestream <c>ResidentialAetheryteKind</c> as int (Limsa=8, Gridania=2, Ul'dah=9, Foundation=70, Kugane=111).
+    /// 0 when the owner is not in a residential district.
+    /// </summary>
+    [JsonPropertyName("housingCity")]
+    public int HousingCity { get; set; }
+
+    /// <summary>1-based ward; 0 when not in housing.</summary>
+    [JsonPropertyName("housingWard")]
+    public int HousingWard { get; set; }
+
+    /// <summary>1 = main division, 2 = subdivision; 0 when not in housing.</summary>
+    [JsonPropertyName("housingDivision")]
+    public int HousingDivision { get; set; }
+
+    /// <summary>1-based plot for houses; 0 when unknown, on the street, or apartment.</summary>
+    [JsonPropertyName("housingPlot")]
+    public int HousingPlot { get; set; }
+
+    /// <summary>1-based apartment room; 0 when not an apartment.</summary>
+    [JsonPropertyName("housingApartment")]
+    public int HousingApartment { get; set; }
+
+    /// <summary>True when standing in / targeting an apartment wing.</summary>
+    [JsonPropertyName("housingIsApartment")]
+    public bool HousingIsApartment { get; set; }
+
+    /// <summary>True when inside a house or apartment (outdoor plot coords should be used for travel).</summary>
+    [JsonPropertyName("housingIndoor")]
+    public bool HousingIndoor { get; set; }
 }
 
 public static class CallAckStatuses
