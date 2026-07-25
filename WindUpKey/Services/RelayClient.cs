@@ -5,6 +5,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
 using WindUpKey.Protocol;
@@ -58,6 +59,7 @@ public sealed class RelayClient : IDisposable
     private readonly IPluginLog _log;
     private readonly IChatGui _chat;
     private readonly IDataManager _data;
+    private readonly IDalamudPluginInterface _pi;
     private readonly ConsentService _consent;
     private readonly WindTimerService _timer;
     private readonly IWindNotifier _notifier;
@@ -107,6 +109,7 @@ public sealed class RelayClient : IDisposable
         IPluginLog log,
         IChatGui chat,
         IDataManager data,
+        IDalamudPluginInterface pi,
         ConsentService consent,
         WindTimerService timer,
         IWindNotifier notifier,
@@ -120,6 +123,7 @@ public sealed class RelayClient : IDisposable
         _log = log;
         _chat = chat;
         _data = data;
+        _pi = pi;
         _consent = consent;
         _timer = timer;
         _notifier = notifier;
@@ -169,7 +173,8 @@ public sealed class RelayClient : IDisposable
             Z = player.Position.Z,
         };
 
-        if (HousingCallLocation.TryRead(territoryId, territoryRow: null, out var housing, _data))
+        var housingDiag = new StringBuilder();
+        if (HousingCallLocation.TryRead(territoryId, territoryRow: null, out var housing, _data, housingDiag))
         {
             payload.HousingCity = housing.City;
             payload.HousingWard = housing.Ward;
@@ -180,15 +185,23 @@ public sealed class RelayClient : IDisposable
             payload.HousingIndoor = housing.Indoor;
             // Wards/subdivisions share TerritoryType — send the outdoor district id for travel.
             payload.TerritoryId = housing.OutdoorTerritoryId;
+            CallTravelDebugLog.Write(
+                _pi,
+                _config,
+                _log,
+                $"owner Call snapshot OK → city={housing.City} w{housing.Ward} div{housing.Division} "
+                + $"plot={housing.Plot} apt={housing.Apartment} indoor={housing.Indoor} "
+                + $"outTerr={housing.OutdoorTerritoryId} pos=({payload.X:0.0},{payload.Y:0.0},{payload.Z:0.0}) "
+                + $"world={payload.WorldId} | {housingDiag}");
         }
-        else if (_config.IsDebugEnabled)
+        else
         {
-            _log.Debug(
-                "Call snapshot: HousingCallLocation.TryRead failed (terr={Territory} pos=({X:0.0},{Y:0.0},{Z:0.0}))",
-                territoryId,
-                player.Position.X,
-                player.Position.Y,
-                player.Position.Z);
+            CallTravelDebugLog.Write(
+                _pi,
+                _config,
+                _log,
+                $"owner Call snapshot FAIL → terr={territoryId} "
+                + $"pos=({payload.X:0.0},{payload.Y:0.0},{payload.Z:0.0}) world={payload.WorldId} | {housingDiag}");
         }
 
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.Call, payload), CancellationToken.None)

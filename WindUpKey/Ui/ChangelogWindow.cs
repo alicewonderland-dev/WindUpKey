@@ -12,6 +12,12 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.2.9 — Indoor Call HouseId (Testing)",
+            [
+                "Indoor Call snapshots prefer IndoorTerritory HouseId when HousingManager ward/plot are -1, so house interiors send ward/plot/outdoor territory instead of a bare indoor zone id.",
+                "With debug mode on, owners and dolls both append Call travel diagnostics to CallTravel.debug.log in the plugin config folder (snapshot OK/FAIL with HouseId source on the owner).",
+            ]),
+        new(
             "0.2.2.8 — Call travel pathing (Testing)",
             [
                 "Call no longer walks toward the owner while still in another zone or housing division (that caused wall-running before Lifestream finished).",
@@ -30,7 +36,6 @@ public sealed class ChangelogWindow : Window
                 "Call arrival range tightened to within 2 yalms of the owner.",
                 "Indoor housing Calls wait for Lifestream to enter the owner's house, then path inside (no longer treating the outdoor ward as arrived, and ward checks work in house territories).",
                 "Call travel writes throttled debug lines to CallTravel.debug.log in the plugin config folder when debug mode is enabled (phase, housing snapshot, path gates, failures).",
-                "Indoor Call snapshots use HouseId when HousingManager ward is -1, so house interiors attach ward/plot/outdoor territory instead of sending a bare indoor territory id.",
             ]),
         new(
             "0.2.2.7 — Call owner plugins (Testing)",
@@ -41,12 +46,6 @@ public sealed class ChangelogWindow : Window
             "0.2.2.6 — Call cancel retry (Testing)",
             [
                 "Cancelling or failing a Call now aborts leftover Lifestream/vnavmesh work so the next Call and Accept retry can start cleanly.",
-            ]),
-        new(
-            "0.2.2.5 — Call housing travel (Testing)",
-            [
-                "Call travel now distinguishes housing wards and subdivisions (they share a zone id).",
-                "Dolls use Lifestream housing travel to the owner's ward before pathing, so vnavmesh is not fed coordinates from the wrong ward.",
             ]),
     ];
 

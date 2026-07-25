@@ -78,7 +78,7 @@ public sealed class Plugin : IDalamudPlugin
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
         _relay = new RelayClient(
-            Configuration, ClientState, ObjectTable, Framework, Log, ChatGui, DataManager, _consent, _timer, _notifier, _sounds, commands);
+            Configuration, ClientState, ObjectTable, Framework, Log, ChatGui, DataManager, PluginInterface, _consent, _timer, _notifier, _sounds, commands);
         _moodlesStatus = new MoodlesWindStatusService(
             PluginInterface, ClientState, ObjectTable, Configuration, _timer, lowWindMessages, Log);
 

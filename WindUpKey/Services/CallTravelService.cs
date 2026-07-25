@@ -1,7 +1,6 @@
 #if WINDUP_TESTING
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Numerics;
 using System.Threading.Tasks;
 using Dalamud.Game.ClientState.Conditions;
@@ -1659,8 +1658,6 @@ public sealed class CallTravelService : IDisposable
         return division == _pending.HousingDivision;
     }
 
-    private const string CallTravelDebugLogFileName = "CallTravel.debug.log";
-
     /// <summary>Append to config-dir CallTravel.debug.log when debug mode is on (throttled for per-tick noise).</summary>
     private void DebugCall(string message, string? key = null, bool throttle = true)
     {
@@ -1678,20 +1675,7 @@ public sealed class CallTravelService : IDisposable
             _lastCallDebugUtc = now;
         }
 
-        _log.Debug("[CallTravel] {Message}", message);
-
-        try
-        {
-            var dir = _pi.GetPluginConfigDirectory();
-            Directory.CreateDirectory(dir);
-            var path = Path.Combine(dir, CallTravelDebugLogFileName);
-            var line = $"{DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z {message}{Environment.NewLine}";
-            File.AppendAllText(path, line);
-        }
-        catch (Exception ex)
-        {
-            _log.Debug(ex, "Call travel debug file write failed");
-        }
+        CallTravelDebugLog.Write(_pi, _config, _log, message);
     }
 
     private static string FormatPendingSummary(PendingCall call)
