@@ -30,6 +30,25 @@ public sealed class WindPayload
     public double Hours { get; set; }
 }
 
+/// <summary>Doll asks a paired partner for additional winding.</summary>
+public sealed class WindRequestPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Sender pairing key (set/overwritten by relay).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Target pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    /// <summary>Rounded percentage of the doll's configured maximum wind, clamped to 0–100.</summary>
+    [JsonPropertyName("percentRemaining")]
+    public int PercentRemaining { get; set; }
+}
+
 /// <summary>Partner-requested clear of remaining wind (doll must have CanUnwindMe or IsOwner for this key).</summary>
 public sealed class UnwindPayload
 {
@@ -432,6 +451,7 @@ public static class ErrorCodes
     public const string PairFailed = "pair_failed";
     public const string PairKeyCollision = "pair_key_collision";
     public const string RateLimited = "rate_limited";
+    public const string WindRequestCooldown = "wind_request_cooldown";
     public const string CrossDc = "cross_dc";
     public const string TravelUnavailable = "travel_unavailable";
     public const string Busy = "busy";

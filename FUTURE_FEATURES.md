@@ -10,13 +10,6 @@ Ideas to consider for a future WindUpKey release. These are planning notes, not 
 - Use them in local notifications and other appropriate plugin UI.
 - Keep the labels local to the user unless a future design explicitly adds consensual sharing.
 
-### Wind requests
-
-- Let a doll send a deliberately vague request for winding to an eligible paired partner.
-- Never reveal the doll's exact remaining time or timer bracket in the request.
-- Add sensible cooldowns and per-partner permission controls to prevent spam or unwanted requests.
-- Preserve the normal pairing, consent, relay, and successful `windResult` flow for the actual wind.
-
 ## Medium priority
 
 ### Thank-you system
@@ -84,7 +77,8 @@ Consider these either as configurable penalties that begin during low-wind state
 ## Design guardrails
 
 - The doll must never see exact remaining time through UI, chat, configuration, requests, or responses.
-- Winders learn remaining time only through the existing notifier after a successful wind result.
+- Paired partners may learn remaining wind when a feature requires it. Exact durations should
+  remain limited to successful wind results unless a feature explicitly requires more detail.
 - Pairing consent and owner permissions remain authoritative.
 - New social features should be opt-in, configurable, and safe from notification spam.
 - Restriction profiles and low-wind penalties should be opt-in, understandable in advance, and must not block chat, logout, recovery controls, or closing the game.

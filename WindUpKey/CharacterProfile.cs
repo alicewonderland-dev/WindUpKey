@@ -43,6 +43,9 @@ public sealed class CharacterProfile
 
     public DateTimeOffset? ExpiryUtc { get; set; }
 
+    /// <summary>Last paired-partner wind request sent by this doll; shared across all partners.</summary>
+    public DateTimeOffset? LastWindRequestUtc { get; set; }
+
     public int LowWindWarningsFired { get; set; }
 
     public double LowWindTriggerHighSeconds { get; set; }

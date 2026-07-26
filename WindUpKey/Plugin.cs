@@ -31,6 +31,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static ITargetManager TargetManager { get; private set; } = null!;
     [PluginService] internal static ICondition Condition { get; private set; } = null!;
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
+    [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
     [PluginService] internal static IUnlockState UnlockState { get; private set; } = null!;
     [PluginService] internal static IDutyState DutyState { get; private set; } = null!;
     [PluginService] internal static IPlayerState PlayerState { get; private set; } = null!;
@@ -78,7 +79,7 @@ public sealed class Plugin : IDalamudPlugin
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
         _relay = new RelayClient(
-            Configuration, ClientState, ObjectTable, Framework, Log, ChatGui, DataManager, PluginInterface, _consent, _timer, _notifier, _sounds, commands);
+            Configuration, ClientState, ObjectTable, Condition, Framework, Log, ChatGui, DataManager, PluginInterface, _consent, _timer, _notifier, _sounds, commands);
         _moodlesStatus = new MoodlesWindStatusService(
             PluginInterface, ClientState, ObjectTable, Configuration, _timer, lowWindMessages, Log);
 
@@ -88,6 +89,8 @@ public sealed class Plugin : IDalamudPlugin
             PluginInterface,
             ClientState,
             ObjectTable,
+            TargetManager,
+            GameGui,
             Condition,
             DataManager,
             ChatGui,

@@ -2,6 +2,11 @@
 
 A (hopefully) simple plugin. Become the wind-up doll of your dreams, or assist dolls by helping to wind them.
 
+## Features
+
+- Dolls can request additional winding from any paired partner once per hour. Requests include the
+  doll's rounded wind percentage and are delivered when an offline partner next connects.
+
 ## Installation
 
 1. Open Dalamud Settings in game with `/xlsettings`.

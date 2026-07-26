@@ -8,6 +8,7 @@ using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.System.Input;
+using FFXIVClientStructs.FFXIV.Client.UI;
 using CSGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 
 namespace WindUpKey.Services;
@@ -16,8 +17,9 @@ namespace WindUpKey.Services;
 /// Patch-fragile hooks live only here. When locked (and not in an instance / not yet in-world):
 /// suppress walk/fly/turn input (before game processes it — keeps groundsit), hard-freeze facing,
 /// block jump (incl. spacebar), block teleport/return, and re-apply groundsit if stood up.
-/// Call-travel input mute suppresses player jump without freezing facing or blocking
-/// teleport/return/walk/fly, so Lifestream housing travel and vnavmesh can still drive the character.
+/// Call-travel input mute suppresses raw player movement controls without freezing facing or blocking
+/// teleport/return/shared walk/fly output, so Lifestream housing travel and vnavmesh can still drive
+/// the character.
 /// Hooks install only while the doll is locked, input-muted, or briefly nudging; they are removed
 /// when idle unlocked and on logout. After login/zone/`BetweenAreas`, wait a short settle before
 /// install; mid-world unlock nudge / mute installs immediately.
@@ -45,6 +47,16 @@ public sealed unsafe class LockController : IDisposable
     /// Cleared when mute ends or pathing ends.
     /// </summary>
     private bool _muteAutomationPassThrough;
+    /// <summary>
+    /// While Lifestream is actively moving the doll (housing travel), allow walk/fly RMI without
+    /// enabling Jump / vnav IgnoreUserInput (those stay on pass-through only).
+    /// </summary>
+    private bool _muteLifestreamDriving;
+    /// <summary>
+    /// During aetheryte cast only: leave fly axes alone (mounted Teleport needs them) while still
+    /// zeroing walk so the doll cannot cancel the cast by moving.
+    /// </summary>
+    private bool _muteCastingFlyPass;
     private Vector3? _muteDestination;
     private float _frozenRotation;
     private bool _hasFrozenRotation;
@@ -71,6 +83,8 @@ public sealed unsafe class LockController : IDisposable
     private Hook<IsInputIdDelegate>? _isInputIdPressedHook;
     private Hook<IsInputIdDelegate>? _isInputIdDownHook;
     private Hook<IsInputIdDelegate>? _isInputIdHeldHook;
+    /// <summary>Live input singleton captured from the game's own InputData member calls.</summary>
+    private InputData* _inputData;
 
     private delegate void RMIWalkDelegate(
         void* self,
@@ -138,8 +152,9 @@ public sealed unsafe class LockController : IDisposable
     }
 
     /// <summary>
-    /// Mute jump during owner-call auto-travel without freezing facing or blocking
-    /// teleport/return/walk/fly (Lifestream housing travel and vnavmesh keep control).
+    /// Mute raw player movement during owner-call auto-travel without freezing facing or blocking
+    /// teleport/return. Shared walk/fly output is zeroed unless automation is driving
+    /// (Lifestream / vnav).
     /// </summary>
     public void SetInputMute(bool mute, Vector3? destination = null)
     {
@@ -157,13 +172,15 @@ public sealed unsafe class LockController : IDisposable
         {
             _muteDestination = null;
             _muteAutomationPassThrough = false;
+            _muteLifestreamDriving = false;
+            _muteCastingFlyPass = false;
             RestoreVnavMuteTweaks();
         }
     }
 
     /// <summary>
     /// Call pathing phase: allow Jump for vnav takeoff and apply vnavmesh IgnoreUserInput tweaks.
-    /// RMI walk/fly are never zeroed during Call mute (Lifestream needs them for housing travel).
+    /// Also allows walk/fly RMI (together with Lifestream-driving) so automation can move the doll.
     /// </summary>
     public void SetInputMuteAutomationPassThrough(bool passThrough)
     {
@@ -176,6 +193,23 @@ public sealed unsafe class LockController : IDisposable
             ApplyVnavMuteTweaks();
         else
             RestoreVnavMuteTweaks();
+    }
+
+    /// <summary>
+    /// While Lifestream TaskManager / follow-path is busy, allow walk/fly RMI so housing travel
+    /// can drive the doll. Does not enable Jump or vnav IgnoreUserInput (use pass-through for that).
+    /// </summary>
+    public void SetInputMuteLifestreamDriving(bool driving)
+    {
+        _muteLifestreamDriving = driving && _inputMute;
+    }
+
+    /// <summary>
+    /// While casting Teleport: allow fly RMI (mounted cast) but not walk — walk cancels the cast.
+    /// </summary>
+    public void SetInputMuteCastingFlyPass(bool allow)
+    {
+        _muteCastingFlyPass = allow && _inputMute;
     }
 
     /// <summary>Update the point input-mute walk injection steers toward while muted.</summary>
@@ -263,6 +297,13 @@ public sealed unsafe class LockController : IDisposable
 
         EnsureHooksInstalled();
 
+        if (InputMuteActive)
+        {
+            var input = GetInputData();
+            if (input is not null)
+                DisarmMouseMovementButtons(input);
+        }
+
         // Hooks are only needed while locked, input-muted, or briefly for an unlock pose nudge.
         if (_hooksInstalled && !_locked && !_inputMute && _nudgeForwardTicks <= 0)
             UninstallHooks();
@@ -299,6 +340,17 @@ public sealed unsafe class LockController : IDisposable
         && _clientState.IsLoggedIn
         && !IsInInstance()
         && _objectTable.LocalPlayer is not null;
+
+    /// <summary>Under Call mute, Lifestream or vnav may drive walk RMI; otherwise player walk is zeroed.</summary>
+    private bool AutomationAllowsWalk =>
+        _muteAutomationPassThrough || (_muteLifestreamDriving && !_muteCastingFlyPass);
+
+    /// <summary>
+    /// Fly may also stay open during aetheryte cast (mounted Teleport); walk stays blocked then
+    /// so the doll cannot cancel the cast by moving.
+    /// </summary>
+    private bool AutomationAllowsFly =>
+        AutomationAllowsWalk || _muteCastingFlyPass;
 
     private bool IsInInstance()
     {
@@ -380,6 +432,7 @@ public sealed unsafe class LockController : IDisposable
         _resitCooldownFrames = 0;
         _nudgeForwardTicks = 0;
         _pendingSitStand = false;
+        _inputData = null;
     }
 
     private void TryInstallHooks()
@@ -515,13 +568,32 @@ public sealed unsafe class LockController : IDisposable
             return;
         }
 
-        _rmiWalkHook!.Original(self, sumLeft, sumForward, sumTurnLeft, haveBackwardOrStrafe, a6, bAdditiveUnk);
+        var input = InputMuteActive ? GetInputData() : null;
+        PhysicalInputSnapshot snapshot = default;
+        if (input is not null)
+            SuppressPhysicalInput(input, out snapshot);
 
-        if (InputMuteActive)
+        try
         {
-            // Never zero walk/strafe during Call mute. Lifestream GoToHousingAddress walks to
-            // ward aetherytes / plots through these hooks; stripping axes stranded housing Calls.
-            // (Wall-running was from injecting toward the owner destination — that inject is gone.)
+            // Lifestream/vnavmesh detours are inside this Original chain. They see zero physical
+            // input, then add their own movement after the game's RMI assembler has run.
+            _rmiWalkHook!.Original(self, sumLeft, sumForward, sumTurnLeft, haveBackwardOrStrafe, a6, bAdditiveUnk);
+        }
+        finally
+        {
+            if (input is not null)
+                RestorePhysicalInput(input, in snapshot);
+        }
+
+        if (InputMuteActive && !AutomationAllowsWalk)
+        {
+            // Block player walk/strafe during Call mute, but leave axes alone while Lifestream
+            // or vnav is driving. Do not inject toward destination. Casting alone does not
+            // allow walk (that would cancel Teleport).
+            *sumLeft = 0;
+            *sumForward = 0;
+            if (haveBackwardOrStrafe != null)
+                *haveBackwardOrStrafe = 0;
             return;
         }
 
@@ -552,11 +624,125 @@ public sealed unsafe class LockController : IDisposable
             return;
         }
 
-        _rmiFlyHook!.Original(self, flyInput);
+        var input = InputMuteActive ? GetInputData() : null;
+        PhysicalInputSnapshot snapshot = default;
+        if (input is not null)
+            SuppressPhysicalInput(input, out snapshot);
 
-        // Call input-mute must not zero fly axes: that cancels aetheryte teleport while mounted,
-        // blocks Lifestream housing approach, and blocks vnavmesh flight.
-        // (RestrictionsActive still zeroes fly when unwound-locked.)
+        try
+        {
+            _rmiFlyHook!.Original(self, flyInput);
+        }
+        finally
+        {
+            if (input is not null)
+                RestorePhysicalInput(input, in snapshot);
+        }
+
+        if (InputMuteActive && !AutomationAllowsFly && flyInput != null)
+        {
+            var floats = (float*)flyInput;
+            for (var i = 0; i < 6; i++)
+                floats[i] = 0;
+        }
+    }
+
+    /// <summary>
+    /// Temporarily hide physical keyboard, mouse, and controller state only while the native RMI
+    /// assembler runs. Automation detours later in the same hook chain still write their movement
+    /// to the RMI outputs, and the snapshot is restored before other game systems inspect input.
+    /// </summary>
+    private static void SuppressPhysicalInput(InputData* input, out PhysicalInputSnapshot snapshot)
+    {
+        snapshot = new PhysicalInputSnapshot
+        {
+            Keyboard = input->KeyboardInputs,
+            Cursor = input->CursorInputs,
+            UiFilteredCursor = input->UIFilteredCursorInputs,
+            Gamepad = input->GamepadInputs,
+            Gamepad2 = input->GamepadInputs2,
+            MouseDragButtons = input->CurrentMouseDragButtons,
+        };
+
+        input->KeyboardInputs = default;
+        input->CursorInputs = default;
+        input->UIFilteredCursorInputs = default;
+        input->GamepadInputs = default;
+        input->GamepadInputs2 = default;
+        // LMB+RMB autorun/steer is cached separately from CursorInputs.
+        input->CurrentMouseDragButtons = 0;
+    }
+
+    private static void RestorePhysicalInput(InputData* input, in PhysicalInputSnapshot snapshot)
+    {
+        input->KeyboardInputs = snapshot.Keyboard;
+        input->CursorInputs = snapshot.Cursor;
+        input->UIFilteredCursorInputs = snapshot.UiFilteredCursor;
+        input->GamepadInputs = snapshot.Gamepad;
+        input->GamepadInputs2 = snapshot.Gamepad2;
+        input->CurrentMouseDragButtons = snapshot.MouseDragButtons;
+        // Do not re-expose the physical mouse buttons after the narrow RMI suppression window.
+        DisarmMouseMovementButtons(input);
+    }
+
+    /// <summary>
+    /// Keep LMB/RMB unavailable throughout Call mute. FFXIV consumes these through several
+    /// independent paths (cursor flags, virtual keys, and a cached drag byte), some outside RMI.
+    /// Hardware polling refreshes them after mute ends.
+    /// </summary>
+    private static void DisarmMouseMovementButtons(InputData* input)
+    {
+        const MouseButtonFlags buttons = MouseButtonFlags.LBUTTON | MouseButtonFlags.RBUTTON;
+
+        ClearMouseButtons(ref input->CursorInputs, buttons);
+        ClearMouseButtons(ref input->UIFilteredCursorInputs, buttons);
+        input->CurrentMouseDragButtons = 0;
+
+        var keys = input->KeyboardInputs.KeyState;
+        ClearKey(keys, SeVirtualKey.LBUTTON);
+        ClearKey(keys, SeVirtualKey.RBUTTON);
+        ClearKey(keys, SeVirtualKey.PAD_LMB);
+        ClearKey(keys, SeVirtualKey.PAD_RMB);
+    }
+
+    private static void ClearMouseButtons(ref CursorInputData cursor, MouseButtonFlags buttons)
+    {
+        cursor.MouseButtonHeldFlags &= ~buttons;
+        cursor.MouseButtonPressedFlags &= ~buttons;
+        cursor.MouseButtonReleasedFlags &= ~buttons;
+        cursor.MouseButtonHeldThrottledFlags &= ~buttons;
+    }
+
+    private static void ClearKey(Span<KeyStateFlags> keys, SeVirtualKey key)
+    {
+        var index = (int)key;
+        if ((uint)index < (uint)keys.Length)
+            keys[index] = KeyStateFlags.None;
+    }
+
+    private InputData* GetInputData()
+    {
+        try
+        {
+            var uiModule = UIModule.Instance();
+            var uiInput = uiModule is null ? null : uiModule->GetUIInputData();
+            return uiInput is null ? _inputData : &uiInput->InputData;
+        }
+        catch
+        {
+            // The member-function hooks still provide the same live pointer as a fallback.
+            return _inputData;
+        }
+    }
+
+    private struct PhysicalInputSnapshot
+    {
+        public KeyboardInputData Keyboard;
+        public CursorInputData Cursor;
+        public CursorInputData UiFilteredCursor;
+        public GamepadInputData Gamepad;
+        public GamepadInputData Gamepad2;
+        public byte MouseDragButtons;
     }
 
     private bool UseActionDetour(
@@ -600,6 +786,9 @@ public sealed unsafe class LockController : IDisposable
 
     private bool IsInputIdPressedDetour(InputData* self, InputId inputId)
     {
+        _inputData = self;
+        if (ShouldBlockRawMovementInput(inputId))
+            return false;
         if (ShouldBlockJumpInput() && IsJumpInput(inputId))
             return false;
         return _isInputIdPressedHook!.Original(self, inputId);
@@ -607,6 +796,9 @@ public sealed unsafe class LockController : IDisposable
 
     private bool IsInputIdDownDetour(InputData* self, InputId inputId)
     {
+        _inputData = self;
+        if (ShouldBlockRawMovementInput(inputId))
+            return false;
         if (ShouldBlockJumpInput() && IsJumpInput(inputId))
             return false;
         return _isInputIdDownHook!.Original(self, inputId);
@@ -614,10 +806,39 @@ public sealed unsafe class LockController : IDisposable
 
     private bool IsInputIdHeldDetour(InputData* self, InputId inputId)
     {
+        _inputData = self;
+        if (ShouldBlockRawMovementInput(inputId))
+            return false;
         if (ShouldBlockJumpInput() && IsJumpInput(inputId))
             return false;
         return _isInputIdHeldHook!.Original(self, inputId);
     }
+
+    /// <summary>
+    /// Suppress physical keyboard/controller locomotion before it is folded into the same RMI axes
+    /// used by Lifestream and vnavmesh. Camera look remains available. Jump is handled separately
+    /// because vnavmesh needs it for mounted flight takeoff.
+    /// </summary>
+    private bool ShouldBlockRawMovementInput(InputId inputId) =>
+        InputMuteActive
+        && inputId is
+            InputId.MOVE_FORE
+            or InputId.MOVE_BACK
+            or InputId.MOVE_LEFT
+            or InputId.MOVE_RIGHT
+            or InputId.MOVE_STRIFE_L
+            or InputId.MOVE_STRIFE_R
+            or InputId.MOVE_AND_STEER
+            or InputId.MOVE_DESCENT
+            or InputId.MOVE_RETENTION
+            or InputId.MOVE_ANGLE_RISING
+            or InputId.MOVE_ANGLE_DESCENT
+            or InputId.AUTORUN_KEY
+            or InputId.AUTORUN_PAD
+            or InputId.VIRTUAL_PAD_LSTICK_UP
+            or InputId.VIRTUAL_PAD_LSTICK_DOWN
+            or InputId.VIRTUAL_PAD_LSTICK_LEFT
+            or InputId.VIRTUAL_PAD_LSTICK_RIGHT;
 
     /// <summary>
     /// Block jump while locked, or while Call-muted before pathing. Pathing pass-through must allow

@@ -4,11 +4,14 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Threading.Tasks;
 using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Ipc.Exceptions;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Client.Game.Control;
+using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
 using WindUpKey.Protocol;
 using WindUpKey.Ui;
@@ -20,22 +23,56 @@ namespace WindUpKey.Services;
 /// </summary>
 public sealed class CallTravelService : IDisposable
 {
+    private const string CallErrorEcho =
+        "Your owner's call encountered an error. This feature is still in testing.";
     private const float CloseRangeYalms = 2f;
     private const float ArrivedSlopYalms = 0.25f;
+    /// <summary>Short final legs are quicker and more reliable on the ground, especially into housing lots.</summary>
+    private const float PreferWalkingWithinYalms = 30f;
     /// <summary>
     /// Max XZ distance for same-instance vnav. Housing main↔subdivision is ~700 yalms apart
     /// in the same TerritoryType — never path across that.
     /// </summary>
     private const float MaxSameInstancePathYalms = 200f;
+    private const float HouseEntranceInteractYalms = 3.5f;
+    /// <summary>How far we will vnav toward a visible Entrance / plot door before giving up.</summary>
+    private const float HouseEntranceApproachMaxYalms = 200f;
     /// <summary>GeneralAction row: Mount Roulette.</summary>
     private const uint GeneralActionMountRoulette = 9;
     private static readonly TimeSpan TravelStepTimeout = TimeSpan.FromMinutes(3);
     /// <summary>How long to wait for Lifestream TaskManager / cast to show progress after we request travel.</summary>
     private static readonly TimeSpan LifestreamStartGrace = TimeSpan.FromSeconds(3);
+    /// <summary>Cooldown between Teleport / GoToHousing retries after an interrupt or no-op.</summary>
+    private static readonly TimeSpan TeleportRetryCooldown = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan MountAttemptCooldown = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PathStartGrace = TimeSpan.FromSeconds(30);
     /// <summary>How long to keep trying Mount Roulette before falling back to foot pathing.</summary>
     private static readonly TimeSpan MountGrace = TimeSpan.FromSeconds(12);
+    /// <summary>Short retry guard for entrance targeting/interact; confirmation is checked every tick.</summary>
+    private static readonly TimeSpan HouseEnterAttemptCooldown = TimeSpan.FromMilliseconds(250);
+
+    // Event object names for private house doors (Lifestream Lang.Entrance).
+    private static readonly string[] HouseEntranceNames =
+    [
+        "Entrance",
+        "ハウスへ入る",
+        "进入房屋",
+        "進入房屋",
+        "Eingang",
+        "Entrée",
+        "주택으로 들어가기",
+    ];
+
+    private static readonly string[] HouseEnterConfirmText =
+    [
+        "Enter the estate hall?",
+        "「ハウス」へ入りますか？",
+        "要进入这间房屋吗？",
+        "要進入這間房屋嗎？",
+        "Das Gebäude betreten?",
+        "Entrer dans la maison ?",
+        "'주택'으로 들어가시겠습니까?",
+    ];
 
     // Lifestream ResidentialAethernet.ApartmentSubdivisionAetherytes — used to hop main→subdivision.
     private static readonly Dictionary<int, uint> SubdivisionAetheryteByCity = new()
@@ -50,6 +87,8 @@ public sealed class CallTravelService : IDisposable
     private readonly IDalamudPluginInterface _pi;
     private readonly IClientState _clientState;
     private readonly IObjectTable _objects;
+    private readonly ITargetManager _targets;
+    private readonly IGameGui _gameGui;
     private readonly ICondition _condition;
     private readonly IDataManager _data;
     private readonly IChatGui _chat;
@@ -69,6 +108,7 @@ public sealed class CallTravelService : IDisposable
     private ICallGateSubscriber<(string, int, int, int, int, int, int, bool, bool, string), object>? _lsGoToHousing;
     private ICallGateSubscriber<string, string, string, string, bool, bool, (string, int, int, int, int, int, int, bool, bool, string)>? _lsBuildAddress;
     private ICallGateSubscriber<uint, bool>? _lsHousingAethernetById;
+    private ICallGateSubscriber<uint, int, Vector3?>? _lsGetPlotEntrance;
     private ICallGateSubscriber<bool>? _vnavReady;
     private ICallGateSubscriber<Vector3, bool, float, bool>? _vnavMoveCloseTo;
     private ICallGateSubscriber<bool>? _vnavPathRunning;
@@ -84,7 +124,18 @@ public sealed class CallTravelService : IDisposable
     private bool _housingCityTeleportAttempted;
     private bool _housingGoRetryAttempted;
     private bool _teleportProgressSeen;
+    /// <summary>
+    /// Accept is raised from the prompt's Draw callback. Defer IPC, automation, and input-hook
+    /// state changes to the framework tick instead of performing native work while ImGui is drawing.
+    /// </summary>
+    private bool _acceptRequested;
+    private bool _houseEntrancePathStarted;
+    private bool _awaitingHouseEnterConfirm;
+    private bool _pathingSeenBusy;
     private DateTimeOffset _lastMountAttemptUtc;
+    private DateTimeOffset _lastHouseEnterAttemptUtc;
+    private DateTimeOffset _houseEnterInteractedUtc;
+    private DateTimeOffset _lastTeleportRetryUtc;
     private DateTimeOffset? _pathStartDeadlineUtc;
     private DateTimeOffset? _mountDeadlineUtc;
     private bool _localDebugCall;
@@ -128,6 +179,8 @@ public sealed class CallTravelService : IDisposable
         IDalamudPluginInterface pi,
         IClientState clientState,
         IObjectTable objects,
+        ITargetManager targets,
+        IGameGui gameGui,
         ICondition condition,
         IDataManager data,
         IChatGui chat,
@@ -141,6 +194,8 @@ public sealed class CallTravelService : IDisposable
         _pi = pi;
         _clientState = clientState;
         _objects = objects;
+        _targets = targets;
+        _gameGui = gameGui;
         _condition = condition;
         _data = data;
         _chat = chat;
@@ -265,13 +320,22 @@ public sealed class CallTravelService : IDisposable
 
         if (_pending is not null)
         {
+            ReportEdgeCaseError(
+                "request rejected: already answering another call"
+                + $" | incoming terr={payload.TerritoryId} world={payload.WorldId}");
             await SendResultOrLocalAsync(payload, CallResultStatuses.Failed, "Already answering another call.", localDebug)
                 .ConfigureAwait(false);
             return;
         }
 
-        if (!IsTravelReady)
+        // vnavmesh may report not-ready while combat/instance/crafting already prevents travel.
+        // Preserve the Call and show its normal wait state; probe again when Accept can become active.
+        var hasDeferredGameGate = IsCrafting() || IsInInstance() || IsInCombat();
+        if (!hasDeferredGameGate && !IsTravelReady)
         {
+            ReportEdgeCaseError(
+                "request rejected: travel plugins unavailable"
+                + $" | terr={payload.TerritoryId} world={payload.WorldId}");
             await SendResultOrLocalAsync(payload, CallResultStatuses.Failed, "Lifestream and vnavmesh are required.", localDebug)
                 .ConfigureAwait(false);
             return;
@@ -279,6 +343,9 @@ public sealed class CallTravelService : IDisposable
 
         if (!SameDataCenter(payload.WorldId))
         {
+            ReportEdgeCaseError(
+                "request rejected: cross-data-center travel"
+                + $" | terr={payload.TerritoryId} world={payload.WorldId}");
             await SendResultOrLocalAsync(payload, CallResultStatuses.Failed, "Cannot travel across data centers.", localDebug)
                 .ConfigureAwait(false);
             return;
@@ -291,6 +358,20 @@ public sealed class CallTravelService : IDisposable
             return;
 
         _localDebugCall = localDebug;
+        var housingPlot = payload.HousingPlot;
+        var housingDivision = HousingCallLocation.EffectiveDivision(
+            housingPlot,
+            payload.HousingDivision,
+            payload.HousingIsApartment);
+        housingPlot = HousingCallLocation.ToLifestreamPlot(
+            housingPlot,
+            housingDivision,
+            payload.HousingIsApartment);
+        housingDivision = HousingCallLocation.EffectiveDivision(
+            housingPlot,
+            housingDivision,
+            payload.HousingIsApartment);
+
         _pending = new PendingCall
         {
             RequestId = payload.RequestId,
@@ -301,8 +382,8 @@ public sealed class CallTravelService : IDisposable
             Position = new Vector3(payload.X, payload.Y, payload.Z),
             HousingCity = payload.HousingCity,
             HousingWard = payload.HousingWard,
-            HousingDivision = payload.HousingDivision,
-            HousingPlot = payload.HousingPlot,
+            HousingDivision = housingDivision,
+            HousingPlot = housingPlot,
             HousingApartment = payload.HousingApartment,
             HousingIsApartment = payload.HousingIsApartment,
             HousingIndoor = payload.HousingIndoor,
@@ -312,7 +393,13 @@ public sealed class CallTravelService : IDisposable
         _housingCityTeleportAttempted = false;
         _housingGoRetryAttempted = false;
         _teleportProgressSeen = false;
+        _houseEntrancePathStarted = false;
+        _awaitingHouseEnterConfirm = false;
+        _pathingSeenBusy = false;
         _lastMountAttemptUtc = default;
+        _lastHouseEnterAttemptUtc = default;
+        _houseEnterInteractedUtc = default;
+        _lastTeleportRetryUtc = default;
         _pathStartDeadlineUtc = null;
         _mountDeadlineUtc = null;
         _weOwnTravel = false;
@@ -349,6 +436,8 @@ public sealed class CallTravelService : IDisposable
             if (_objects.LocalPlayer is null)
                 return;
 
+            SyncLifestreamDrivingRmi();
+
             switch (_phase)
             {
                 case TravelPhase.WaitingGates:
@@ -372,7 +461,7 @@ public sealed class CallTravelService : IDisposable
         catch (Exception ex)
         {
             _log.Warning(ex, "Call travel tick failed");
-            EnterFailedPrompt();
+            EnterFailedPrompt($"Unhandled tick exception: {ex}");
         }
     }
 
@@ -383,7 +472,7 @@ public sealed class CallTravelService : IDisposable
             if (!_craftNotified)
             {
                 _craftNotified = true;
-                PluginChat.Print(_chat, "Your presence is requested.", PluginChat.Yellow);
+                PluginChat.Print(_chat, PresenceRequiredEcho(), PluginChat.Yellow);
                 _ = AckAsync(CallAckStatuses.Crafting);
             }
             return;
@@ -430,8 +519,8 @@ public sealed class CallTravelService : IDisposable
         var reason = _prompt.Reason;
         var clear = reason switch
         {
-            CallPromptReason.Combat => !IsInCombat() && !IsExternallyBusy(),
-            CallPromptReason.Busy => !IsExternallyBusy() && !IsInCombat(),
+            CallPromptReason.Combat => !IsInCombat() && !IsExternallyBusy() && IsTravelReady,
+            CallPromptReason.Busy => !IsExternallyBusy() && !IsInCombat() && IsTravelReady,
             // Failed retries abort leftover automation on Accept — don't keep the button locked
             // because Lifestream is still draining from the attempt that just failed.
             CallPromptReason.Failed => !IsInCombat() && IsTravelReady,
@@ -439,6 +528,14 @@ public sealed class CallTravelService : IDisposable
         };
 
         _prompt.CanAccept = clear;
+
+        if (_acceptRequested)
+        {
+            _acceptRequested = false;
+            TryAcceptPendingCall();
+            return;
+        }
+
         if (!_prompt.IsOpen)
             _prompt.IsOpen = true;
     }
@@ -448,12 +545,35 @@ public sealed class CallTravelService : IDisposable
         if (_pending is null || !_prompt.CanAccept)
             return;
 
+        // This callback runs during UI drawing. Native IPC, automation cancellation, and input
+        // hook activation are handled by TickWaitingAccept on the next framework update.
+        _acceptRequested = true;
         _prompt.IsOpen = false;
-        AbortCallAutomation();
+    }
+
+    private void TryAcceptPendingCall()
+    {
+        if (_pending is null)
+            return;
+
+        // A fresh request was already cleaned when it was received. Repeating both synchronous
+        // stop/abort IPC calls here causes a visible hitch immediately after combat. Failed retries
+        // are the only Accept path where stale plugin task queues may still need another drain.
+        if (_prompt.Reason == CallPromptReason.Failed)
+            AbortCallAutomation();
 
         if (IsCrafting() || IsInInstance() || IsInCombat())
         {
             _phase = TravelPhase.WaitingGates;
+            return;
+        }
+
+        // Readiness can change between drawing the button and handling its click.
+        if (!IsTravelReady)
+        {
+            _prompt.IsOpen = true;
+            _prompt.CanAccept = false;
+            _phase = TravelPhase.WaitingAccept;
             return;
         }
 
@@ -485,7 +605,7 @@ public sealed class CallTravelService : IDisposable
         // Mute input immediately, but do not steer toward the destination until local pathing —
         // otherwise we walk housing coords through the current zone's mesh (into walls).
         _timer.SetCallTravelInputMute(true);
-        PluginChat.Print(_chat, "Answering call…", PluginChat.Yellow);
+        PluginChat.Print(_chat, PresenceRequiredEcho(), PluginChat.Yellow);
         DebugCall($"begin travel → {FormatPendingSummary(_pending)} | {FormatLocalHousingSnapshot()}", throttle: false);
 
         var localWorld = _objects.LocalPlayer?.CurrentWorld.RowId ?? 0;
@@ -630,6 +750,19 @@ public sealed class CallTravelService : IDisposable
         if (_pending is null)
             return;
 
+        // Lifestream remains busy while waiting on the selected apartment's confirmation.
+        // Confirm before the general busy early-return or the Call can wait here forever.
+        if (_pending.IsHousingCall
+            && _pending.HousingIndoor
+            && _pending.HousingIsApartment
+            && IsAtHousingWard()
+            && TryConfirmHousingEntranceYesno(apartment: true, out var apartmentYesnoDetail))
+        {
+            _teleportProgressSeen = true;
+            DebugCall($"enter-apartment: confirmed SelectYesno ({apartmentYesnoDetail})", key: "enter-apartment-yesno");
+            return;
+        }
+
         if (DateTimeOffset.UtcNow - _stepStartedUtc > TravelStepTimeout)
         {
             EnterFailedPrompt("Travel timed out.");
@@ -654,40 +787,47 @@ public sealed class CallTravelService : IDisposable
                     $"teleport: not at housing ward yet | {FormatPathGateSummary()}",
                     key: "teleport-not-ward");
                 TryHopToSubdivisionIfNeeded();
-                if (!_teleportProgressSeen
-                    && DateTimeOffset.UtcNow - _stepStartedUtc > LifestreamStartGrace
-                    && !TryRecoverStalledHousingTravel())
-                {
-                    EnterFailedPrompt("Lifestream did not start housing travel.");
-                }
+                // Interrupted cast / cancelled Lifestream must not end the Call — keep retrying.
+                if (DateTimeOffset.UtcNow - _stepStartedUtc > LifestreamStartGrace)
+                    TryRestartInterruptedTeleport();
 
                 return;
             }
 
-            // Indoor Calls: Lifestream must enter the house before local pathing. Do not treat
-            // "standing in the ward" as arrived (that skipped entry entirely).
-            if (_pending.HousingIndoor && !IsInsideOwnerProperty())
+            // Indoor Calls: walk to the door, enter, then stop. Do not vnav inside —
+            // customizable interiors routinely trap pathfinding.
+            if (_pending.HousingIndoor)
             {
-                DebugCall(
-                    $"teleport: at ward, waiting to enter house | {FormatPathGateSummary()}",
-                    key: "teleport-wait-enter");
-                if (!IsWithinSameInstancePathRange() && TryHopToSubdivisionIfNeeded())
+                if (!IsInsideOwnerProperty())
                 {
-                    _teleportProgressSeen = true;
+                    DebugCall(
+                        $"teleport: at ward, entering house | {FormatPathGateSummary()}",
+                        key: "teleport-wait-enter");
+                    if (!IsWithinSameInstancePathRange() && TryHopToSubdivisionIfNeeded())
+                    {
+                        _teleportProgressSeen = true;
+                        return;
+                    }
+
+                    TryProgressIndoorHouseEntry();
+
+                    if (!_teleportProgressSeen
+                        && DateTimeOffset.UtcNow - _stepStartedUtc > LifestreamStartGrace
+                        && !TryRecoverStalledHousingTravel())
+                    {
+                        EnterFailedPrompt("Could not enter the owner's house.");
+                    }
+
                     return;
                 }
 
-                if (!_teleportProgressSeen
-                    && DateTimeOffset.UtcNow - _stepStartedUtc > LifestreamStartGrace
-                    && !TryRecoverStalledHousingTravel())
-                {
-                    EnterFailedPrompt("Could not enter the owner's house.");
-                }
-
+                StopOurPath();
+                DebugCall("teleport: entered house — arrived (no indoor pathing)", throttle: false);
+                _ = FinishAsync(CallResultStatuses.Arrived, "Arrived at owner's house.");
                 return;
             }
 
-            if (!_pending.HousingIndoor && !IsWithinSameInstancePathRange())
+            if (!IsWithinSameInstancePathRange())
             {
                 DebugCall(
                     $"teleport: at ward but out of path range | {FormatPathGateSummary()}",
@@ -699,24 +839,18 @@ public sealed class CallTravelService : IDisposable
                     return;
                 }
 
-                if (!_teleportProgressSeen
-                    && DateTimeOffset.UtcNow - _stepStartedUtc > LifestreamStartGrace
-                    && !TryRecoverStalledHousingTravel())
-                {
-                    EnterFailedPrompt("Could not reach the owner's housing division.");
-                }
+                if (DateTimeOffset.UtcNow - _stepStartedUtc > LifestreamStartGrace)
+                    TryRestartInterruptedTeleport();
 
                 return;
             }
         }
         else if (_clientState.TerritoryType != _pending.TerritoryId)
         {
-            // Still in the origin zone with no cast/busy yet — teleport never started.
-            if (!_teleportProgressSeen
-                && DateTimeOffset.UtcNow - _stepStartedUtc > LifestreamStartGrace)
-            {
-                EnterFailedPrompt("Teleport did not start.");
-            }
+            // Still away from destination — retry Teleport if the cast was interrupted.
+            // Do not fail the Call for a cancelled cast; only the overall step timeout ends it.
+            if (DateTimeOffset.UtcNow - _stepStartedUtc > LifestreamStartGrace)
+                TryRestartInterruptedTeleport();
 
             return;
         }
@@ -818,11 +952,32 @@ public sealed class CallTravelService : IDisposable
             return;
         }
 
-        if (!IsVnavBusy() && dist > CloseRangeYalms + ArrivedSlopYalms)
+        if (IsVnavBusy())
         {
-            // Path ended far away — treat as failure for Accept retry.
-            EnterFailedPrompt($"Path ended {dist:0.0} yalms from owner.");
+            _pathingSeenBusy = true;
+            return;
         }
+
+        // Path not running yet, or player interrupted vnav — keep trying (do not fail the Call).
+        if (!_pathingSeenBusy
+            && _pathStartDeadlineUtc is not null
+            && DateTimeOffset.UtcNow < _pathStartDeadlineUtc)
+        {
+            TryStartPath(_pending.Position);
+            return;
+        }
+
+        DebugCall($"pathing: ended at {dist:0.0}y — retrying", key: "pathing-retry");
+        _pathingSeenBusy = false;
+        _pathStartDeadlineUtc = DateTimeOffset.UtcNow + PathStartGrace;
+        if (TryStartPath(_pending.Position))
+            return;
+
+        // Remount / re-settle via Teleporting; overall TravelStepTimeout still applies.
+        _timer.SetCallTravelPathingPassThrough(false);
+        _phase = TravelPhase.Teleporting;
+        _pathStartDeadlineUtc = DateTimeOffset.UtcNow + PathStartGrace;
+        DebugCall("pathing: retry deferred to Teleporting", key: "pathing-defer");
     }
 
     private void EnterFailedPrompt(string? detail = null)
@@ -832,13 +987,15 @@ public sealed class CallTravelService : IDisposable
 
         DebugCall(
             $"FAILED: {detail ?? "(no detail)"} | {FormatPendingSummary(_pending)} | {FormatPathGateSummary()}",
-            throttle: false);
+            throttle: false,
+            force: true);
 
         AbortCallAutomation();
         _timer.SetCallTravelPathingPassThrough(false);
+        _timer.SetCallTravelLifestreamDriving(false);
+        _timer.SetCallTravelCastingFlyPass(false);
         _timer.SetCallTravelInputMute(false);
-        if (!string.IsNullOrWhiteSpace(detail))
-            PluginChat.Print(_chat, $"Call travel failed: {detail}", PluginChat.Yellow);
+        PluginChat.Print(_chat, CallErrorEcho, PluginChat.Yellow);
         ShowPrompt(CallPromptReason.Failed, canAccept: !IsInCombat() && IsTravelReady);
         _phase = TravelPhase.WaitingAccept;
         _ = AckAsync(CallAckStatuses.Busy);
@@ -884,7 +1041,7 @@ public sealed class CallTravelService : IDisposable
             else if (string.Equals(status, CallResultStatuses.Cancelled, StringComparison.Ordinal))
                 PluginChat.Print(_chat, "Debug call recall cancelled.", PluginChat.Grey);
             else
-                PluginChat.Print(_chat, $"Debug call recall failed: {message}", PluginChat.Yellow);
+                PluginChat.Print(_chat, CallErrorEcho, PluginChat.Yellow);
             return;
         }
 
@@ -904,7 +1061,6 @@ public sealed class CallTravelService : IDisposable
     {
         if (localDebug)
         {
-            PluginChat.Print(_chat, $"Debug call recall failed: {message}", PluginChat.Yellow);
             await Task.CompletedTask.ConfigureAwait(false);
             return;
         }
@@ -924,8 +1080,11 @@ public sealed class CallTravelService : IDisposable
         AbortCallAutomation();
         _phase = TravelPhase.Idle;
         _prompt.IsOpen = false;
+        _acceptRequested = false;
         _timer.SetCallTravelBypass(false);
         _timer.SetCallTravelPathingPassThrough(false);
+        _timer.SetCallTravelLifestreamDriving(false);
+        _timer.SetCallTravelCastingFlyPass(false);
         _timer.SetCallTravelInputMute(false);
         _pending = null;
         _localDebugCall = false;
@@ -1086,6 +1245,16 @@ public sealed class CallTravelService : IDisposable
             _log.Debug(ex, "Lifestream BuildAddressBookEntry IPC unavailable");
             _lsBuildAddress = null;
         }
+
+        try
+        {
+            _lsGetPlotEntrance = _pi.GetIpcSubscriber<uint, int, Vector3?>("Lifestream.GetPlotEntrance");
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "Lifestream GetPlotEntrance IPC unavailable");
+            _lsGetPlotEntrance = null;
+        }
     }
 
     private bool ProbeTravelReady()
@@ -1117,6 +1286,20 @@ public sealed class CallTravelService : IDisposable
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Open walk/fly RMI only while Lifestream or zone transit is driving the doll.
+    /// Casting alone opens fly only — walk during cast cancels Teleport and must stay muted.
+    /// Idle Call mute zeroes player axes; vnav uses pathing pass-through instead.
+    /// </summary>
+    private void SyncLifestreamDrivingRmi()
+    {
+        var inTransitPhase = _phase is TravelPhase.ChangingWorld or TravelPhase.Teleporting;
+        var casting = inTransitPhase && IsPlayerCasting();
+        var driving = inTransitPhase && (IsLifestreamBusy() || IsBetweenAreas());
+        _timer.SetCallTravelLifestreamDriving(driving);
+        _timer.SetCallTravelCastingFlyPass(casting);
     }
 
     private bool IsVnavBusy()
@@ -1154,13 +1337,12 @@ public sealed class CallTravelService : IDisposable
 
     private bool TryGoToHousing(PendingCall call)
     {
-        var plot = call.HousingPlot > 0 ? call.HousingPlot : 1;
+        var plot = HousingCallLocation.ToLifestreamPlot(
+            call.HousingPlot > 0 ? call.HousingPlot : 1,
+            call.HousingDivision,
+            call.HousingIsApartment);
         var apartment = call.HousingApartment > 0 ? call.HousingApartment : 1;
-        var isSub = call.HousingDivision == 2;
-        // Lifestream house paths use plot index 1–60 (subdivision houses are 31–60).
-        if (!call.HousingIsApartment && isSub && plot is >= 1 and <= 30)
-            plot += 30;
-
+        var isSub = HousingCallLocation.EffectiveDivision(plot, call.HousingDivision, call.HousingIsApartment) == 2;
         var propertyType = call.HousingIsApartment ? 1 : 0; // House=0, Apartment=1
         var worldName = !string.IsNullOrWhiteSpace(call.WorldName)
             ? call.WorldName
@@ -1254,6 +1436,53 @@ public sealed class CallTravelService : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// Re-issue Teleport / GoToHousing after an interrupted cast or cancelled Lifestream task.
+    /// Rate-limited; does not fail the Call — overall TravelStepTimeout still applies.
+    /// </summary>
+    private bool TryRestartInterruptedTeleport()
+    {
+        if (_pending is null)
+            return false;
+        if (IsBetweenAreas() || IsLifestreamBusy() || IsPlayerCasting())
+            return false;
+        if (DateTimeOffset.UtcNow - _lastTeleportRetryUtc < TeleportRetryCooldown)
+            return false;
+
+        _lastTeleportRetryUtc = DateTimeOffset.UtcNow;
+
+        if (_pending.IsHousingCall)
+        {
+            // Prefer the one-shot city / GoToHousing recovery first, then unrestricted retries.
+            if (TryRecoverStalledHousingTravel())
+            {
+                DebugCall("teleport: recover stalled housing", key: "teleport-recover");
+                return true;
+            }
+
+            if (TryGoToHousing(_pending))
+            {
+                _teleportProgressSeen = false;
+                DebugCall("teleport: re-issued GoToHousingAddress", key: "teleport-retry-housing");
+                return true;
+            }
+
+            return false;
+        }
+
+        if (_clientState.TerritoryType == _pending.TerritoryId)
+            return false;
+
+        if (TryTeleportNear(_pending.TerritoryId, _pending.Position))
+        {
+            _teleportProgressSeen = false;
+            DebugCall("teleport: re-issued aetheryte Teleport", key: "teleport-retry");
+            return true;
+        }
+
+        return false;
+    }
+
     private static string ResidentialCityName(int city) =>
         city switch
         {
@@ -1313,8 +1542,10 @@ public sealed class CallTravelService : IDisposable
             if (IsVnavPathfindPending())
                 return false;
 
-            // Default: flight when mounted / airborne. Indoors and unmounted → foot path.
-            if (!_pending!.HousingIndoor
+            // Default: flight when mounted / airborne, except short final legs where takeoff is
+            // slower and can fail silently near housing-lot boundaries.
+            if (!ShouldPreferWalking()
+                && !_pending!.HousingIndoor
                 && (IsMounted()
                     || _condition[ConditionFlag.InFlight]
                     || _condition[ConditionFlag.Diving]))
@@ -1354,6 +1585,8 @@ public sealed class CallTravelService : IDisposable
         }
 
         _weOwnTravel = true;
+        _pathingSeenBusy = false;
+        _pathStartDeadlineUtc = DateTimeOffset.UtcNow + PathStartGrace;
         _phase = TravelPhase.Pathing;
         _stepStartedUtc = DateTimeOffset.UtcNow;
         return true;
@@ -1387,10 +1620,9 @@ public sealed class CallTravelService : IDisposable
 
         if (_pending.IsHousingCall)
         {
-            // Indoor: only path after Lifestream has entered the owner's house.
-            // Outdoor ward coords must not be compared to indoor owner position.
+            // Indoor: arrival is "inside the house" — never start vnav through interiors.
             if (_pending.HousingIndoor)
-                return IsInsideOwnerProperty();
+                return false;
 
             // Housing main/sub share a TerritoryType but sit ~700 yalms apart — never path across that.
             return IsWithinSameInstancePathRange();
@@ -1409,10 +1641,11 @@ public sealed class CallTravelService : IDisposable
         if (_pending is null)
             return false;
 
-        // Already close enough — no mount needed.
+        // Short final legs are faster and more reliable on foot. If Lifestream already left us
+        // mounted, TryStartPath still explicitly requests a ground path.
         var player = _objects.LocalPlayer;
         if (player is not null
-            && Vector3.Distance(player.Position, _pending.Position) <= CloseRangeYalms + ArrivedSlopYalms)
+            && Vector3.Distance(player.Position, _pending.Position) <= PreferWalkingWithinYalms)
             return true;
 
         if (_pending.HousingIndoor)
@@ -1460,6 +1693,14 @@ public sealed class CallTravelService : IDisposable
     }
 
     private bool IsMounted() => _condition[ConditionFlag.Mounted];
+
+    private bool ShouldPreferWalking()
+    {
+        var player = _objects.LocalPlayer;
+        return player is not null
+               && _pending is not null
+               && Vector3.Distance(player.Position, _pending.Position) <= PreferWalkingWithinYalms;
+    }
 
     private bool IsVnavPathfindPending()
     {
@@ -1563,7 +1804,10 @@ public sealed class CallTravelService : IDisposable
             {
                 return insideLoc.City == _pending.HousingCity
                        && insideLoc.Ward == _pending.HousingWard
-                       && insideLoc.Division == _pending.HousingDivision;
+                       && insideLoc.Division == HousingCallLocation.EffectiveDivision(
+                           _pending.HousingPlot,
+                           _pending.HousingDivision,
+                           _pending.HousingIsApartment);
             }
 
             var original = HousingManager.GetOriginalHouseTerritoryTypeId();
@@ -1606,8 +1850,17 @@ public sealed class CallTravelService : IDisposable
 
             if (loc.IsApartment)
                 return false;
-            if (_pending.HousingPlot > 0 && loc.Plot > 0 && loc.Plot != _pending.HousingPlot)
-                return false;
+            if (_pending.HousingPlot > 0 && loc.Plot > 0)
+            {
+                var pendingPlot = HousingCallLocation.ToLifestreamPlot(
+                    _pending.HousingPlot,
+                    _pending.HousingDivision,
+                    false);
+                var localPlot = HousingCallLocation.ToLifestreamPlot(loc.Plot, loc.Division, false);
+                if (pendingPlot != localPlot)
+                    return false;
+            }
+
             return true;
         }
 
@@ -1633,7 +1886,11 @@ public sealed class CallTravelService : IDisposable
             return false;
 
         var plot = rawPlot + 1;
-        if (_pending.HousingPlot > 0 && plot != _pending.HousingPlot)
+        var pendingLs = HousingCallLocation.ToLifestreamPlot(
+            _pending.HousingPlot,
+            _pending.HousingDivision,
+            false);
+        if (_pending.HousingPlot > 0 && plot != pendingLs)
             return false;
 
         return true;
@@ -1654,14 +1911,434 @@ public sealed class CallTravelService : IDisposable
             division = 2;
         else if (rawPlot == -128)
             division = 1;
+        else if (rawPlot >= 30)
+            division = 2;
+        else if (rawPlot is >= 0 and < 30 && division is not (1 or 2))
+            division = 1;
 
-        return division == _pending.HousingDivision;
+        var expected = HousingCallLocation.EffectiveDivision(
+            _pending.HousingPlot,
+            _pending.HousingDivision,
+            _pending.HousingIsApartment);
+        return division == expected;
     }
 
-    /// <summary>Append to config-dir CallTravel.debug.log when debug mode is on (throttled for per-tick noise).</summary>
-    private void DebugCall(string message, string? key = null, bool throttle = true)
+    /// <summary>
+    /// Lifestream GoToHousingAddress stops at the plot door. Interact + confirm to go indoors.
+    /// </summary>
+    private unsafe void TryProgressIndoorHouseEntry()
     {
-        if (!_config.IsDebugEnabled)
+        if (_pending is null)
+            return;
+
+        if (_pending.HousingIsApartment)
+        {
+            if (TryConfirmHousingEntranceYesno(apartment: true, out var apartmentYesnoDetail))
+            {
+                _teleportProgressSeen = true;
+                DebugCall(
+                    $"enter-apartment: confirmed SelectYesno ({apartmentYesnoDetail})",
+                    key: "enter-apartment-yesno");
+            }
+
+            // Lifestream owns selecting and interacting with the apartment entrance.
+            return;
+        }
+
+        // Always prefer confirming an open estate-hall prompt (do not re-interact over it).
+        if (TryConfirmHousingEntranceYesno(apartment: false, out var yesnoDetail))
+        {
+            _awaitingHouseEnterConfirm = false;
+            _teleportProgressSeen = true;
+            DebugCall($"enter-house: confirmed SelectYesno ({yesnoDetail})", key: "enter-yesno");
+            return;
+        }
+
+        if (_awaitingHouseEnterConfirm)
+        {
+            var waited = DateTimeOffset.UtcNow - _houseEnterInteractedUtc;
+            if (waited < TimeSpan.FromSeconds(4))
+            {
+                DebugCall(
+                    $"enter-house: waiting for SelectYesno ({yesnoDetail})",
+                    key: "enter-wait-yesno");
+                return;
+            }
+
+            // Dialog never matched / never appeared — allow another interact.
+            _awaitingHouseEnterConfirm = false;
+            DebugCall($"enter-house: SelectYesno wait timed out ({yesnoDetail})", throttle: false);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (now - _lastHouseEnterAttemptUtc < HouseEnterAttemptCooldown)
+            return;
+        _lastHouseEnterAttemptUtc = now;
+
+        var player = _objects.LocalPlayer;
+        if (player is null)
+            return;
+
+        if (_condition[ConditionFlag.Mounted]
+            || _condition[ConditionFlag.InFlight]
+            || _condition[ConditionFlag.Mounting]
+            || _condition[ConditionFlag.MountOrOrnamentTransition])
+        {
+            DebugCall("enter-house: waiting to dismount", key: "enter-dismount");
+            return;
+        }
+
+        var entrance = FindNearestHouseEntrance(out var dist);
+        if (entrance is not null && dist <= HouseEntranceInteractYalms)
+        {
+            if (IsVnavPathRunning())
+                StopVnavPath();
+            // Door approach done — block player walk again while interacting / confirming.
+            _timer.SetCallTravelPathingPassThrough(false);
+
+            if (_targets.Target?.GameObjectId != entrance.GameObjectId)
+            {
+                _targets.Target = entrance;
+                DebugCall("enter-house: targeting Entrance", key: "enter-target");
+            }
+
+            try
+            {
+                var ts = TargetSystem.Instance();
+                if (ts is null)
+                    return;
+                ts->InteractWithObject((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)entrance.Address, false);
+                _teleportProgressSeen = true;
+                _awaitingHouseEnterConfirm = true;
+                _houseEnterInteractedUtc = now;
+                DebugCall("enter-house: interacted with Entrance", key: "enter-interact");
+            }
+            catch (Exception ex)
+            {
+                _log.Debug(ex, "House entrance interact failed");
+            }
+
+            return;
+        }
+
+        if (IsVnavPathRunning())
+        {
+            DebugCall(
+                $"enter-house: approaching door (entrance={(entrance is null ? "none" : $"{dist:0.0}y")})",
+                key: "enter-approach");
+            return;
+        }
+
+        TryPathTowardPlotEntrance(player.Position, entrance, dist);
+        DebugCall(
+            $"enter-house: seeking door (entrance={(entrance is null ? "none" : $"{dist:0.0}y")})",
+            key: "enter-seek");
+    }
+
+    private IGameObject? FindNearestHouseEntrance(out float distance)
+    {
+        distance = float.MaxValue;
+        IGameObject? best = null;
+        var player = _objects.LocalPlayer;
+        if (player is null)
+            return null;
+
+        foreach (var obj in _objects)
+        {
+            if (obj is null || !obj.IsTargetable)
+                continue;
+            var name = obj.Name.TextValue;
+            if (string.IsNullOrEmpty(name))
+                continue;
+            if (!IsHouseEntranceName(name))
+                continue;
+
+            var d = Vector3.Distance(player.Position, obj.Position);
+            if (d < distance)
+            {
+                distance = d;
+                best = obj;
+            }
+        }
+
+        return best;
+    }
+
+    private static bool IsHouseEntranceName(string name)
+    {
+        foreach (var n in HouseEntranceNames)
+        {
+            if (name.Equals(n, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Confirm a housing entrance SelectYesno. Prompt text lives on node 15 (same as Lifestream),
+    /// not in AtkValues. Apartment calls may accept the visible dialog after Lifestream has already
+    /// selected the exact room; private-house calls still require an entrance-text match.
+    /// </summary>
+    private unsafe bool TryConfirmHousingEntranceYesno(bool apartment, out string detail)
+    {
+        detail = "no addon";
+        try
+        {
+            // Scan a few SelectYesno instances (index 1+), matching Lifestream.
+            for (var index = 1; index <= 8; index++)
+            {
+                var addonPtr = _gameGui.GetAddonByName("SelectYesno", index);
+                if (addonPtr.IsNull || !addonPtr.IsReady || !addonPtr.IsVisible)
+                    continue;
+
+                var addon = (AtkUnitBase*)addonPtr.Address;
+                if (addon is null)
+                    continue;
+
+                var prompt = ReadSelectYesnoPrompt(addon);
+                detail = string.IsNullOrEmpty(prompt)
+                    ? $"addon#{index} empty prompt"
+                    : $"addon#{index} '{TruncateForDebug(prompt, 80)}'";
+
+                if (string.IsNullOrEmpty(prompt))
+                {
+                    // Apartment selection is already exact and owned by Lifestream. For houses,
+                    // accept an empty prompt only after our own entrance interaction.
+                    if (!apartment && !_awaitingHouseEnterConfirm)
+                        continue;
+                }
+                else
+                {
+                    var normalized = prompt.Replace(" ", "", StringComparison.Ordinal);
+                    // At this point an apartment Call is in the correct ward and Lifestream is
+                    // waiting after selecting the requested apartment, so its visible Yes/No is safe.
+                    var matched = apartment;
+                    foreach (var fragment in HouseEnterConfirmText)
+                    {
+                        var needle = fragment.Replace(" ", "", StringComparison.Ordinal);
+                        if (normalized.Contains(needle, StringComparison.OrdinalIgnoreCase))
+                        {
+                            matched = true;
+                            break;
+                        }
+                    }
+
+                    // Loose fallback: estate / house / ハウス / Gebäude etc.
+                    if (!matched
+                        && (normalized.Contains("estate", StringComparison.OrdinalIgnoreCase)
+                            || normalized.Contains("ハウス", StringComparison.Ordinal)
+                            || normalized.Contains("房屋", StringComparison.Ordinal)
+                            || normalized.Contains("Gebäude", StringComparison.OrdinalIgnoreCase)
+                            || normalized.Contains("maison", StringComparison.OrdinalIgnoreCase)
+                            || normalized.Contains("주택", StringComparison.Ordinal)))
+                    {
+                        matched = true;
+                    }
+
+                    if (!matched && !_awaitingHouseEnterConfirm)
+                        continue;
+                }
+
+                addon->FireCallbackInt(0); // Yes
+                detail += " → Yes";
+                return true;
+            }
+
+            if (detail == "no addon" && _awaitingHouseEnterConfirm)
+                detail = "waiting (SelectYesno not visible)";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "House entrance SelectYesno failed");
+            detail = $"exception: {ex.Message}";
+            return false;
+        }
+    }
+
+    private static unsafe string ReadSelectYesnoPrompt(AtkUnitBase* addon)
+    {
+        try
+        {
+            // Lifestream: UldManager.NodeList[15] text node holds the prompt.
+            if (addon->UldManager.NodeListCount > 15)
+            {
+                var node = addon->UldManager.NodeList[15];
+                if (node is not null)
+                {
+                    var textNode = node->GetAsAtkTextNode();
+                    if (textNode is not null)
+                    {
+                        var fromGetText = textNode->GetText();
+                        if (fromGetText.HasValue)
+                        {
+                            var s = fromGetText.ToString();
+                            if (!string.IsNullOrWhiteSpace(s))
+                                return s;
+                        }
+
+                        var fromNodeText = textNode->NodeText.ToString();
+                        if (!string.IsNullOrWhiteSpace(fromNodeText))
+                            return fromNodeText;
+                    }
+                }
+            }
+
+            // Fallback: AtkValues string payloads.
+            for (var i = 0; i < addon->AtkValuesCount; i++)
+            {
+                ref var value = ref addon->AtkValues[i];
+                try
+                {
+                    if (!value.String.HasValue)
+                        continue;
+                    var s = value.String.ToString();
+                    if (!string.IsNullOrWhiteSpace(s) && s.Length > 3)
+                        return s;
+                }
+                catch
+                {
+                    // ignore bad value types
+                }
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return string.Empty;
+    }
+
+    private static string TruncateForDebug(string s, int max)
+        => s.Length <= max ? s : s[..max] + "…";
+
+    /// <summary>
+    /// Walk to the plot door. Prefer a visible Entrance object; else Lifestream GetPlotEntrance.
+    /// </summary>
+    private void TryPathTowardPlotEntrance(Vector3 playerPos, IGameObject? visibleEntrance, float visibleDist)
+    {
+        if (_pending is null)
+            return;
+        if (IsLifestreamBusy())
+        {
+            DebugCall("enter-house: path wait (lifestream busy)", key: "enter-path-wait");
+            return;
+        }
+
+        // Allow restart if a previous attempt ended short of the door.
+        if (_houseEntrancePathStarted && IsVnavBusy())
+            return;
+        _houseEntrancePathStarted = false;
+
+        Vector3? dest = null;
+        string destSource;
+
+        if (visibleEntrance is not null
+            && visibleDist is > 0 and <= HouseEntranceApproachMaxYalms)
+        {
+            dest = visibleEntrance.Position;
+            destSource = $"Entrance obj ({visibleDist:0.0}y)";
+        }
+        else
+        {
+            try
+            {
+                var plotIndex = Math.Max(0, HousingCallLocation.ToLifestreamPlot(
+                    _pending.HousingPlot,
+                    _pending.HousingDivision,
+                    false) - 1);
+                var territory = HousingCallLocation.TryGetResidentialTerritoryForCity(_pending.HousingCity)
+                                ?? _pending.TerritoryId;
+                dest = _lsGetPlotEntrance?.InvokeFunc(territory, plotIndex);
+                destSource = dest is null
+                    ? $"GetPlotEntrance null (terr={territory} plotIdx={plotIndex})"
+                    : $"GetPlotEntrance plotIdx={plotIndex}";
+            }
+            catch (Exception ex)
+            {
+                _log.Debug(ex, "GetPlotEntrance failed");
+                destSource = "GetPlotEntrance threw";
+            }
+        }
+
+        if (dest is null)
+        {
+            DebugCall($"enter-house: no door dest ({destSource})", key: "enter-no-dest");
+            return;
+        }
+
+        var dist = Vector3.Distance(playerPos, dest.Value);
+        if (dist <= HouseEntranceInteractYalms)
+            return;
+
+        try
+        {
+            if (_vnavReady?.InvokeFunc() != true)
+            {
+                DebugCall("enter-house: vnav not ready", key: "enter-vnav-ready");
+                return;
+            }
+
+            if (_vnavMoveCloseTo is null)
+            {
+                DebugCall("enter-house: vnav MoveCloseTo missing", key: "enter-vnav-missing");
+                return;
+            }
+
+            // Cancel leftover pathfind so MoveCloseTo can start.
+            if (IsVnavPathfindPending() || IsVnavPathRunning())
+                StopVnavPath();
+
+            if (_vnavMoveCloseTo.InvokeFunc(dest.Value, false, HouseEntranceInteractYalms))
+            {
+                _houseEntrancePathStarted = true;
+                _weOwnTravel = true;
+                _teleportProgressSeen = true;
+                _timer.SetCallTravelPathingPassThrough(true);
+                DebugCall(
+                    $"enter-house: pathing to door via {destSource} ({dist:0.0}y) → ({dest.Value.X:0.0},{dest.Value.Y:0.0},{dest.Value.Z:0.0})",
+                    throttle: false);
+            }
+            else
+            {
+                DebugCall($"enter-house: MoveCloseTo returned false ({destSource}, {dist:0.0}y)", key: "enter-vnav-false");
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "Path to plot entrance failed");
+            DebugCall($"enter-house: path exception: {ex.Message}", key: "enter-path-ex");
+        }
+    }
+
+    private string PresenceRequiredEcho()
+    {
+        if (_pending is null)
+            return "Your presence is required by your owner.";
+
+        var pair = _config.FindPairByKey(_pending.OwnerKey);
+        var label = pair?.GetMessageLabel();
+        if (string.IsNullOrWhiteSpace(label) || string.Equals(label, "DEBUGCALL", StringComparison.Ordinal))
+            label = "your owner";
+
+        return $"Your presence is required by {label}.";
+    }
+
+    private void ReportEdgeCaseError(string detail)
+    {
+        PluginChat.Print(_chat, CallErrorEcho, PluginChat.Yellow);
+        DebugCall($"ERROR: {detail}", throttle: false, force: true);
+    }
+
+    /// <summary>
+    /// Append to config-dir CallTravel.debug.log. Routine diagnostics require debug mode;
+    /// error details are forced so the generic player-facing echo always has a useful report.
+    /// </summary>
+    private void DebugCall(string message, string? key = null, bool throttle = true, bool force = false)
+    {
+        if (!force && !_config.IsDebugEnabled)
             return;
 
         if (throttle)
@@ -1675,7 +2352,7 @@ public sealed class CallTravelService : IDisposable
             _lastCallDebugUtc = now;
         }
 
-        CallTravelDebugLog.Write(_pi, _config, _log, message);
+        CallTravelDebugLog.Write(_pi, _config, _log, message, force);
     }
 
     private static string FormatPendingSummary(PendingCall call)
@@ -1736,7 +2413,11 @@ public sealed class CallTravelService : IDisposable
     {
         if (_pending is null || _subdivisionHopAttempted || !_pending.IsHousingCall)
             return false;
-        if (_pending.HousingDivision != 2)
+        if (_pending.HousingDivision != 2
+            && HousingCallLocation.EffectiveDivision(
+                _pending.HousingPlot,
+                _pending.HousingDivision,
+                _pending.HousingIsApartment) != 2)
             return false;
 
         var h = HousingManager.Instance();

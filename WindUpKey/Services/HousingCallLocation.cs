@@ -39,6 +39,26 @@ public readonly struct HousingCallLocation
 
     public bool IsHousing => Ward > 0 && City != 0 && Division is 1 or 2;
 
+    /// <summary>
+    /// Lifestream house plot index 1–60. Subdivision plots are 31–60 (not 1–30 + a division flag).
+    /// </summary>
+    public static int ToLifestreamPlot(int plot, int division, bool isApartment)
+    {
+        if (isApartment || plot <= 0)
+            return plot;
+        if (plot is >= 1 and <= 30 && division == 2)
+            return plot + 30;
+        return plot;
+    }
+
+    /// <summary>Division implied by a 1–60 Lifestream plot (or an explicit division when plot ≤ 30).</summary>
+    public static int EffectiveDivision(int plot, int division, bool isApartment)
+    {
+        if (!isApartment && plot > 30)
+            return 2;
+        return division is 1 or 2 ? division : 1;
+    }
+
     public static bool IsResidentialTerritory(uint territoryId) =>
         ResidentialTerritories.Contains(territoryId);
 
@@ -326,26 +346,15 @@ public readonly struct HousingCallLocation
         }
         else
         {
+            // Prefer HouseId.PlotIndex: indoors GetCurrentPlot is often -1, and when present
+            // it can lack division context. Lifestream house plots are 1–60 (31–60 = subdivision).
             var plotIndex = houseId.PlotIndex;
-            if (mgrPlot >= 0)
-            {
-                plot = mgrPlot + 1;
-                division = mgrDiv is 1 or 2 ? mgrDiv : 1;
-            }
-            else if (plotIndex >= 30)
-            {
-                division = 2;
-                plot = plotIndex - 30 + 1;
-            }
-            else
-            {
-                plot = plotIndex + 1;
-                division = mgrDiv is 1 or 2 ? mgrDiv : 1;
-            }
+            plot = plotIndex + 1;
+            division = plotIndex >= 30 ? 2 : 1;
 
-            if (division is not (1 or 2))
+            if (division is not (1 or 2) || plot is < 1 or > 60)
             {
-                diag?.Append($"house div invalid={division} ");
+                diag?.Append($"house plot/div invalid plot={plot} div={division} ");
                 return false;
             }
         }

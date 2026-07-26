@@ -17,9 +17,10 @@ internal static class CallTravelDebugLog
         IDalamudPluginInterface pi,
         Configuration config,
         IPluginLog log,
-        string message)
+        string message,
+        bool force = false)
     {
-        if (!config.IsDebugEnabled)
+        if (!force && !config.IsDebugEnabled)
             return;
 
         log.Debug("[CallTravel] {Message}", message);

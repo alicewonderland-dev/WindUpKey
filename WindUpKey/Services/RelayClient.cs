@@ -7,7 +7,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
+using Dalamud.Game.ClientState.Conditions;
+using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
+using Lumina.Excel.Sheets;
 using WindUpKey.Protocol;
 
 namespace WindUpKey.Services;
@@ -44,6 +47,7 @@ public sealed class RelayClient : IDisposable
     public const string GenericWindFailure = "Unable to wind that player.";
     public const string GenericPairFailure = "Pairing could not be completed.";
     public const string GenericOwnerSettingsFailure = "Unable to update that doll's settings.";
+    public static readonly TimeSpan WindRequestCooldown = TimeSpan.FromHours(1);
     private static readonly TimeSpan PresenceThrottle = TimeSpan.FromSeconds(10);
 
     /// <summary>
@@ -55,6 +59,7 @@ public sealed class RelayClient : IDisposable
     private readonly Configuration _config;
     private readonly IClientState _clientState;
     private readonly IObjectTable _objectTable;
+    private readonly ICondition _condition;
     private readonly IFramework _framework;
     private readonly IPluginLog _log;
     private readonly IChatGui _chat;
@@ -68,6 +73,8 @@ public sealed class RelayClient : IDisposable
 
 #if WINDUP_TESTING
     private CallTravelService? _callTravel;
+    private readonly object _pendingCallLock = new();
+    private readonly HashSet<string> _pendingCallRequestIds = new(StringComparer.Ordinal);
 #endif
 
     private ClientWebSocket? _socket;
@@ -89,6 +96,7 @@ public sealed class RelayClient : IDisposable
     /// <summary>Pending wind requestId → hours sent (winder SFX on windResult).</summary>
     private readonly object _pendingWindLock = new();
     private readonly Dictionary<string, double> _pendingWindHoursByRequestId = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _pendingWindRequestIds = new(StringComparer.Ordinal);
 
     private readonly object _ownerSettingsLock = new();
     private readonly Dictionary<string, OwnerSettingsSnapshot> _ownerSettingsByDollKey = new(StringComparer.Ordinal);
@@ -105,6 +113,7 @@ public sealed class RelayClient : IDisposable
         Configuration config,
         IClientState clientState,
         IObjectTable objectTable,
+        ICondition condition,
         IFramework framework,
         IPluginLog log,
         IChatGui chat,
@@ -119,6 +128,7 @@ public sealed class RelayClient : IDisposable
         _config = config;
         _clientState = clientState;
         _objectTable = objectTable;
+        _condition = condition;
         _framework = framework;
         _log = log;
         _chat = chat;
@@ -143,14 +153,19 @@ public sealed class RelayClient : IDisposable
             return;
 
         if (_objectTable.LocalPlayer is not { } player)
-        {
-            PluginChat.PrintError(_chat, "You must be in the world to call a doll.");
             return;
-        }
 
         if (!IsConnected)
+            return;
+
+        if (!IsCallOriginReachable(out var originFailure))
         {
-            PluginChat.PrintError(_chat, "Not connected to the relay yet.");
+            CallTravelDebugLog.Write(
+                _pi,
+                _config,
+                _log,
+                $"owner Call blocked at origin → terr={_clientState.TerritoryType} | {originFailure}",
+                force: true);
             return;
         }
 
@@ -204,10 +219,11 @@ public sealed class RelayClient : IDisposable
                 + $"pos=({payload.X:0.0},{payload.Y:0.0},{payload.Z:0.0}) world={payload.WorldId} | {housingDiag}");
         }
 
+        lock (_pendingCallLock)
+            _pendingCallRequestIds.Add(requestId);
+
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.Call, payload), CancellationToken.None)
             .ConfigureAwait(false);
-
-        PluginChat.Print(_chat, $"Calling {GetPairMessageLabel(key)}…", PluginChat.Yellow);
     }
 
     public Task SendCallAckAsync(CallAckPayload payload) =>
@@ -215,6 +231,71 @@ public sealed class RelayClient : IDisposable
 
     public Task SendCallResultAsync(CallResultPayload payload) =>
         SendEnvelopeAsync(Envelope.Create(MessageTypes.CallResult, payload), CancellationToken.None);
+
+    /// <summary>
+    /// Calls may only originate somewhere another player can actually reach. The condition checks
+    /// cover duties/solo instances and transitions; the action-status check mirrors Lifestream's
+    /// own teleport eligibility and catches special solo quest/society territories.
+    /// </summary>
+    private unsafe bool IsCallOriginReachable(out string failure)
+    {
+        if (_condition[ConditionFlag.BetweenAreas] || _condition[ConditionFlag.BetweenAreas51])
+        {
+            failure = "between areas";
+            return false;
+        }
+
+        if (_condition[ConditionFlag.BoundByDuty]
+            || _condition[ConditionFlag.BoundByDuty56]
+            || _condition[ConditionFlag.BoundByDuty95])
+        {
+            failure = "bound by duty/solo instance";
+            return false;
+        }
+
+        var territories = _data.GetExcelSheet<TerritoryType>();
+        if (territories is null || !territories.TryGetRow(_clientState.TerritoryType, out var territory))
+        {
+            failure = "unknown territory";
+            return false;
+        }
+
+        // Sheet metadata catches duties and quest-battle/solo maps even when their live condition
+        // flags are absent or delayed (notably isolated society quest locations).
+        if (territory.ContentFinderCondition.RowId != 0)
+        {
+            failure = $"content instance (cfc={territory.ContentFinderCondition.RowId})";
+            return false;
+        }
+
+        if (territory.QuestBattle.RowId != 0)
+        {
+            failure = $"solo quest territory (questBattle={territory.QuestBattle.RowId})";
+            return false;
+        }
+
+        var actionManager = ActionManager.Instance();
+        if (actionManager is null)
+        {
+            failure = "ActionManager unavailable";
+            return false;
+        }
+
+        var teleportStatus = actionManager->GetActionStatus(
+            ActionType.Action,
+            5,
+            0xE0000000,
+            true,
+            true);
+        if (teleportStatus != 0)
+        {
+            failure = $"Teleport unavailable (status={teleportStatus})";
+            return false;
+        }
+
+        failure = string.Empty;
+        return true;
+    }
 
     public void CancelActiveCall() => _callTravel?.CancelActiveCall();
 
@@ -559,6 +640,69 @@ public sealed class RelayClient : IDisposable
 
         RememberPendingWind(payload.RequestId, hours);
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.Wind, payload), CancellationToken.None);
+    }
+
+    public TimeSpan WindRequestCooldownRemaining
+    {
+        get
+        {
+            if (_config.LastWindRequestUtc is not { } last)
+                return TimeSpan.Zero;
+            var remaining = WindRequestCooldown - (DateTimeOffset.UtcNow - last);
+            return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+        }
+    }
+
+    public async Task SendWindRequestAsync(string partnerKey)
+    {
+        if (!_config.IsDoll || _cachedIdentity is null)
+        {
+            _notifier.NotifyWinderError("Only a logged-in doll can request winding.");
+            return;
+        }
+
+        if (!IsConnected)
+        {
+            _notifier.NotifyWinderError("Not connected yet. Try again in a moment.");
+            return;
+        }
+
+        if (WindRequestCooldownRemaining > TimeSpan.Zero)
+        {
+            _notifier.NotifyWinderError("You may request winding only once per hour.");
+            return;
+        }
+
+        var toKey = PairingKeyUtil.Normalize(partnerKey);
+        if (!PairingKeyUtil.IsValid(toKey) || _config.FindPairByKey(toKey) is null)
+        {
+            _notifier.NotifyWinderError("Winding requests can only be sent to a paired partner.");
+            return;
+        }
+
+        var maxSeconds = TimeSpan.FromHours(Math.Max(0.01, _config.MaxWindHours)).TotalSeconds;
+        var percent = (int)Math.Round(
+            Math.Clamp(_timer.RemainingForWinder().TotalSeconds / maxSeconds * 100.0, 0.0, 100.0),
+            MidpointRounding.AwayFromZero);
+        var payload = new WindRequestPayload
+        {
+            RequestId = Guid.NewGuid().ToString("N"),
+            From = _config.PairingKey,
+            To = toKey,
+            PercentRemaining = percent,
+        };
+
+        _config.LastWindRequestUtc = DateTimeOffset.UtcNow;
+        _config.Save();
+        lock (_pendingWindLock)
+        {
+            _pendingWindRequestIds.Clear();
+            _pendingWindRequestIds.Add(payload.RequestId);
+        }
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.WindRequest, payload), CancellationToken.None)
+            .ConfigureAwait(false);
+        PluginChat.Print(_chat, "Your request for additional winding was sent.", PluginChat.Yellow);
     }
 
     public async Task SendUnwindAsync(string targetIdentity)
@@ -1297,6 +1441,9 @@ public sealed class RelayClient : IDisposable
             case MessageTypes.Wind:
                 await HandleInboundWindAsync(envelope, ct).ConfigureAwait(false);
                 break;
+            case MessageTypes.WindRequest:
+                HandleInboundWindRequest(envelope);
+                break;
             case MessageTypes.Unwind:
                 await HandleInboundUnwindAsync(envelope, ct).ConfigureAwait(false);
                 break;
@@ -1459,6 +1606,24 @@ public sealed class RelayClient : IDisposable
         }), ct).ConfigureAwait(false);
     }
 
+    private void HandleInboundWindRequest(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<WindRequestPayload>();
+        if (payload is null)
+            return;
+
+        var fromKey = PairingKeyUtil.Normalize(payload.From);
+        if (!_consent.IsPairedByKey(fromKey))
+            return;
+
+        var percent = Math.Clamp(payload.PercentRemaining, 0, 100);
+        var label = GetPairMessageLabel(fromKey);
+        PluginChat.Print(
+            _chat,
+            $"An needy doll requests your attention. {label} is at {percent}% winding remaining and is requesting additional winding.",
+            PluginChat.Blue);
+    }
+
     private void HandleWindResult(Envelope envelope)
     {
         var payload = envelope.GetPayload<WindResultPayload>();
@@ -1491,6 +1656,22 @@ public sealed class RelayClient : IDisposable
 
         if (!string.IsNullOrEmpty(payload.RequestId))
         {
+#if WINDUP_TESTING
+            // Calls are deliberately silent on the owner side, including relay rejection/errors.
+            if (TryTakePendingCall(payload.RequestId))
+                return;
+#endif
+            lock (_pendingWindLock)
+            {
+                if (_pendingWindRequestIds.Remove(payload.RequestId))
+                {
+                    var message = payload.Code == ErrorCodes.WindRequestCooldown
+                        ? "You may request winding only once per hour."
+                        : "Unable to send that winding request.";
+                    _notifier.NotifyWinderError(message);
+                    return;
+                }
+            }
             TryTakePendingWind(payload.RequestId, out _);
             if (TryTakePendingOwnerRequest(payload.RequestId, out var dollKey))
             {
@@ -1855,23 +2036,8 @@ public sealed class RelayClient : IDisposable
 
     private void HandleCallAck(Envelope envelope)
     {
-        var payload = envelope.GetPayload<CallAckPayload>();
-        if (payload is null)
-            return;
-
-        var dollKey = PairingKeyUtil.Normalize(payload.From);
-        var label = GetPairMessageLabel(dollKey);
-        var status = payload.Status ?? string.Empty;
-        var msg = status switch
-        {
-            CallAckStatuses.Crafting => $"{label} is crafting — waiting.",
-            CallAckStatuses.Instance => $"{label} is in an instance — waiting.",
-            CallAckStatuses.Combat => $"{label} is in combat — waiting for them to accept.",
-            CallAckStatuses.Busy => $"{label} cannot move yet — waiting for them to accept.",
-            CallAckStatuses.Traveling => $"{label} is answering your call.",
-            _ => $"{label} acknowledged your call ({status}).",
-        };
-        PluginChat.Print(_chat, msg, PluginChat.Yellow);
+        // Intentionally silent: a Call never echoes status to the owner.
+        _ = envelope;
     }
 
     private void HandleCallResult(Envelope envelope)
@@ -1880,24 +2046,16 @@ public sealed class RelayClient : IDisposable
         if (payload is null)
             return;
 
-        var dollKey = PairingKeyUtil.Normalize(payload.From);
-        var label = GetPairMessageLabel(dollKey);
-        var status = payload.Status ?? string.Empty;
-        if (string.Equals(status, CallResultStatuses.Arrived, StringComparison.Ordinal))
-        {
-            PluginChat.Print(_chat, $"{label} has arrived nearby.", PluginChat.Green);
-            return;
-        }
+        TryTakePendingCall(payload.RequestId);
+    }
 
-        if (string.Equals(status, CallResultStatuses.Cancelled, StringComparison.Ordinal))
-        {
-            PluginChat.Print(_chat, $"{label} cancelled the call.", PluginChat.Grey);
-            return;
-        }
+    private bool TryTakePendingCall(string? requestId)
+    {
+        if (string.IsNullOrEmpty(requestId))
+            return false;
 
-        var detail = string.IsNullOrWhiteSpace(payload.Message) ? status : payload.Message;
-        PluginChat.Print(_chat, $"Call to {label} failed: {detail}", PluginChat.Yellow);
-        SetOwnerSettingsError(dollKey, detail);
+        lock (_pendingCallLock)
+            return _pendingCallRequestIds.Remove(requestId);
     }
 #endif
 

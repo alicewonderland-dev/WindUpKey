@@ -99,7 +99,7 @@ public sealed class WindTimerService
         SyncLockState();
     }
 
-    /// <summary>Mute jump during Call auto-travel; walk/fly stay free for Lifestream and vnavmesh.</summary>
+    /// <summary>Mute jump during Call auto-travel; walk/fly blocked unless automation is driving.</summary>
     public void SetCallTravelInputMute(bool mute, System.Numerics.Vector3? destination = null) =>
         _lock.SetInputMute(mute, destination);
 
@@ -109,6 +109,18 @@ public sealed class WindTimerService
     /// <summary>During Call pathing, allow Jump for takeoff and apply vnav IgnoreUserInput tweaks.</summary>
     public void SetCallTravelPathingPassThrough(bool enabled) =>
         _lock.SetInputMuteAutomationPassThrough(enabled);
+
+    /// <summary>
+    /// While Lifestream (or zone transit) is moving the doll, allow walk/fly RMI under Call mute.
+    /// </summary>
+    public void SetCallTravelLifestreamDriving(bool driving) =>
+        _lock.SetInputMuteLifestreamDriving(driving);
+
+    /// <summary>
+    /// During aetheryte cast: allow fly RMI only (mounted Teleport). Walk stays muted.
+    /// </summary>
+    public void SetCallTravelCastingFlyPass(bool allow) =>
+        _lock.SetInputMuteCastingFlyPass(allow);
 
     /// <summary>Call on login (or plugin load while already logged in). Sits if currently unwound.</summary>
     public void OnLoggedIn()

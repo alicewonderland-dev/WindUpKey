@@ -12,40 +12,30 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
-            "0.2.2.9 — Indoor Call HouseId (Testing)",
+            "0.2.3.0 — Wind requests",
             [
-                "Indoor Call snapshots prefer IndoorTerritory HouseId when HousingManager ward/plot are -1, so house interiors send ward/plot/outdoor territory instead of a bare indoor zone id.",
-                "With debug mode on, owners and dolls both append Call travel diagnostics to CallTravel.debug.log in the plugin config folder (snapshot OK/FAIL with HouseId source on the owner).",
+                "Dolls can request winding from a paired partner once per hour.",
+                "Requests show the partner the doll's rounded wind percentage and remain queued while they are offline.",
             ]),
         new(
-            "0.2.2.8 — Call travel pathing (Testing)",
+            "0.2.2.10 — Call improvements (Testing)",
             [
-                "Call no longer walks toward the owner while still in another zone or housing division (that caused wall-running before Lifestream finished).",
-                "Local vnavmesh pathing only starts after arriving in the correct ward/division and within a sane distance of the owner.",
-                "Housing Calls retry via city aetheryte if Lifestream address travel stalls, and surface a chat error instead of failing silently.",
-                "Aetheryte teleport waits for the cast and zone change (Teleport does not set Lifestream busy) instead of aborting after two seconds.",
-                "Call input mute no longer blocks Action 5 (Teleport); that was misclassified as Jump and prevented Lifestream teleports from casting.",
-                "After aetheryte arrival, open-world pathing is no longer blocked by the housing 200-yalm guard; Mount Roulette runs before vnav (flight enabled when mounted).",
-                "Landing after teleport no longer cancels the Call (LocalPlayer is briefly null mid-zone-load; that is not a logout).",
-                "During Call pathing, input mute no longer zeroes RMI walk/fly axes (that froze the doll after mounting while vnav tried to move).",
-                "Call input mute no longer zeroes fly RMI (that cancelled aetheryte teleport while already mounted) and no longer clears vnav UserInput every frame during pathing (that caused standing jitter).",
-                "After arriving in the owner's zone, Call retries vnavmesh path start for several seconds (mesh settle) and falls back to ground pathing if a flight path fails.",
-                "Call pathing allows Jump during pathing so vnavmesh can take off on a flight path, waits for groundsit get-up, and prefers flight when mounted (ground fallback if fly pathfind fails).",
-                "Call input mute no longer zeroes walk RMI during Lifestream housing travel (that stranded ward/aethernet navigation); vnav IgnoreUserInput tweaks apply only while pathing.",
-                "Call pathing prefers flight by default (Mount Roulette, then fly path); falls back to foot pathing if mounting or flight is unavailable.",
-                "Call arrival range tightened to within 2 yalms of the owner.",
-                "Indoor housing Calls wait for Lifestream to enter the owner's house, then path inside (no longer treating the outdoor ward as arrived, and ward checks work in house territories).",
-                "Call travel writes throttled debug lines to CallTravel.debug.log in the plugin config folder when debug mode is enabled (phase, housing snapshot, path gates, failures).",
+                "Numerous bug fixes and improvements regarding Owner Call handling.",
             ]),
         new(
-            "0.2.2.7 — Call owner plugins (Testing)",
+            "0.2.2.9 — Indoor Call fixes (Testing)",
             [
-                "Calling a doll no longer requires Lifestream or vnavmesh on the owner. Only the doll answering the Call needs those plugins.",
+                "Fixed a bug involving Calls to indoor housing locations.",
             ]),
         new(
-            "0.2.2.6 — Call cancel retry (Testing)",
+            "0.2.2.8 — Call travel fixes (Testing)",
             [
-                "Cancelling or failing a Call now aborts leftover Lifestream/vnavmesh work so the next Call and Accept retry can start cleanly.",
+                "Improved Owner Call travel handling.",
+            ]),
+        new(
+            "0.2.2.7 — Call requirements (Testing)",
+            [
+                "Owners no longer need travel helpers to Call a doll.",
             ]),
     ];
 

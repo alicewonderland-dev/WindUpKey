@@ -126,6 +126,9 @@ public class Configuration : IPluginConfiguration
     /// <summary>Absolute expiry. Null or past => locked. Never display remaining duration to the doll.</summary>
     public DateTimeOffset? ExpiryUtc { get; set; }
 
+    /// <summary>Last paired-partner wind request sent by this doll; shared across all partners.</summary>
+    public DateTimeOffset? LastWindRequestUtc { get; set; }
+
     /// <summary>
     /// Bitmask of low-wind echo warnings already sent this wind cycle.
     /// Bit 0 = high (20–28h), bit 1 = mid (6–12h), bit 2 = low (45m–2h).
@@ -255,6 +258,7 @@ public class Configuration : IPluginConfiguration
             Safeword = Safeword,
             SafewordHours = SafewordHours,
             ExpiryUtc = ExpiryUtc,
+            LastWindRequestUtc = LastWindRequestUtc,
             LowWindWarningsFired = LowWindWarningsFired,
             LowWindTriggerHighSeconds = LowWindTriggerHighSeconds,
             LowWindTriggerMidSeconds = LowWindTriggerMidSeconds,
@@ -281,6 +285,7 @@ public class Configuration : IPluginConfiguration
         Safeword = string.IsNullOrEmpty(profile.Safeword) ? "safeword" : profile.Safeword;
         SafewordHours = Math.Clamp(Math.Round(profile.SafewordHours <= 0 ? 1 : profile.SafewordHours), 1, 24);
         ExpiryUtc = profile.ExpiryUtc;
+        LastWindRequestUtc = profile.LastWindRequestUtc;
         LowWindWarningsFired = profile.LowWindWarningsFired;
         LowWindTriggerHighSeconds = profile.LowWindTriggerHighSeconds;
         LowWindTriggerMidSeconds = profile.LowWindTriggerMidSeconds;

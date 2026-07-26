@@ -12,6 +12,8 @@ public static class MessageTypes
     public const string Register = "register";
     public const string Wind = "wind";
     public const string WindResult = "windResult";
+    /// <summary>Doll → paired partner: request additional winding, with rounded wind percentage.</summary>
+    public const string WindRequest = "windRequest";
     public const string Unwind = "unwind";
     public const string Error = "error";
     public const string Ping = "ping";

@@ -428,6 +428,27 @@ public sealed class ConfigWindow : Window, IDisposable
                     if (ImGui.SmallButton("Unwind"))
                         _ = _relay.SendUnwindByKeyAsync(actionPartnerKey);
 
+                    if (_config.IsDoll)
+                    {
+                        var requestCooldown = _relay.WindRequestCooldownRemaining;
+                        var requestAvailable = hasValidPartnerKey
+                                               && _relay.IsConnected
+                                               && requestCooldown <= TimeSpan.Zero;
+                        if (!requestAvailable)
+                            ImGui.BeginDisabled();
+                        if (ImGui.SmallButton("Request winding"))
+                            _ = _relay.SendWindRequestAsync(actionPartnerKey);
+                        if (!requestAvailable)
+                            ImGui.EndDisabled();
+
+                        if (requestCooldown > TimeSpan.Zero)
+                        {
+                            var minutes = Math.Max(1, (int)Math.Ceiling(requestCooldown.TotalMinutes));
+                            ImGui.SameLine();
+                            ImGui.TextDisabled($"Available in {minutes}m");
+                        }
+                    }
+
                     ImGui.Spacing();
                     var danger = new Vector4(0.75f, 0.18f, 0.18f, 1f);
                     var dangerHover = new Vector4(0.88f, 0.28f, 0.28f, 1f);
