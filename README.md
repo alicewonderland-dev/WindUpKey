@@ -1,7 +1,5 @@
 # Wind-Up Key
 
-Current version: **0.2.2.1**
-
 A (hopefully) simple plugin. Become the wind-up doll of your dreams, or assist dolls by helping to wind them.
 
 ## Installation
