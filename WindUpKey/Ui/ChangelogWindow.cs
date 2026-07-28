@@ -12,6 +12,11 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.3.4 — Pending pair controls (Testing)",
+            [
+                "Pending pairing requests can now be cancelled.",
+            ]),
+        new(
             "0.2.3.3 — Input diagnostics (Testing)",
             [
                 "Fixed corrupted input while unwound and retained diagnostic logging for confirmation.",

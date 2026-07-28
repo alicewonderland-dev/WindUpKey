@@ -96,6 +96,13 @@ public sealed class PairSubmitPayload
     public string TheirKey { get; set; } = string.Empty;
 }
 
+/// <summary>Cancel only the sender's directed pending pairing request.</summary>
+public sealed class PairCancelPayload
+{
+    [JsonPropertyName("peerKey")]
+    public string PeerKey { get; set; } = string.Empty;
+}
+
 public sealed class PairEstablishedPayload
 {
     [JsonPropertyName("peerKey")]

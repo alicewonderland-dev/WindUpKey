@@ -367,8 +367,19 @@ public sealed class ConfigWindow : Window, IDisposable
         {
             ImGui.Spacing();
             ImGui.TextUnformatted("Pending");
+            string? cancelPendingKey = null;
             foreach (var pending in _config.PendingPartnerKeys)
+            {
                 ImGui.BulletText(pending);
+                ImGui.SameLine();
+                ImGui.PushID($"cancel_pending_{pending}");
+                if (ImGui.SmallButton("Cancel"))
+                    cancelPendingKey = pending;
+                ImGui.PopID();
+            }
+
+            if (cancelPendingKey is not null)
+                _ = _relay.CancelPendingPairAsync(cancelPendingKey);
         }
 
         if (_config.PairedPartners.Count > 0)

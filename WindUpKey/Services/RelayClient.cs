@@ -828,6 +828,42 @@ public sealed class RelayClient : IDisposable
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.PairSubmit, payload), CancellationToken.None);
     }
 
+    public async Task CancelPendingPairAsync(string partnerKeyRaw)
+    {
+        var partnerKey = PairingKeyUtil.Normalize(partnerKeyRaw);
+        if (!PairingKeyUtil.IsValid(partnerKey)
+            || !_config.PendingPartnerKeys.Contains(partnerKey, StringComparer.Ordinal))
+            return;
+
+        if (!IsConnected)
+        {
+            _notifier.NotifyWinderError("Not connected yet. Try again in a moment.");
+            return;
+        }
+
+        try
+        {
+            await SendEnvelopeAsync(Envelope.Create(MessageTypes.PairCancel, new PairCancelPayload
+            {
+                PeerKey = partnerKey,
+            }), CancellationToken.None).ConfigureAwait(false);
+
+            await _framework.RunOnTick(() =>
+            {
+                if (_config.PendingPartnerKeys.RemoveAll(k =>
+                        string.Equals(PairingKeyUtil.Normalize(k), partnerKey, StringComparison.Ordinal)) > 0)
+                {
+                    _config.Save();
+                }
+            }).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "WindUpKey failed to cancel pending pair");
+            _notifier.NotifyWinderError("Unable to cancel that pending pairing request.");
+        }
+    }
+
     public async Task UnpairByKeyAsync(string partnerKey)
     {
         var peerKey = PairingKeyUtil.Normalize(partnerKey);

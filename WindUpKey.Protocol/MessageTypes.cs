@@ -19,6 +19,7 @@ public static class MessageTypes
     public const string Ping = "ping";
     public const string Pong = "pong";
     public const string PairSubmit = "pairSubmit";
+    public const string PairCancel = "pairCancel";
     public const string PairEstablished = "pairEstablished";
     public const string PairRemove = "pairRemove";
     public const string PresenceQuery = "presenceQuery";
