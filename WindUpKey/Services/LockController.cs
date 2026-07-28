@@ -64,7 +64,10 @@ public sealed unsafe class LockController : IDisposable
     private bool _hasFrozenRotation;
     private bool _applyingFrozenRotation;
     private int _resitCooldownFrames;
-    /// <summary>Remaining RMI frames to force forward walk (cancels sit/emotes on unlock).</summary>
+    /// <summary>
+    /// Remaining rewind nudge phases: inject one forward pulse, then explicitly write neutral
+    /// movement before allowing the temporary RMI hook to uninstall.
+    /// </summary>
     private int _nudgeForwardTicks;
     /// <summary>Deferred <c>/sit</c> stand (must run on framework tick — wind arrives off-thread).</summary>
     private bool _pendingSitStand;
@@ -227,7 +230,8 @@ public sealed unsafe class LockController : IDisposable
 
     /// <summary>
     /// After rewind: stand from sit/groundsit via <c>/sit</c> (get-up anim), or cancel other
-    /// looping emotes with one frame of forward walk. No-op when already idle.
+    /// looping emotes with one frame of forward walk followed by an explicit neutral frame.
+    /// No-op when already idle.
     /// Sit is queued for the next framework tick — inbound wind runs off-thread.
     /// </summary>
     public void RequestCancelPoseNudge()
@@ -244,7 +248,7 @@ public sealed unsafe class LockController : IDisposable
         if (!_condition[ConditionFlag.InThatPosition] && !_condition[ConditionFlag.Emoting])
             return;
 
-        _nudgeForwardTicks = 1;
+        _nudgeForwardTicks = 2;
     }
 
     /// <summary>
@@ -626,12 +630,31 @@ public sealed unsafe class LockController : IDisposable
             return;
         }
 
-        // One frame of forward input cancels sit / looping emotes after rewind.
-        if (_nudgeForwardTicks > 0)
+        // Cancel a looping pose with one forward pulse, then explicitly clear every movement
+        // output on the following RMI pass. The neutral phase keeps the temporary hook alive
+        // long enough to prevent the game's forward accumulator from remaining latched.
+        if (_nudgeForwardTicks == 2)
         {
             *sumForward = 1f;
             *sumLeft = 0;
             *sumTurnLeft = 0;
+            if (haveBackwardOrStrafe != null)
+                *haveBackwardOrStrafe = 0;
+            if (a6 != null)
+                *a6 = 0;
+            _diagnostics.Count("nudge.forward");
+            _nudgeForwardTicks--;
+        }
+        else if (_nudgeForwardTicks == 1)
+        {
+            *sumForward = 0;
+            *sumLeft = 0;
+            *sumTurnLeft = 0;
+            if (haveBackwardOrStrafe != null)
+                *haveBackwardOrStrafe = 0;
+            if (a6 != null)
+                *a6 = 0;
+            _diagnostics.Count("nudge.neutral");
             _nudgeForwardTicks--;
         }
     }

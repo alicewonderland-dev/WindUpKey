@@ -12,6 +12,11 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.3.5 — Rewind movement fix (Testing)",
+            [
+                "Fixed dolls continuing to run forward after being rewound.",
+            ]),
+        new(
             "0.2.3.4 — Pending pair controls (Testing)",
             [
                 "Pending pairing requests can now be cancelled.",
