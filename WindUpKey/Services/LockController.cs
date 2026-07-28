@@ -38,6 +38,7 @@ public sealed unsafe class LockController : IDisposable
     private readonly IObjectTable _objectTable;
     private readonly GameCommandRunner _commands;
     private readonly Configuration _config;
+    private readonly InputDiagnosticLog _diagnostics;
 
     private bool _locked;
     /// <summary>Mute player/controller steer during owner-call auto-travel (Testing).</summary>
@@ -118,6 +119,9 @@ public sealed unsafe class LockController : IDisposable
     /// without leaving that state. Used to skip the post-zone settle on mid-world unwind.
     /// </summary>
     private bool _hooksWereEligible;
+    private bool? _lastDiagnosticEligible;
+    private bool? _lastDiagnosticRestrictionsActive;
+    private bool? _lastDiagnosticInputMuteActive;
 
     public LockController(
         IGameInteropProvider interop,
@@ -126,7 +130,8 @@ public sealed unsafe class LockController : IDisposable
         IObjectTable objectTable,
         GameCommandRunner commands,
         Configuration config,
-        IPluginLog log)
+        IPluginLog log,
+        InputDiagnosticLog diagnostics)
     {
         _interop = interop;
         _clientState = clientState;
@@ -135,6 +140,7 @@ public sealed unsafe class LockController : IDisposable
         _commands = commands;
         _config = config;
         _log = log;
+        _diagnostics = diagnostics;
         // Do not install hooks here — title/char-select detours cause spin/crash even when inactive.
     }
 
@@ -147,6 +153,7 @@ public sealed unsafe class LockController : IDisposable
         }
 
         _locked = locked;
+        _diagnostics.RecordState($"locked={locked}");
         // Do not read ObjectTable here — SetLocked can run during plugin ctor off the main thread.
         // Facing is captured on the next Framework Tick when RestrictionsActive.
     }
@@ -296,6 +303,7 @@ public sealed unsafe class LockController : IDisposable
         }
 
         EnsureHooksInstalled();
+        RecordDiagnosticState();
 
         if (InputMuteActive)
         {
@@ -437,16 +445,19 @@ public sealed unsafe class LockController : IDisposable
 
     private void TryInstallHooks()
     {
+        _diagnostics.RecordState("hook-install-begin");
         try
         {
             _rmiWalkHook = _interop.HookFromSignature<RMIWalkDelegate>(
                 "E8 ?? ?? ?? ?? 80 7B 3E 00 48 8D 3D",
                 RMIWalkDetour);
             _rmiWalkHook.Enable();
+            _diagnostics.RecordHook("rmi-walk", installed: true);
         }
         catch (Exception ex)
         {
             _log.Warning(ex, "WindUpKey: failed to hook RMI walk (movement lock may be incomplete this patch)");
+            _diagnostics.RecordHook("rmi-walk", installed: false, ex);
         }
 
         try
@@ -455,10 +466,12 @@ public sealed unsafe class LockController : IDisposable
                 "E8 ?? ?? ?? ?? 0F B6 0D ?? ?? ?? ?? B8",
                 RMIFlyDetour);
             _rmiFlyHook.Enable();
+            _diagnostics.RecordHook("rmi-fly", installed: true);
         }
         catch (Exception ex)
         {
             _log.Warning(ex, "WindUpKey: failed to hook RMI fly");
+            _diagnostics.RecordHook("rmi-fly", installed: false, ex);
         }
 
         try
@@ -467,10 +480,12 @@ public sealed unsafe class LockController : IDisposable
                 ActionManager.MemberFunctionPointers.UseAction,
                 UseActionDetour);
             _useActionHook.Enable();
+            _diagnostics.RecordHook("use-action", installed: true);
         }
         catch (Exception ex)
         {
             _log.Warning(ex, "WindUpKey: failed to hook UseAction (teleport/jump lock may be incomplete)");
+            _diagnostics.RecordHook("use-action", installed: false, ex);
         }
 
         try
@@ -479,10 +494,12 @@ public sealed unsafe class LockController : IDisposable
                 CSGameObject.MemberFunctionPointers.SetRotation,
                 SetRotationDetour);
             _setRotationHook.Enable();
+            _diagnostics.RecordHook("set-rotation", installed: true);
         }
         catch (Exception ex)
         {
             _log.Warning(ex, "WindUpKey: failed to hook SetRotation (LMB+RMB turn lock may be incomplete)");
+            _diagnostics.RecordHook("set-rotation", installed: false, ex);
         }
 
         // Spacebar / pad jump is InputId.JUMP — may not always go through UseAction.
@@ -492,10 +509,12 @@ public sealed unsafe class LockController : IDisposable
                 InputData.MemberFunctionPointers.IsInputIdPressed,
                 IsInputIdPressedDetour);
             _isInputIdPressedHook.Enable();
+            _diagnostics.RecordHook("input-id-pressed", installed: true);
         }
         catch (Exception ex)
         {
             _log.Warning(ex, "WindUpKey: failed to hook IsInputIdPressed (spacebar jump lock may be incomplete)");
+            _diagnostics.RecordHook("input-id-pressed", installed: false, ex);
         }
 
         try
@@ -504,10 +523,12 @@ public sealed unsafe class LockController : IDisposable
                 InputData.MemberFunctionPointers.IsInputIdDown,
                 IsInputIdDownDetour);
             _isInputIdDownHook.Enable();
+            _diagnostics.RecordHook("input-id-down", installed: true);
         }
         catch (Exception ex)
         {
             _log.Warning(ex, "WindUpKey: failed to hook IsInputIdDown");
+            _diagnostics.RecordHook("input-id-down", installed: false, ex);
         }
 
         try
@@ -516,11 +537,14 @@ public sealed unsafe class LockController : IDisposable
                 InputData.MemberFunctionPointers.IsInputIdHeld,
                 IsInputIdHeldDetour);
             _isInputIdHeldHook.Enable();
+            _diagnostics.RecordHook("input-id-held", installed: true);
         }
         catch (Exception ex)
         {
             _log.Warning(ex, "WindUpKey: failed to hook IsInputIdHeld");
+            _diagnostics.RecordHook("input-id-held", installed: false, ex);
         }
+        _diagnostics.RecordState("hook-install-end");
     }
 
     private void DisposeHooks()
@@ -550,10 +574,12 @@ public sealed unsafe class LockController : IDisposable
         byte* a6,
         byte bAdditiveUnk)
     {
+        _diagnostics.Count("rmi.walk");
         // Must not call Original while restricted: it consumes LMB+RMB/WASD and cancels groundsit
         // before any post-zeroing of the float outputs.
         if (RestrictionsActive)
         {
+            _diagnostics.Count("rmi.walk.restricted");
             *sumLeft = 0;
             *sumForward = 0;
             *sumTurnLeft = 0;
@@ -609,8 +635,10 @@ public sealed unsafe class LockController : IDisposable
 
     private void RMIFlyDetour(void* self, void* flyInput)
     {
+        _diagnostics.Count("rmi.fly");
         if (RestrictionsActive)
         {
+            _diagnostics.Count("rmi.fly.restricted");
             if (flyInput != null)
             {
                 var floats = (float*)flyInput;
@@ -777,6 +805,7 @@ public sealed unsafe class LockController : IDisposable
             && _hasFrozenRotation
             && IsLocalPlayer(self))
         {
+            _diagnostics.Count("rotation.blocked");
             _setRotationHook.Original(self, _frozenRotation);
             return;
         }
@@ -788,30 +817,78 @@ public sealed unsafe class LockController : IDisposable
     {
         _inputData = self;
         if (ShouldBlockRawMovementInput(inputId))
+        {
+            _diagnostics.RecordInputResult("pressed", inputId, result: false, blocked: true);
             return false;
+        }
         if (ShouldBlockJumpInput() && IsJumpInput(inputId))
+        {
+            _diagnostics.RecordInputResult("pressed", inputId, result: false, blocked: true);
             return false;
-        return _isInputIdPressedHook!.Original(self, inputId);
+        }
+        var result = _isInputIdPressedHook!.Original(self, inputId);
+        _diagnostics.RecordInputResult("pressed", inputId, result, blocked: false);
+        return result;
     }
 
     private bool IsInputIdDownDetour(InputData* self, InputId inputId)
     {
         _inputData = self;
         if (ShouldBlockRawMovementInput(inputId))
+        {
+            _diagnostics.RecordInputResult("down", inputId, result: false, blocked: true);
             return false;
+        }
         if (ShouldBlockJumpInput() && IsJumpInput(inputId))
+        {
+            _diagnostics.RecordInputResult("down", inputId, result: false, blocked: true);
             return false;
-        return _isInputIdDownHook!.Original(self, inputId);
+        }
+        var result = _isInputIdDownHook!.Original(self, inputId);
+        _diagnostics.RecordInputResult("down", inputId, result, blocked: false);
+        return result;
     }
 
     private bool IsInputIdHeldDetour(InputData* self, InputId inputId)
     {
         _inputData = self;
         if (ShouldBlockRawMovementInput(inputId))
+        {
+            _diagnostics.RecordInputResult("held", inputId, result: false, blocked: true);
             return false;
+        }
         if (ShouldBlockJumpInput() && IsJumpInput(inputId))
+        {
+            _diagnostics.RecordInputResult("held", inputId, result: false, blocked: true);
             return false;
-        return _isInputIdHeldHook!.Original(self, inputId);
+        }
+        var result = _isInputIdHeldHook!.Original(self, inputId);
+        _diagnostics.RecordInputResult("held", inputId, result, blocked: false);
+        return result;
+    }
+
+    private void RecordDiagnosticState()
+    {
+        if (!_diagnostics.Enabled)
+            return;
+
+        var eligible = _clientState.IsLoggedIn
+                       && _objectTable.LocalPlayer is not null
+                       && !IsInInstance();
+        var restrictions = RestrictionsActive;
+        var inputMute = InputMuteActive;
+        if (_lastDiagnosticEligible == eligible
+            && _lastDiagnosticRestrictionsActive == restrictions
+            && _lastDiagnosticInputMuteActive == inputMute)
+            return;
+
+        _lastDiagnosticEligible = eligible;
+        _lastDiagnosticRestrictionsActive = restrictions;
+        _lastDiagnosticInputMuteActive = inputMute;
+        _diagnostics.RecordState(
+            $"eligible={eligible} restrictions={restrictions} input-mute={inputMute} " +
+            $"logged-in={_clientState.IsLoggedIn} local-player={_objectTable.LocalPlayer is not null} " +
+            $"in-instance={IsInInstance()} hooks-installed={_hooksInstalled}");
     }
 
     /// <summary>

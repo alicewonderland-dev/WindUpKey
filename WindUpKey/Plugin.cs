@@ -40,6 +40,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly WindowSystem _windowSystem = new("WindUpKey");
     private readonly ConfigWindow _configWindow;
     private readonly ChangelogWindow _changelogWindow;
+    private readonly InputDiagnosticLog _inputDiagnostics;
     private readonly LockController _lockController;
     private readonly WindTimerService _timer;
     private readonly LowWindWarningService _lowWind;
@@ -68,7 +69,25 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         var commands = new GameCommandRunner(Log, DataManager, UnlockState, Configuration);
-        _lockController = new LockController(GameInterop, ClientState, Condition, ObjectTable, commands, Configuration, Log);
+        _inputDiagnostics = new InputDiagnosticLog(
+            PluginInterface,
+            Log,
+            PluginInterface.Manifest.AssemblyVersion.ToString(),
+#if WINDUP_TESTING
+            enabled: true
+#else
+            enabled: false
+#endif
+        );
+        _lockController = new LockController(
+            GameInterop,
+            ClientState,
+            Condition,
+            ObjectTable,
+            commands,
+            Configuration,
+            Log,
+            _inputDiagnostics);
         var lowWindMessages = new LowWindMessagesConfig(PluginInterface.GetPluginConfigDirectory(), Log);
         var soundsDir = System.IO.Path.Combine(
             System.IO.Path.GetDirectoryName(PluginInterface.AssemblyLocation.FullName) ?? ".",
@@ -182,6 +201,7 @@ public sealed class Plugin : IDalamudPlugin
         _moodlesStatus.Dispose();
         _sounds.Dispose();
         _lockController.Dispose();
+        _inputDiagnostics.Dispose();
         _windowSystem.RemoveAllWindows();
         _configWindow.Dispose();
     }
@@ -223,6 +243,7 @@ public sealed class Plugin : IDalamudPlugin
 
         _wasBetweenAreas = loading;
         _lockController.Tick();
+        _inputDiagnostics.Tick();
     }
 
     private void OnLogin()

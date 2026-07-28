@@ -12,6 +12,11 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.3.2 — Input diagnostics (Testing)",
+            [
+                "Added a diagnostic file to help investigate input problems while unwound.",
+            ]),
+        new(
             "0.2.3.0 — Wind requests",
             [
                 "Dolls can request winding from a paired partner once per hour.",
