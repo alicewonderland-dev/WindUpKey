@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
@@ -98,6 +99,7 @@ public sealed unsafe class LockController : IDisposable
 
     private delegate void RMIFlyDelegate(void* self, void* flyInput);
 
+    [return: MarshalAs(UnmanagedType.I1)]
     private delegate bool UseActionDelegate(
         ActionManager* actionManager,
         ActionType actionType,
@@ -110,6 +112,7 @@ public sealed unsafe class LockController : IDisposable
 
     private delegate void SetRotationDelegate(CSGameObject* self, float rotation);
 
+    [return: MarshalAs(UnmanagedType.I1)]
     private delegate bool IsInputIdDelegate(InputData* self, InputId inputId);
 
     private bool _hooksInstalled;

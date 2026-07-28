@@ -12,9 +12,9 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
-            "0.2.3.2 — Input diagnostics (Testing)",
+            "0.2.3.3 — Input diagnostics (Testing)",
             [
-                "Added a diagnostic file to help investigate input problems while unwound.",
+                "Fixed corrupted input while unwound and retained diagnostic logging for confirmation.",
             ]),
         new(
             "0.2.3.0 — Wind requests",
