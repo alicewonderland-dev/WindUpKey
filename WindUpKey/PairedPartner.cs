@@ -40,6 +40,9 @@ public sealed class PairedPartner
     /// <summary>Doll-side: when true, this owner may call you to them (Hardcore forces allow).</summary>
     public bool CanCallMe { get; set; }
 
+    /// <summary>Last-write-wins stamp for synced consent flags (CanWindMe/CanUnwindMe/IsOwner/CanCallMe).</summary>
+    public DateTimeOffset? ConsentUpdatedUtc { get; set; }
+
     /// <summary>Local preferred name, falling back to Name@World and then the pairing key.</summary>
     public string GetChosenName()
     {

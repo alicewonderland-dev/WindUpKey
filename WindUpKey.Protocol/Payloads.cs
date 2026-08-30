@@ -115,11 +115,66 @@ public sealed class PairRemovePayload
     public string PeerKey { get; set; } = string.Empty;
 }
 
-/// <summary>Relay pushes established peer keys after register (consent stays client-local).</summary>
+/// <summary>
+/// Relay pushes established peers after register, optionally with doll consent and wind expiry
+/// for multi-PC sync. Older clients ignore unknown fields and use peerKeys only.
+/// </summary>
 public sealed class PairSyncPayload
 {
     [JsonPropertyName("peerKeys")]
     public List<string> PeerKeys { get; set; } = [];
+
+    /// <summary>Directed doll consent rows (optional; absent on older relays).</summary>
+    [JsonPropertyName("peers")]
+    public List<PairConsentSyncEntry>? Peers { get; set; }
+
+    /// <summary>Absolute wind expiry ISO-8601, or null/omitted when unwound. Dolls only.</summary>
+    [JsonPropertyName("expiryUtc")]
+    public string? ExpiryUtc { get; set; }
+
+    /// <summary>Last-write-wins stamp for ExpiryUtc; absent when no wind row exists yet.</summary>
+    [JsonPropertyName("windUpdatedUtc")]
+    public string? WindUpdatedUtc { get; set; }
+}
+
+/// <summary>One directed consent record from a doll toward a peer.</summary>
+public sealed class PairConsentSyncEntry
+{
+    [JsonPropertyName("peerKey")]
+    public string PeerKey { get; set; } = string.Empty;
+
+    [JsonPropertyName("canWindMe")]
+    public bool CanWindMe { get; set; }
+
+    [JsonPropertyName("canUnwindMe")]
+    public bool CanUnwindMe { get; set; }
+
+    [JsonPropertyName("isOwner")]
+    public bool IsOwner { get; set; }
+
+    [JsonPropertyName("canCallMe")]
+    public bool CanCallMe { get; set; }
+
+    [JsonPropertyName("updatedUtc")]
+    public string UpdatedUtc { get; set; } = string.Empty;
+}
+
+/// <summary>Client pushes local doll consent and/or wind expiry for relay LWW merge.</summary>
+public sealed class DollStatePushPayload
+{
+    [JsonPropertyName("peers")]
+    public List<PairConsentSyncEntry> Peers { get; set; } = [];
+
+    [JsonPropertyName("expiryUtc")]
+    public string? ExpiryUtc { get; set; }
+
+    /// <summary>When set, merge wind; when null/omitted, leave relay wind unchanged.</summary>
+    [JsonPropertyName("windUpdatedUtc")]
+    public string? WindUpdatedUtc { get; set; }
+
+    /// <summary>True when ExpiryUtc is intentionally cleared (unwound).</summary>
+    [JsonPropertyName("clearWind")]
+    public bool ClearWind { get; set; }
 }
 
 /// <summary>Offline store-and-forward status for a requestId-bearing message.</summary>

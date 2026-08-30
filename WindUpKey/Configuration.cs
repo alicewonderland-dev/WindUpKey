@@ -3,13 +3,14 @@ using System.Collections.Generic;
 using System.Linq;
 using Dalamud.Configuration;
 using WindUpKey.Protocol;
+using WindUpKey.Quest;
 
 namespace WindUpKey;
 
 [Serializable]
 public class Configuration : IPluginConfiguration
 {
-    public const int CurrentVersion = 9;
+    public const int CurrentVersion = 11;
 
     /// <summary>Orphan profile from pre-v6 flat config until the first logged-in ContentId claims it.</summary>
     public const string PendingProfileKey = "pending";
@@ -126,6 +127,9 @@ public class Configuration : IPluginConfiguration
     /// <summary>Absolute expiry. Null or past => locked. Never display remaining duration to the doll.</summary>
     public DateTimeOffset? ExpiryUtc { get; set; }
 
+    /// <summary>Last-write-wins stamp for <see cref="ExpiryUtc"/> sync with the relay.</summary>
+    public DateTimeOffset? WindUpdatedUtc { get; set; }
+
     /// <summary>Last paired-partner wind request sent by this doll; shared across all partners.</summary>
     public DateTimeOffset? LastWindRequestUtc { get; set; }
 
@@ -147,6 +151,24 @@ public class Configuration : IPluginConfiguration
     /// <summary>UTC time of the last low-wind chat echo (any band or expiry).</summary>
     public DateTimeOffset? LowWindLastWarningUtc { get; set; }
 
+    /// <summary>Active daily quest difficulty, or <see cref="QuestDifficulty.None"/>.</summary>
+    public QuestDifficulty QuestDifficulty { get; set; } = QuestDifficulty.None;
+
+    /// <summary>When the current quest difficulty was accepted (UTC).</summary>
+    public DateTimeOffset? QuestAcceptedAtUtc { get; set; }
+
+    /// <summary>Eligible roulette clears credited toward Easy (0–2).</summary>
+    public int QuestRouletteClears { get; set; }
+
+    /// <summary>Current-expansion Extreme clears credited toward Medium.</summary>
+    public int QuestExtremeClears { get; set; }
+
+    /// <summary>True after a current-tier Savage clear credited toward Hard.</summary>
+    public bool QuestSavageCleared { get; set; }
+
+    /// <summary>True after the quest reward has been granted for this accept.</summary>
+    public bool QuestRewardClaimed { get; set; }
+
     public bool IsDoll => Role == PlayerRole.Doll;
     public bool IsWinder => Role == PlayerRole.Winder;
     public bool HasChosenRole => Role is PlayerRole.Doll or PlayerRole.Winder;
@@ -165,6 +187,14 @@ public class Configuration : IPluginConfiguration
         {
             if (profile?.PairedPartners is not null)
                 NormalizePartnerLabels(profile.PairedPartners);
+            if (profile is null)
+                continue;
+            profile.QuestRouletteClears = Math.Clamp(
+                profile.QuestRouletteClears, 0, QuestContentCatalog.EasyRouletteRequired);
+            if (profile.QuestExtremeClears < 0)
+                profile.QuestExtremeClears = 0;
+            if (profile.QuestDifficulty is < QuestDifficulty.None or > QuestDifficulty.Hard)
+                profile.QuestDifficulty = QuestDifficulty.None;
         }
 
         if (MaxWindHours <= 0)
@@ -186,6 +216,12 @@ public class Configuration : IPluginConfiguration
             PairingKey = string.Empty;
 
         NormalizePendingKeys();
+
+        QuestRouletteClears = Math.Clamp(QuestRouletteClears, 0, QuestContentCatalog.EasyRouletteRequired);
+        if (QuestExtremeClears < 0)
+            QuestExtremeClears = 0;
+        if (QuestDifficulty is < QuestDifficulty.None or > QuestDifficulty.Hard)
+            QuestDifficulty = QuestDifficulty.None;
 
         // Always force compiled-in relay endpoint so users cannot drift or see/edit it.
         ApplyRelayDefaults();
@@ -258,12 +294,19 @@ public class Configuration : IPluginConfiguration
             Safeword = Safeword,
             SafewordHours = SafewordHours,
             ExpiryUtc = ExpiryUtc,
+            WindUpdatedUtc = WindUpdatedUtc,
             LastWindRequestUtc = LastWindRequestUtc,
             LowWindWarningsFired = LowWindWarningsFired,
             LowWindTriggerHighSeconds = LowWindTriggerHighSeconds,
             LowWindTriggerMidSeconds = LowWindTriggerMidSeconds,
             LowWindTriggerLowSeconds = LowWindTriggerLowSeconds,
             LowWindLastWarningUtc = LowWindLastWarningUtc,
+            QuestDifficulty = QuestDifficulty,
+            QuestAcceptedAtUtc = QuestAcceptedAtUtc,
+            QuestRouletteClears = QuestRouletteClears,
+            QuestExtremeClears = QuestExtremeClears,
+            QuestSavageCleared = QuestSavageCleared,
+            QuestRewardClaimed = QuestRewardClaimed,
         };
     }
 
@@ -285,12 +328,19 @@ public class Configuration : IPluginConfiguration
         Safeword = string.IsNullOrEmpty(profile.Safeword) ? "safeword" : profile.Safeword;
         SafewordHours = Math.Clamp(Math.Round(profile.SafewordHours <= 0 ? 1 : profile.SafewordHours), 1, 24);
         ExpiryUtc = profile.ExpiryUtc;
+        WindUpdatedUtc = profile.WindUpdatedUtc;
         LastWindRequestUtc = profile.LastWindRequestUtc;
         LowWindWarningsFired = profile.LowWindWarningsFired;
         LowWindTriggerHighSeconds = profile.LowWindTriggerHighSeconds;
         LowWindTriggerMidSeconds = profile.LowWindTriggerMidSeconds;
         LowWindTriggerLowSeconds = profile.LowWindTriggerLowSeconds;
         LowWindLastWarningUtc = profile.LowWindLastWarningUtc;
+        QuestDifficulty = profile.QuestDifficulty;
+        QuestAcceptedAtUtc = profile.QuestAcceptedAtUtc;
+        QuestRouletteClears = Math.Clamp(profile.QuestRouletteClears, 0, QuestContentCatalog.EasyRouletteRequired);
+        QuestExtremeClears = Math.Max(0, profile.QuestExtremeClears);
+        QuestSavageCleared = profile.QuestSavageCleared;
+        QuestRewardClaimed = profile.QuestRewardClaimed;
 
         if (HardcoreMode)
         {

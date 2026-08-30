@@ -25,6 +25,9 @@ public sealed class WindTimerService
     private bool _relaySafetyBypassAnnounced;
     private bool _callTravelBypass;
 
+    /// <summary>Raised after local ExpiryUtc changes (not when applying a relay sync).</summary>
+    public Action? DollWindChanged { get; set; }
+
     public WindTimerService(
         Configuration config,
         LockController lockController,
@@ -164,7 +167,35 @@ public sealed class WindTimerService
         return actualAdded;
     }
 
-    private TimeSpan AddWind(TimeSpan amount)
+    /// <summary>
+    /// True when remaining wind is strictly above <see cref="Configuration.MaxWindHours"/>.
+    /// Used to block accepting a new daily quest while already over the configured cap.
+    /// </summary>
+    public bool IsAboveMaxWind()
+    {
+        if (!_config.IsDoll)
+            return false;
+
+        var maxHours = Math.Max(0.01, _config.MaxWindHours);
+        return RemainingForWinder().TotalHours > maxHours;
+    }
+
+    /// <summary>
+    /// Quest reward path: extends the timer by the full amount with no MaxWindHours clamp.
+    /// Still emits the vague wound RP echo. Returns the time actually added.
+    /// </summary>
+    public TimeSpan AddQuestWind(double hours)
+    {
+        if (!_config.IsDoll || hours <= 0)
+            return TimeSpan.Zero;
+
+        var actualAdded = AddWind(TimeSpan.FromHours(hours), ignoreMaxCap: true);
+        if (actualAdded > TimeSpan.Zero)
+            _lowWind.OnWoundReceived(actualAdded);
+        return actualAdded;
+    }
+
+    private TimeSpan AddWind(TimeSpan amount, bool ignoreMaxCap = false)
     {
         if (!_config.IsDoll || amount <= TimeSpan.Zero)
             return TimeSpan.Zero;
@@ -172,15 +203,20 @@ public sealed class WindTimerService
         var now = DateTimeOffset.UtcNow;
         var currentExpiry = _config.ExpiryUtc is { } exp && exp > now ? exp : now;
         var proposed = currentExpiry.Add(amount);
-        var maxExpiry = now.AddHours(Math.Max(0.01, _config.MaxWindHours));
-        if (proposed > maxExpiry)
-            proposed = maxExpiry;
+        if (!ignoreMaxCap)
+        {
+            var maxExpiry = now.AddHours(Math.Max(0.01, _config.MaxWindHours));
+            if (proposed > maxExpiry)
+                proposed = maxExpiry;
+        }
 
         var actualAdded = proposed - currentExpiry;
         _config.ExpiryUtc = proposed;
+        _config.WindUpdatedUtc = DateTimeOffset.UtcNow;
         _config.Save();
         SyncLockState();
         _lowWind.OnWindChanged();
+        DollWindChanged?.Invoke();
         return actualAdded;
     }
 
@@ -268,9 +304,26 @@ public sealed class WindTimerService
             return;
 
         _config.ExpiryUtc = null;
+        _config.WindUpdatedUtc = DateTimeOffset.UtcNow;
         _config.Save();
         SyncLockState();
         _lowWind.OnCleared(TryWinderDisplayName(winderIdentity));
+        DollWindChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Applies relay-authoritative wind expiry without emitting <see cref="DollWindChanged"/>.
+    /// </summary>
+    public void ApplySyncedExpiry(DateTimeOffset? expiryUtc, DateTimeOffset updatedUtc)
+    {
+        if (!_config.IsDoll)
+            return;
+
+        _config.ExpiryUtc = expiryUtc;
+        _config.WindUpdatedUtc = updatedUtc;
+        _config.Save();
+        SyncLockState();
+        _lowWind.OnWindChanged();
     }
 
     /// <summary>

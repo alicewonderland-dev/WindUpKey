@@ -18,6 +18,8 @@ public sealed class InputDiagnosticLog : IDisposable
 {
     public const string FileName = "WindUpKey.diagnostic.log";
     private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(2);
+    private const double LongFrameGapMilliseconds = 250;
+    private const double SlowPluginUpdateMilliseconds = 50;
 
     private readonly object _sync = new();
     private readonly IPluginLog _pluginLog;
@@ -67,6 +69,29 @@ public sealed class InputDiagnosticLog : IDisposable
     {
         if (Enabled)
             WriteLine($"state {Sanitize(message)}");
+    }
+
+    /// <summary>
+    /// Records general frame stalls independently from Wind-Up Key's own update cost.
+    /// A long start-to-start gap with a cheap plugin update points outside this callback;
+    /// a slow phase identifies work on Wind-Up Key's framework path.
+    /// </summary>
+    public void RecordFrameTiming(
+        double frameGapMilliseconds,
+        double pluginMilliseconds,
+        string slowestPhase,
+        double slowestPhaseMilliseconds)
+    {
+        if (!Enabled
+            || (frameGapMilliseconds < LongFrameGapMilliseconds
+                && pluginMilliseconds < SlowPluginUpdateMilliseconds))
+            return;
+
+        WriteLine(
+            $"performance frame-gap-ms={frameGapMilliseconds:F1}"
+            + $" plugin-update-ms={pluginMilliseconds:F1}"
+            + $" slowest-phase={Sanitize(slowestPhase)}"
+            + $" slowest-phase-ms={slowestPhaseMilliseconds:F1}");
     }
 
     public void RecordHook(string hook, bool installed, Exception? exception = null)

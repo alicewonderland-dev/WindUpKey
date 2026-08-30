@@ -88,6 +88,7 @@ public sealed class RelayClient : IDisposable
     private int _running;
     private int _loopGeneration;
     private DateTimeOffset? _unreachableSinceUtc;
+    private int _dollStatePushQueued;
 
     private readonly object _presenceLock = new();
     private readonly Dictionary<string, PartnerPresence> _presenceByKey = new(StringComparer.Ordinal);
@@ -139,6 +140,7 @@ public sealed class RelayClient : IDisposable
         _notifier = notifier;
         _sounds = sounds;
         _commands = commands;
+        _timer.DollWindChanged = QueueDollStatePush;
     }
 
 #if WINDUP_TESTING
@@ -905,7 +907,9 @@ public sealed class RelayClient : IDisposable
         if (!pair.IsOwner)
         {
             pair.IsOwner = true;
+            pair.ConsentUpdatedUtc = DateTimeOffset.UtcNow;
             _config.Save();
+            QueueDollStatePush();
         }
 
         var isSelf = string.Equals(peerKey, _config.PairingKey, StringComparison.Ordinal);
@@ -962,7 +966,12 @@ public sealed class RelayClient : IDisposable
             .ToList();
 
         foreach (var partner in _config.PairedPartners)
+        {
+            if (!partner.IsOwner)
+                continue;
             partner.IsOwner = false;
+            partner.ConsentUpdatedUtc = DateTimeOffset.UtcNow;
+        }
 
         _config.OwnerSettingsLocked = false;
 
@@ -975,6 +984,7 @@ public sealed class RelayClient : IDisposable
         }
 
         _config.Save();
+        QueueDollStatePush();
 
         if (!IsConnected)
             return;
@@ -1807,22 +1817,111 @@ public sealed class RelayClient : IDisposable
     private void HandlePairSync(Envelope envelope)
     {
         var payload = envelope.GetPayload<PairSyncPayload>();
-        if (payload?.PeerKeys is null || payload.PeerKeys.Count == 0)
+        if (payload is null)
             return;
 
-        var added = false;
-        foreach (var raw in payload.PeerKeys)
+        var consentByPeer = new Dictionary<string, PairConsentSyncEntry>(StringComparer.Ordinal);
+        if (payload.Peers is not null)
         {
-            if (EnsurePeerPair(PairingKeyUtil.Normalize(raw), save: false))
-                added = true;
+            foreach (var entry in payload.Peers)
+            {
+                var key = PairingKeyUtil.Normalize(entry.PeerKey);
+                if (PairingKeyUtil.IsValid(key))
+                    consentByPeer[key] = entry;
+            }
         }
 
-        if (added)
+        var peerKeys = new HashSet<string>(StringComparer.Ordinal);
+        if (payload.PeerKeys is not null)
+        {
+            foreach (var raw in payload.PeerKeys)
+            {
+                var key = PairingKeyUtil.Normalize(raw);
+                if (PairingKeyUtil.IsValid(key))
+                    peerKeys.Add(key);
+            }
+        }
+
+        foreach (var key in consentByPeer.Keys)
+            peerKeys.Add(key);
+
+        var changed = false;
+        var needPush = false;
+
+        foreach (var peerKey in peerKeys)
+        {
+            if (string.Equals(peerKey, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
+                continue;
+
+            if (EnsurePeerPair(peerKey, save: false))
+                changed = true;
+
+            var pair = _config.FindPairByKey(peerKey);
+            if (pair is null)
+                continue;
+
+            if (consentByPeer.TryGetValue(peerKey, out var remote))
+            {
+                if (!DateTimeOffset.TryParse(remote.UpdatedUtc, out var remoteUpdated))
+                    continue;
+
+                if (pair.ConsentUpdatedUtc is not { } localUpdated || remoteUpdated > localUpdated)
+                {
+                    pair.CanWindMe = remote.CanWindMe;
+                    pair.CanUnwindMe = remote.CanUnwindMe;
+                    pair.IsOwner = remote.IsOwner;
+                    pair.CanCallMe = remote.CanCallMe;
+                    pair.ConsentUpdatedUtc = remoteUpdated;
+                    changed = true;
+                }
+                else if (localUpdated > remoteUpdated)
+                {
+                    needPush = true;
+                }
+            }
+            else if (_config.IsDoll && (pair.ConsentUpdatedUtc is not null
+                     || pair.CanWindMe || pair.CanUnwindMe || pair.IsOwner || pair.CanCallMe))
+            {
+                needPush = true;
+            }
+        }
+
+        if (_config.IsDoll)
+        {
+            if (!string.IsNullOrEmpty(payload.WindUpdatedUtc)
+                && DateTimeOffset.TryParse(payload.WindUpdatedUtc, out var remoteWindUpdated))
+            {
+                if (_config.WindUpdatedUtc is not { } localWindUpdated || remoteWindUpdated > localWindUpdated)
+                {
+                    DateTimeOffset? expiry = null;
+                    if (!string.IsNullOrEmpty(payload.ExpiryUtc)
+                        && DateTimeOffset.TryParse(payload.ExpiryUtc, out var parsedExpiry))
+                    {
+                        expiry = parsedExpiry;
+                    }
+
+                    _timer.ApplySyncedExpiry(expiry, remoteWindUpdated);
+                }
+                else if (localWindUpdated > remoteWindUpdated)
+                {
+                    needPush = true;
+                }
+            }
+            else if (_config.WindUpdatedUtc is not null || _config.ExpiryUtc is not null)
+            {
+                needPush = true;
+            }
+        }
+
+        if (changed)
             _config.Save();
+
+        if (needPush)
+            QueueDollStatePush();
     }
 
     /// <summary>
-    /// Restores a peer key entry without consent flags (doll must re-enable wind/unwind).
+    /// Restores a peer key entry. Consent flags come from relay sync or stay at local defaults.
     /// </summary>
     private bool EnsurePeerPair(string peerKey, bool save = true)
     {
@@ -1850,6 +1949,113 @@ public sealed class RelayClient : IDisposable
         if (save && (created || pendingCleared))
             _config.Save();
         return created || pendingCleared;
+    }
+
+    /// <summary>Marks consent dirty and queues a relay push (dolls only).</summary>
+    public void NotifyConsentChanged(PairedPartner partner)
+    {
+        partner.ConsentUpdatedUtc = DateTimeOffset.UtcNow;
+        _config.Save();
+        QueueDollStatePush();
+    }
+
+    /// <summary>Push local doll wind + consent to the relay when connected (coalesced).</summary>
+    public void QueueDollStatePush()
+    {
+        if (!_config.IsDoll)
+            return;
+
+        if (Interlocked.Exchange(ref _dollStatePushQueued, 1) == 1)
+            return;
+
+        _ = PushDollStateAsync();
+    }
+
+    private async Task PushDollStateAsync()
+    {
+        try
+        {
+            await Task.Yield();
+            Interlocked.Exchange(ref _dollStatePushQueued, 0);
+
+            if (!_config.IsDoll || !IsConnected)
+                return;
+
+            EnsureLocalSyncStamps();
+            var payload = BuildDollStatePushPayload();
+            if (payload is null)
+                return;
+
+            await SendEnvelopeAsync(
+                Envelope.Create(MessageTypes.DollStatePush, payload),
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Exchange(ref _dollStatePushQueued, 0);
+            _log.Debug(ex, "WindUpKey dollStatePush failed");
+        }
+    }
+
+    private void EnsureLocalSyncStamps()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var touched = false;
+
+        if (_config.ExpiryUtc is not null && _config.WindUpdatedUtc is null)
+        {
+            _config.WindUpdatedUtc = now;
+            touched = true;
+        }
+
+        foreach (var partner in _config.PairedPartners)
+        {
+            if (partner.ConsentUpdatedUtc is not null)
+                continue;
+            if (!partner.CanWindMe && !partner.CanUnwindMe && !partner.IsOwner && !partner.CanCallMe)
+                continue;
+
+            partner.ConsentUpdatedUtc = now;
+            touched = true;
+        }
+
+        if (touched)
+            _config.Save();
+    }
+
+    private DollStatePushPayload? BuildDollStatePushPayload()
+    {
+        var peers = new List<PairConsentSyncEntry>();
+        foreach (var partner in _config.PairedPartners)
+        {
+            var peerKey = PairingKeyUtil.Normalize(partner.PartnerKey);
+            if (!PairingKeyUtil.IsValid(peerKey))
+                continue;
+            if (partner.ConsentUpdatedUtc is not { } updated)
+                continue;
+
+            peers.Add(new PairConsentSyncEntry
+            {
+                PeerKey = peerKey,
+                CanWindMe = partner.CanWindMe,
+                CanUnwindMe = partner.CanUnwindMe,
+                IsOwner = partner.IsOwner,
+                CanCallMe = partner.CanCallMe,
+                UpdatedUtc = updated.ToString("O"),
+            });
+        }
+
+        var hasWind = _config.WindUpdatedUtc is not null;
+        if (peers.Count == 0 && !hasWind)
+            return null;
+
+        return new DollStatePushPayload
+        {
+            Peers = peers,
+            ExpiryUtc = _config.ExpiryUtc?.ToString("O"),
+            WindUpdatedUtc = _config.WindUpdatedUtc?.ToString("O"),
+            ClearWind = hasWind && _config.ExpiryUtc is null,
+        };
     }
 
     private void HandleDeliveryQueued(Envelope envelope)
@@ -2412,6 +2618,7 @@ public sealed class RelayClient : IDisposable
 
     public void Dispose()
     {
+        _timer.DollWindChanged = null;
         Stop();
         _sendLock.Dispose();
     }

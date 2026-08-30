@@ -12,6 +12,17 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.4.1 — Daily quests (Testing)",
+            [
+                "Dolls can accept Easy, Medium, or Hard daily quests for winding time from duty completions.",
+                "Quest rewards can exceed max wind hours; a new quest cannot be accepted while already above the max.",
+            ]),
+        new(
+            "0.2.3.6 — Multi-PC sync (Testing)",
+            [
+                "Pair consent and remaining wind are stored on the relay so logging in on another PC keeps the same pairs and winding time.",
+            ]),
+        new(
             "0.2.3.5 — Rewind movement fix (Testing)",
             [
                 "Fixed dolls continuing to run forward after being rewound.",

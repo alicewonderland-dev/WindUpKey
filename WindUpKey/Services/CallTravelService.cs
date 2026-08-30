@@ -371,6 +371,17 @@ public sealed class CallTravelService : IDisposable
             housingPlot,
             housingDivision,
             payload.HousingIsApartment);
+        if (housingPlot <= 0
+            && !payload.HousingIsApartment
+            && payload.HousingWard > 0
+            && payload.HousingCity != 0
+            && housingDivision is 1 or 2)
+        {
+            housingPlot = FindNearestHousingPlot(
+                payload.HousingCity,
+                housingDivision,
+                new Vector3(payload.X, payload.Y, payload.Z));
+        }
 
         _pending = new PendingCall
         {
@@ -1393,6 +1404,73 @@ public sealed class CallTravelService : IDisposable
             _log.Debug(ex, "Lifestream GoToHousingAddress failed");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Outdoor street calls have no current plot in HousingManager. Use Lifestream's plot entrance
+    /// coordinates to select the closest address in the correct division, then vnav the remaining
+    /// street distance from there. This avoids treating plot 0 as plot 1, which can land in a
+    /// distant part of the ward or even the wrong division.
+    /// </summary>
+    private int FindNearestHousingPlot(int housingCity, int housingDivision, Vector3 destination)
+    {
+        if (_lsGetPlotEntrance is null)
+        {
+            DebugCall("street anchor: GetPlotEntrance IPC unavailable; retaining plot 0", throttle: false);
+            return 0;
+        }
+
+        var territory = HousingCallLocation.TryGetResidentialTerritoryForCity(housingCity);
+        if (territory is null)
+        {
+            DebugCall($"street anchor: no residential territory for city={housingCity}", throttle: false);
+            return 0;
+        }
+
+        // Lifestream plot indexes are zero-based across the whole ward:
+        // 0–29 main division and 30–59 subdivision.
+        var firstPlotIndex = housingDivision == 2 ? 30 : 0;
+        var bestPlotIndex = -1;
+        var bestDistanceSquared = float.MaxValue;
+
+        for (var plotIndex = firstPlotIndex; plotIndex < firstPlotIndex + 30; plotIndex++)
+        {
+            try
+            {
+                var entrance = _lsGetPlotEntrance.InvokeFunc(territory.Value, plotIndex);
+                if (entrance is null)
+                    continue;
+
+                var dx = entrance.Value.X - destination.X;
+                var dz = entrance.Value.Z - destination.Z;
+                var distanceSquared = (dx * dx) + (dz * dz);
+                if (distanceSquared >= bestDistanceSquared)
+                    continue;
+
+                bestDistanceSquared = distanceSquared;
+                bestPlotIndex = plotIndex;
+            }
+            catch (Exception ex)
+            {
+                _log.Debug(ex, "GetPlotEntrance failed while resolving nearest street anchor");
+            }
+        }
+
+        if (bestPlotIndex < 0)
+        {
+            DebugCall(
+                $"street anchor: no plot entrances found terr={territory.Value} div={housingDivision}",
+                throttle: false);
+            return 0;
+        }
+
+        var plot = bestPlotIndex + 1;
+        DebugCall(
+            $"street anchor: nearest plot={plot} div={housingDivision} "
+            + $"distance={MathF.Sqrt(bestDistanceSquared):0.0}y "
+            + $"dest=({destination.X:0.0},{destination.Y:0.0},{destination.Z:0.0})",
+            throttle: false);
+        return plot;
     }
 
     /// <summary>

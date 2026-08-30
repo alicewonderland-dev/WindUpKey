@@ -14,11 +14,14 @@ public static class RelayDefaults
     /// <summary>
     /// Funnel hosts to try, in default order. Only one should be running at a time;
     /// the client fails over when the preferred host is offline.
+    /// Every entry must be a real Tailscale machine with Funnel enabled — an
+    /// unresolvable name here costs each client a failed connection attempt.
+    /// Funnel always terminates on public :443, so these URLs carry no port and
+    /// are unaffected by the relay's local listen port.
     /// </summary>
     public static readonly string[] RelayUrls =
     [
-        "wss://dollhome-nobara.ancon-universe.ts.net/ws", // Linux
-        "wss://dollhome.ancon-universe.ts.net/ws",        // Windows
+        "wss://dollhome.ancon-universe.ts.net/ws", // Linux (current host)
     ];
 
     /// <summary>Primary Funnel address (first entry in <see cref="RelayUrls"/>).</summary>

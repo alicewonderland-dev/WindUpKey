@@ -36,8 +36,10 @@ public static class MessageTypes
     public const string CallAck = "callAck";
     /// <summary>Doll → owner: call finished (arrived / failed / cancelled).</summary>
     public const string CallResult = "callResult";
-    /// <summary>Relay → client: established peer pairing keys (no consent flags).</summary>
+    /// <summary>Relay → client: established peers, doll consent, and wind expiry after register.</summary>
     public const string PairSync = "pairSync";
+    /// <summary>Client → relay: push doll consent and/or wind expiry (last-write-wins by updatedUtc).</summary>
+    public const string DollStatePush = "dollStatePush";
     /// <summary>Relay → sender: offline message accepted into durable outbox.</summary>
     public const string DeliveryQueued = "deliveryQueued";
     /// <summary>Relay → sender: previously queued message handed to the target socket.</summary>

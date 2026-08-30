@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using WindUpKey.Quest;
 
 namespace WindUpKey;
 
@@ -43,6 +44,9 @@ public sealed class CharacterProfile
 
     public DateTimeOffset? ExpiryUtc { get; set; }
 
+    /// <summary>Last-write-wins stamp for <see cref="ExpiryUtc"/> sync with the relay.</summary>
+    public DateTimeOffset? WindUpdatedUtc { get; set; }
+
     /// <summary>Last paired-partner wind request sent by this doll; shared across all partners.</summary>
     public DateTimeOffset? LastWindRequestUtc { get; set; }
 
@@ -55,4 +59,22 @@ public sealed class CharacterProfile
     public double LowWindTriggerLowSeconds { get; set; }
 
     public DateTimeOffset? LowWindLastWarningUtc { get; set; }
+
+    /// <summary>Active daily quest difficulty, or <see cref="QuestDifficulty.None"/>.</summary>
+    public QuestDifficulty QuestDifficulty { get; set; } = QuestDifficulty.None;
+
+    /// <summary>When the current quest difficulty was accepted (UTC).</summary>
+    public DateTimeOffset? QuestAcceptedAtUtc { get; set; }
+
+    /// <summary>Eligible roulette clears credited toward Easy (0–2).</summary>
+    public int QuestRouletteClears { get; set; }
+
+    /// <summary>Current-expansion Extreme clears credited toward Medium.</summary>
+    public int QuestExtremeClears { get; set; }
+
+    /// <summary>True after a current-tier Savage clear credited toward Hard.</summary>
+    public bool QuestSavageCleared { get; set; }
+
+    /// <summary>True after the quest reward has been granted for this accept.</summary>
+    public bool QuestRewardClaimed { get; set; }
 }

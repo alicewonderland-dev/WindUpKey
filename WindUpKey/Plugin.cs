@@ -5,6 +5,7 @@ using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
+using System.Diagnostics;
 using WindUpKey.Services;
 using WindUpKey.Sources;
 using WindUpKey.Ui;
@@ -54,6 +55,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly CallTravelService _callTravel;
 #endif
     private readonly List<IWindUpSource> _sources = [];
+    private long _lastFrameworkUpdateTimestamp;
 
     public Plugin()
     {
@@ -97,6 +99,8 @@ public sealed class Plugin : IDalamudPlugin
         _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition, _lowWind, ChatGui);
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
+        var quests = new QuestWindService(
+            Configuration, _timer, DutyState, DataManager, ClientState, ChatGui, Log);
         _relay = new RelayClient(
             Configuration, ClientState, ObjectTable, Condition, Framework, Log, ChatGui, DataManager, PluginInterface, _consent, _timer, _notifier, _sounds, commands);
         _moodlesStatus = new MoodlesWindStatusService(
@@ -127,6 +131,7 @@ public sealed class Plugin : IDalamudPlugin
             Configuration,
             _relay,
             _timer,
+            quests,
             TargetManager,
             commands,
             lowWindMessages.FilePath,
@@ -143,6 +148,7 @@ public sealed class Plugin : IDalamudPlugin
         var commendationSource = new CommendationWindSource(
             DutyState, PlayerState, Framework, ClientState, Configuration, _timer, Log);
         _sources.Add(commendationSource);
+        _sources.Add(quests);
         foreach (var source in _sources)
             source.Enable();
 
@@ -213,20 +219,38 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnFrameworkUpdate(IFramework framework)
     {
+        var updateStart = Stopwatch.GetTimestamp();
+        var frameGapMilliseconds = _lastFrameworkUpdateTimestamp == 0
+            ? 0
+            : Stopwatch.GetElapsedTime(_lastFrameworkUpdateTimestamp, updateStart).TotalMilliseconds;
+        _lastFrameworkUpdateTimestamp = updateStart;
+        var slowestPhase = "none";
+        var slowestPhaseMilliseconds = 0d;
+
         var loading = Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.BetweenAreas]
                       || Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.BetweenAreas51];
 
+        var phaseStart = Stopwatch.GetTimestamp();
         _relay.Tick();
+        RecordSlowestPhase("relay", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
+
+        phaseStart = Stopwatch.GetTimestamp();
         _timer.SetRelaySafetyBypass(_relay.ShouldSuspendMovementLocks);
         _timer.Tick();
+        RecordSlowestPhase("timer", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
 #if WINDUP_TESTING
+        phaseStart = Stopwatch.GetTimestamp();
         _relay.TickCallTravel();
+        RecordSlowestPhase("call-travel", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
 #endif
+        phaseStart = Stopwatch.GetTimestamp();
         _lowWind.Tick();
+        RecordSlowestPhase("low-wind", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
 
         // Moodles reflection during zone load can crash the client; wait until stable.
         if (!loading)
         {
+            phaseStart = Stopwatch.GetTimestamp();
             if (_pendingLoginServices)
             {
                 _pendingLoginServices = false;
@@ -239,11 +263,38 @@ public sealed class Plugin : IDalamudPlugin
                 _moodlesStatus.OnAreaTransition();
 
             _moodlesStatus.Tick();
+            RecordSlowestPhase("moodles", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
         }
 
         _wasBetweenAreas = loading;
+        phaseStart = Stopwatch.GetTimestamp();
         _lockController.Tick();
+        RecordSlowestPhase("lock-controller", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
+
+        phaseStart = Stopwatch.GetTimestamp();
         _inputDiagnostics.Tick();
+        RecordSlowestPhase("diagnostic-flush", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
+
+        var pluginMilliseconds = Stopwatch.GetElapsedTime(updateStart).TotalMilliseconds;
+        _inputDiagnostics.RecordFrameTiming(
+            frameGapMilliseconds,
+            pluginMilliseconds,
+            slowestPhase,
+            slowestPhaseMilliseconds);
+    }
+
+    private static void RecordSlowestPhase(
+        string name,
+        long phaseStart,
+        ref string slowestPhase,
+        ref double slowestPhaseMilliseconds)
+    {
+        var elapsed = Stopwatch.GetElapsedTime(phaseStart).TotalMilliseconds;
+        if (elapsed <= slowestPhaseMilliseconds)
+            return;
+
+        slowestPhase = name;
+        slowestPhaseMilliseconds = elapsed;
     }
 
     private void OnLogin()
