@@ -27,8 +27,11 @@ public static class RelayDefaults
     /// <summary>Primary Funnel address (first entry in <see cref="RelayUrls"/>).</summary>
     public static string RelayUrl => RelayUrls[0];
 
-    /// <summary>Shared secret; must match Relay:Token on every host relay.</summary>
-    public const string RelayToken = "IJHfCwymh7cG72S0DlFWLvVVqbgXp6XGPOZtygu0Cz4B4eV3LjLAvZzECIu2lJB4";
+    /// <summary>
+    /// Shared secret; must match Relay:Token on every host relay. Lives in the
+    /// gitignored RelaySecrets.cs, not here — see RelaySecrets.cs.example.
+    /// </summary>
+    public const string RelayToken = RelaySecrets.RelayToken;
 
     /// <summary>
     /// Candidate URLs with an optional sticky preference first (last successful host).

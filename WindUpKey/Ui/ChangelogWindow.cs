@@ -12,6 +12,11 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.4.2 — Relay token rotated (Testing)",
+            [
+                "Rotated the shared relay secret. Update to keep pairing and winding working.",
+            ]),
+        new(
             "0.2.4.1 — Daily quests (Testing)",
             [
                 "Dolls can accept Easy, Medium, or Hard daily quests for winding time from duty completions.",
