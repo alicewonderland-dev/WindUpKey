@@ -13,7 +13,10 @@ public static class RelayDefaults
 {
     /// <summary>
     /// Funnel hosts to try, in default order. Only one should be running at a time;
-    /// the client fails over when the preferred host is offline.
+    /// the client fails over when the preferred host is offline. Each host keeps
+    /// its own independent SQLite database with no sync between them, so running
+    /// two live simultaneously risks a client's pairing/wind state fragmenting
+    /// across hosts — see deploy/HOSTING.md for the promotion runbook.
     /// Every entry must be a real Tailscale machine with Funnel enabled — an
     /// unresolvable name here costs each client a failed connection attempt.
     /// Funnel always terminates on public :443, so these URLs carry no port and
@@ -21,7 +24,8 @@ public static class RelayDefaults
     /// </summary>
     public static readonly string[] RelayUrls =
     [
-        "wss://dollhome.ancon-universe.ts.net/ws", // Linux (current host)
+        "wss://windup-relay-oracle.ancon-universe.ts.net/ws", // Oracle Cloud (primary — always-on)
+        "wss://dollhome.ancon-universe.ts.net/ws",             // Linux desktop (standby)
     ];
 
     /// <summary>Primary Funnel address (first entry in <see cref="RelayUrls"/>).</summary>
