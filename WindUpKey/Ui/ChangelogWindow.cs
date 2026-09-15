@@ -11,6 +11,7 @@ public sealed class ChangelogWindow : Window
 
     private static readonly ChangelogEntry[] Entries =
     [
+#if WINDUP_TESTING
         new(
             "0.2.4.3 — Second relay host (Testing)",
             [
@@ -27,6 +28,14 @@ public sealed class ChangelogWindow : Window
             [
                 "Dolls can accept Easy, Medium, or Hard daily quests for winding time from duty completions.",
                 "Quest rewards can exceed max wind hours; a new quest cannot be accepted while already above the max.",
+            ]),
+#endif
+        new(
+            "0.2.4.0 — Connection reliability",
+            [
+                "Added an always-on relay host as primary, with the desktop relay as standby, for fewer dropped connections.",
+                "Pair consent and remaining wind now sync through the relay, so logging in on another PC keeps your pairs and winding time.",
+                "Rotated the shared relay secret; older versions can no longer connect.",
             ]),
         new(
             "0.2.3.6 — Multi-PC sync (Testing)",

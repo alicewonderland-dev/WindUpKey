@@ -7,7 +7,9 @@ using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin.Services;
 using WindUpKey.Protocol;
+#if WINDUP_TESTING
 using WindUpKey.Quest;
+#endif
 using WindUpKey.Services;
 
 namespace WindUpKey.Ui;
@@ -17,7 +19,9 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly Configuration _config;
     private readonly RelayClient _relay;
     private readonly WindTimerService _timer;
+#if WINDUP_TESTING
     private readonly QuestWindService _quests;
+#endif
     private readonly ITargetManager _targets;
     private readonly GameCommandRunner _commands;
     private readonly string _lowWindMessagesPath;
@@ -27,7 +31,9 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly Dictionary<string, OwnerSettingsDraft> _ownerDrafts = new(StringComparer.Ordinal);
     private string _pairKeyDraft = string.Empty;
     private bool _hardcoreConfirm;
+#if WINDUP_TESTING
     private QuestDifficulty? _questConfirmDifficulty;
+#endif
     private string? _pairLabelsKey;
     private Vector2 _pairLabelsPos;
     private string? _pairPermsKey;
@@ -50,7 +56,9 @@ public sealed class ConfigWindow : Window, IDisposable
         Configuration config,
         RelayClient relay,
         WindTimerService timer,
+#if WINDUP_TESTING
         QuestWindService quests,
+#endif
         ITargetManager targets,
         GameCommandRunner commands,
         string lowWindMessagesPath,
@@ -61,7 +69,9 @@ public sealed class ConfigWindow : Window, IDisposable
         _config = config;
         _relay = relay;
         _timer = timer;
+#if WINDUP_TESTING
         _quests = quests;
+#endif
         _targets = targets;
         _commands = commands;
         _lowWindMessagesPath = lowWindMessagesPath;
@@ -107,11 +117,13 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.EndTabItem();
         }
 
+#if WINDUP_TESTING
         if (_config.IsDoll && ImGui.BeginTabItem("Quests"))
         {
             DrawQuestsTab();
             ImGui.EndTabItem();
         }
+#endif
 
         if (ImGui.BeginTabItem("About"))
         {
@@ -1110,6 +1122,7 @@ public sealed class ConfigWindow : Window, IDisposable
         }
     }
 
+#if WINDUP_TESTING
     private void DrawQuestsTab()
     {
         ImGui.Spacing();
@@ -1280,6 +1293,7 @@ public sealed class ConfigWindow : Window, IDisposable
             return $"{(int)remaining.TotalMinutes}m";
         return $"{Math.Max(1, (int)remaining.TotalSeconds)}s";
     }
+#endif
 
     private void DrawSafewordTab()
     {

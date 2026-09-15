@@ -1,3 +1,4 @@
+#if WINDUP_TESTING
 using System;
 using System.Collections.Generic;
 using Dalamud.Plugin.Services;
@@ -150,3 +151,4 @@ public static class QuestContentCatalog
         _currentSavageCfcIds = ids;
     }
 }
+#endif

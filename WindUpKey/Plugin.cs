@@ -99,8 +99,10 @@ public sealed class Plugin : IDalamudPlugin
         _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition, _lowWind, ChatGui);
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
+#if WINDUP_TESTING
         var quests = new QuestWindService(
             Configuration, _timer, DutyState, DataManager, ClientState, ChatGui, Log);
+#endif
         _relay = new RelayClient(
             Configuration, ClientState, ObjectTable, Condition, Framework, Log, ChatGui, DataManager, PluginInterface, _consent, _timer, _notifier, _sounds, commands);
         _moodlesStatus = new MoodlesWindStatusService(
@@ -131,7 +133,9 @@ public sealed class Plugin : IDalamudPlugin
             Configuration,
             _relay,
             _timer,
+#if WINDUP_TESTING
             quests,
+#endif
             TargetManager,
             commands,
             lowWindMessages.FilePath,
@@ -148,7 +152,9 @@ public sealed class Plugin : IDalamudPlugin
         var commendationSource = new CommendationWindSource(
             DutyState, PlayerState, Framework, ClientState, Configuration, _timer, Log);
         _sources.Add(commendationSource);
+#if WINDUP_TESTING
         _sources.Add(quests);
+#endif
         foreach (var source in _sources)
             source.Enable();
 

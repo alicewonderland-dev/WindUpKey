@@ -1,3 +1,4 @@
+#if WINDUP_TESTING
 using System;
 using Dalamud.Game.DutyState;
 using Dalamud.Plugin.Services;
@@ -292,3 +293,4 @@ public sealed class QuestWindService : IWindUpSource
         _ => "None",
     };
 }
+#endif

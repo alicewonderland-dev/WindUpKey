@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+#if WINDUP_TESTING
 using WindUpKey.Quest;
+#endif
 
 namespace WindUpKey;
 
@@ -60,6 +62,7 @@ public sealed class CharacterProfile
 
     public DateTimeOffset? LowWindLastWarningUtc { get; set; }
 
+#if WINDUP_TESTING
     /// <summary>Active daily quest difficulty, or <see cref="QuestDifficulty.None"/>.</summary>
     public QuestDifficulty QuestDifficulty { get; set; } = QuestDifficulty.None;
 
@@ -77,4 +80,5 @@ public sealed class CharacterProfile
 
     /// <summary>True after the quest reward has been granted for this accept.</summary>
     public bool QuestRewardClaimed { get; set; }
+#endif
 }

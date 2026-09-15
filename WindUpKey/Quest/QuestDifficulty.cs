@@ -1,3 +1,4 @@
+#if WINDUP_TESTING
 namespace WindUpKey.Quest;
 
 /// <summary>Doll self-quest difficulty. <see cref="None"/> means no active quest.</summary>
@@ -8,3 +9,4 @@ public enum QuestDifficulty : byte
     Medium = 2,
     Hard = 3,
 }
+#endif
