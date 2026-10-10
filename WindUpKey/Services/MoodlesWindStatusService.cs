@@ -76,6 +76,8 @@ public sealed class MoodlesWindStatusService : IDisposable
     private MethodInfo? _addOrUpdate;
     private MethodInfo? _cancelGuid;
     private MethodInfo? _containsGuid;
+    private FieldInfo? _moodlesPlugin;
+    private MethodInfo? _applyAutomation;
 
     public MoodlesWindStatusService(
         IDalamudPluginInterface pi,
@@ -172,6 +174,10 @@ public sealed class MoodlesWindStatusService : IDisposable
         if (_disposed)
             return;
 
+        // Before the wind status, so a ReplaceAll automation preset cannot drop it.
+        if (_config.ReapplyMoodlesAutomationOnAreaChange)
+            TryReapplyAutomation();
+
         try
         {
             SyncDesiredState(forceApply: true);
@@ -196,6 +202,42 @@ public sealed class MoodlesWindStatusService : IDisposable
         _appliedLevel = null;
         _addOrUpdate = null;
         _containsGuid = null;
+        _moodlesPlugin = null;
+        _applyAutomation = null;
+    }
+
+    /// <summary>
+    /// Runs Moodles' own <c>ApplyAutomation</c> for the local player, so Moodles still decides
+    /// which profiles and presets match.
+    /// </summary>
+    private void TryReapplyAutomation()
+    {
+        try
+        {
+            if (!_clientState.IsLoggedIn || _objects.LocalPlayer is null)
+                return;
+
+            if (!_moodlesAvailable)
+                TryProbeMoodles();
+            if (!_moodlesAvailable)
+                return;
+
+            if (_applyAutomation is null || _moodlesPlugin is null)
+                TryBindMoodlesReflection();
+
+            var plugin = _moodlesPlugin?.GetValue(null);
+            if (_applyAutomation is null || plugin is null)
+            {
+                LogUnavailableOnce("Moodles ApplyAutomation not found; automation re-apply unavailable");
+                return;
+            }
+
+            _applyAutomation.Invoke(plugin, [false]);
+        }
+        catch (Exception ex)
+        {
+            _log.Debug(ex, "Moodles automation re-apply failed");
+        }
     }
 
     private void TryProbeMoodles()
@@ -283,6 +325,15 @@ public sealed class MoodlesWindStatusService : IDisposable
 
             Type? FindType(string simpleName) =>
                 _moodlesAsm.GetTypes().FirstOrDefault(t => t.Name == simpleName);
+
+            // Plugin singleton Moodles.P and its public ApplyAutomation(bool forceOtherPlayers).
+            var pluginType = FindType("Moodles");
+            _moodlesPlugin = pluginType?.GetField("P", BindingFlags.Public | BindingFlags.Static);
+            _applyAutomation = pluginType?.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(m =>
+                    m.Name == "ApplyAutomation"
+                    && m.GetParameters() is { Length: 1 } p
+                    && p[0].ParameterType == typeof(bool));
 
             _myStatusType = FindType("MyStatus");
             var utilsType = FindType("Utils");

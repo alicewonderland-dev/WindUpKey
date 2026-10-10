@@ -119,6 +119,12 @@ public class Configuration : IPluginConfiguration
     /// </summary>
     public bool MoodlesStatusEnabled { get; set; } = true;
 
+    /// <summary>
+    /// When true, re-run Moodles' own automation after each area change. Moodles only runs it
+    /// on login and job change, so automation moodles removed by hand otherwise stay off.
+    /// </summary>
+    public bool ReapplyMoodlesAutomationOnAreaChange { get; set; }
+
     public bool SafewordEnabled { get; set; }
 
     public string Safeword { get; set; } = "safeword";

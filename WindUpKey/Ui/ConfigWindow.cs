@@ -272,6 +272,18 @@ public sealed class ConfigWindow : Window, IDisposable
         }
 
         ImGui.Spacing();
+        ImGui.TextUnformatted("Moodles");
+        ImGui.Separator();
+        var reapplyAutomation = _config.ReapplyMoodlesAutomationOnAreaChange;
+        if (ImGui.Checkbox("Re-apply Moodles automation after area changes", ref reapplyAutomation))
+        {
+            _config.ReapplyMoodlesAutomationOnAreaChange = reapplyAutomation;
+            _config.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Moodles only runs automation on login and job change.\nThis also runs it after every zone change, so automation moodles you removed come back.");
+
+        ImGui.Spacing();
         ImGui.TextUnformatted("Audio");
         ImGui.Separator();
         var soundOn = _config.SoundEffectsEnabled;

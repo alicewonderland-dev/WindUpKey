@@ -13,6 +13,12 @@ public sealed class ChangelogWindow : Window
     [
 #if WINDUP_TESTING
         new(
+            "0.2.4.4 — Moodles automation after zone changes (Testing)",
+            [
+                "New option under General > Moodles: re-apply your Moodles automation after every zone change.",
+                "Automation moodles you removed come back on the next zone change instead of waiting for a job swap or relog.",
+            ]),
+        new(
             "0.2.4.3 — Second relay host (Testing)",
             [
                 "Added an always-on relay host as primary, with the desktop relay as standby.",
