@@ -30,6 +30,11 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly Dictionary<string, string> _pairLabelDrafts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, OwnerSettingsDraft> _ownerDrafts = new(StringComparer.Ordinal);
     private string _pairKeyDraft = string.Empty;
+    private string _relaySecretDraft = string.Empty;
+    private string? _relaySecretImportError;
+
+    /// <summary>The character the import confirmation was opened for; Confirm is refused if it changed.</summary>
+    private string _relaySecretImportContentId = string.Empty;
     private bool _hardcoreConfirm;
 #if WINDUP_TESTING
     private QuestDifficulty? _questConfirmDifficulty;
@@ -207,7 +212,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
         ImGui.TextUnformatted(_relay.IsConnected ? "Status: Online" : "Status: Offline");
         if (!_relay.IsConnected && !string.IsNullOrEmpty(_relay.LastStatus))
-            ImGui.TextUnformatted(_relay.LastStatus);
+            ImGui.TextWrapped(_relay.LastStatus);
 
         if (ImGui.Button("Reconnect"))
         {
@@ -388,6 +393,9 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.SetWindowFontScale(1f);
         }
 
+        DrawRelayIdentitySection();
+
+        ImGui.Spacing();
         ImGui.SetNextItemWidth(120);
         ImGui.InputText("Partner key", ref _pairKeyDraft, 16);
         ImGui.SameLine();
@@ -544,6 +552,168 @@ public sealed class ConfigWindow : Window, IDisposable
             }
         }
     }
+
+    private void DrawRelayIdentitySection()
+    {
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Relay identity");
+        ImGui.TextWrapped(
+            "A private code that proves to the relay that this character owns its pairing key. " +
+            "Never share it with partners. To use this character on another PC, copy it here and import it there.");
+
+        if (_relay.AuthBlockStatus is { } blocked)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.9f, 0.35f, 0.35f, 1f));
+            ImGui.TextWrapped(blocked);
+            ImGui.PopStyleColor();
+            // The message says to press Reconnect: same as the General tab's button.
+            if (ImGui.Button("Reconnect##relay_identity_block"))
+            {
+                _config.ApplyRelayDefaults();
+                _relay.Start();
+            }
+        }
+
+        // Title screen (or the first zone load after login): the active profile may be a stale character, so don't
+        // act on it. Later zone loads and teleports keep the character.
+        var canManage = _relay.CanManageRelayIdentity;
+        if (!canManage)
+            ImGui.TextDisabled("Log in to manage your relay identity.");
+
+        var secret = _relay.ActiveRelaySecret;
+        var storeStatus = _relay.RelayIdentityStatus;
+        if (canManage && string.IsNullOrEmpty(secret))
+        {
+            ImGui.TextWrapped(storeStatus switch
+            {
+                RelayIdentityStoreStatus.Unavailable =>
+                    "The relay identity file can't be read or saved right now (see the Dalamud log). Retrying.",
+                RelayIdentityStoreStatus.ReadOnly =>
+                    "The relay identity file is from a newer version of Wind-Up Key and has no identity for this " +
+                    "character. This version won't change that file; update the plugin.",
+                RelayIdentityStoreStatus.NotWritable =>
+                    "The relay identity file or its .lock file in pluginConfigs is read-only or not writable, so no " +
+                    "identity can be created for this character. Make them writable (see the Dalamud log).",
+                _ => "Created the first time this character connects.",
+            });
+        }
+        else if (canManage && storeStatus == RelayIdentityStoreStatus.ReadOnly)
+        {
+            ImGui.TextDisabled("The relay identity file is from a newer version of Wind-Up Key, so it can't be changed here.");
+        }
+        else if (canManage && storeStatus == RelayIdentityStoreStatus.NotWritable)
+        {
+            ImGui.TextDisabled("The relay identity file or its .lock file is read-only, so it can't be changed here.");
+        }
+
+        if (!canManage)
+            ImGui.BeginDisabled();
+
+        if (!string.IsNullOrEmpty(secret) && ImGui.Button("Copy relay identity"))
+            ImGui.SetClipboardText(secret);
+
+        ImGui.SetNextItemWidth(220);
+        ImGui.InputText("##relay_identity_import", ref _relaySecretDraft, 128, ImGuiInputTextFlags.Password);
+        ImGui.SameLine();
+        if (ImGui.Button("Import") && !string.IsNullOrWhiteSpace(_relaySecretDraft))
+        {
+            var check = _relay.CheckRelaySecretImport(_relaySecretDraft);
+            if (check == RelayIdentityImport.Replace)
+            {
+                _relaySecretImportError = null;
+                _relaySecretImportContentId = _relay.RelayIdentityContentId;
+                ImGui.OpenPopup("relay_identity_import_confirm");
+            }
+            else
+            {
+                if (check == RelayIdentityImport.Unchanged)
+                {
+                    // Nothing to replace, but the session may not be using it (blocked, or saved by another client).
+                    check = _relay.ImportRelaySecret(_relaySecretDraft, _relay.RelayIdentityContentId);
+                }
+
+                // The pasted secret isn't kept once the import is decided, whatever the outcome.
+                _relaySecretDraft = string.Empty;
+                _relaySecretImportError = RelayIdentityImportMessage(check);
+            }
+        }
+
+        if (!canManage)
+            ImGui.EndDisabled();
+
+        // Outside the disabled block, so the modal can always be closed. It belongs to the character it was opened
+        // for: if that character logged out or another one became active, it closes without importing. A zone load
+        // or teleport doesn't close it.
+        var popupOpen = true;
+        if (ImGui.BeginPopupModal("relay_identity_import_confirm", ref popupOpen, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            var forCharacter = _relaySecretImportContentId;
+            if (string.IsNullOrEmpty(forCharacter)
+                || !string.Equals(_relay.RelayIdentityContentId, forCharacter, StringComparison.Ordinal))
+            {
+                _relaySecretImportError = "The character changed, so the relay identity wasn't imported.";
+                _relaySecretDraft = string.Empty;
+                _relaySecretImportContentId = string.Empty;
+                ImGui.CloseCurrentPopup();
+            }
+            else
+            {
+                ImGui.TextUnformatted("Replace this character's relay identity?");
+                ImGui.TextUnformatted("The current one is kept, so you can revert to it afterwards.");
+                ImGui.Spacing();
+                if (ImGui.Button("Confirm", new Vector2(100, 0)))
+                {
+                    var result = _relay.ImportRelaySecret(_relaySecretDraft, forCharacter);
+                    _relaySecretImportError = result == RelayIdentityImport.Replace ? null : RelayIdentityImportMessage(result);
+                    _relaySecretDraft = string.Empty;
+                    _relaySecretImportContentId = string.Empty;
+                    ImGui.CloseCurrentPopup();
+                }
+
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel", new Vector2(100, 0)))
+                {
+                    _relaySecretDraft = string.Empty;
+                    _relaySecretImportContentId = string.Empty;
+                    ImGui.CloseCurrentPopup();
+                }
+            }
+
+            ImGui.EndPopup();
+        }
+        else if (!popupOpen)
+        {
+            // Closed with its title-bar button: same as Cancel.
+            _relaySecretDraft = string.Empty;
+            _relaySecretImportContentId = string.Empty;
+        }
+
+        // CanRevertRelaySecret is false unless a character is logged in, and while the file can't be changed (from a
+        // newer build or not writable, which the text above explains, or damaged and not copied aside yet), so this
+        // is hidden on the title screen and in those states.
+        if (_relay.CanRevertRelaySecret && ImGui.Button("Revert to previous identity"))
+        {
+            _relaySecretImportError = _relay.RevertRelaySecret()
+                ? null
+                : "Couldn't revert the relay identity. Check the Dalamud log.";
+        }
+
+        if (_relaySecretImportError is { } importError)
+            ImGui.TextColored(new Vector4(0.9f, 0.35f, 0.35f, 1f), importError);
+    }
+
+    private static string RelayIdentityImportMessage(RelayIdentityImport result) => result switch
+    {
+        RelayIdentityImport.Unchanged => "That is already this character's relay identity.",
+        RelayIdentityImport.Reconnected => "That is already this character's saved relay identity. Reconnecting with it.",
+        RelayIdentityImport.NoCharacter => "Log in with the character first, then import its relay identity.",
+        RelayIdentityImport.StoreUnavailable => "Couldn't read or save the relay identity file. Check the Dalamud log.",
+        RelayIdentityImport.ReadOnly =>
+            "The relay identity file is from a newer version of Wind-Up Key, so it can't be changed here.",
+        RelayIdentityImport.NotWritable =>
+            "The relay identity file or its .lock file is read-only or not writable. Make them writable, then try again.",
+        _ => "That isn't a valid relay identity.",
+    };
 
     private void TogglePairSettingsWindow(ref string? openKey, ref Vector2 openPos, string partnerKey)
     {

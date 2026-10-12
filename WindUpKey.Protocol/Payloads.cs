@@ -11,6 +11,13 @@ public sealed class RegisterPayload
     /// <summary>Sole relay identity. Name@World never registered with the relay.</summary>
     [JsonPropertyName("pairingKey")]
     public string PairingKey { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Per-character secret proving ownership of <see cref="PairingKey"/> (see <see cref="RelaySecret"/>).
+    /// Omitted by old clients; ignored by old relays. Never log this value.
+    /// </summary>
+    [JsonPropertyName("secret")]
+    public string? Secret { get; set; }
 }
 
 public sealed class WindPayload
@@ -517,6 +524,19 @@ public static class ErrorCodes
     public const string CrossDc = "cross_dc";
     public const string TravelUnavailable = "travel_unavailable";
     public const string Busy = "busy";
+    /// <summary>Relay → client: the register secret does not match the account for this key.</summary>
+    public const string AuthFailed = "auth_failed";
+    /// <summary>Relay → client: this key has an account, so register must carry its secret.</summary>
+    public const string AuthRequired = "auth_required";
+    /// <summary>Relay → client: an authenticated session for the same key took over this one.</summary>
+    public const string SessionReplaced = "session_replaced";
+
+    /// <summary>
+    /// Session-level codes only the relay may send. The relay drops routed errors with these codes,
+    /// and clients ignore them when the error carries a <c>to</c> field (relay-originated errors never do).
+    /// </summary>
+    public static bool IsRelayOnly(string? code) => code is
+        AuthFailed or AuthRequired or SessionReplaced or PairKeyCollision or RateLimited;
 }
 
 /// <summary>Helpers for Name@World identity strings (clientside only).</summary>

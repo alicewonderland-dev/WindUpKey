@@ -1,0 +1,75 @@
+using System.Runtime.InteropServices;
+
+namespace WindUpKey.Tests;
+
+/// <summary>
+/// A fact that denies file access with Unix file modes (chmod). Skipped on Windows, where access is denied through
+/// ACLs instead and file modes aren't supported.
+/// </summary>
+public sealed class UnixOnlyFactAttribute : FactAttribute
+{
+    public UnixOnlyFactAttribute()
+    {
+        if (OperatingSystem.IsWindows())
+            Skip = "Uses Unix file modes to deny read access; not supported on Windows.";
+    }
+}
+
+/// <summary>
+/// A <see cref="UnixOnlyFactAttribute"/> whose test relies on file modes actually denying access. Also skipped when
+/// running as root (effective UID 0, for example in a container), since root ignores file modes.
+/// </summary>
+public sealed class UnixPermissionFactAttribute : FactAttribute
+{
+    public UnixPermissionFactAttribute()
+    {
+        Skip = PermissionFacts.SkipReason(OperatingSystem.IsWindows(), PermissionFacts.CurrentEffectiveUserId(), unixOnly: true);
+    }
+}
+
+/// <summary>
+/// A fact on every OS whose test relies on a read-only file refusing writes: on Unix that is a file mode, which root
+/// ignores, so it is skipped when running as root there.
+/// </summary>
+public sealed class NotAsRootFactAttribute : FactAttribute
+{
+    public NotAsRootFactAttribute()
+    {
+        Skip = PermissionFacts.SkipReason(OperatingSystem.IsWindows(), PermissionFacts.CurrentEffectiveUserId(), unixOnly: false);
+    }
+}
+
+internal static class PermissionFacts
+{
+    /// <summary>
+    /// Why a permission-based test is skipped, or null to run it. <paramref name="effectiveUserId"/> is the Unix
+    /// effective UID, or null when unknown (then it runs).
+    /// </summary>
+    public static string? SkipReason(bool isWindows, uint? effectiveUserId, bool unixOnly)
+    {
+        if (isWindows)
+            return unixOnly ? "Uses Unix file modes to deny access; not supported on Windows." : null;
+        if (effectiveUserId == 0)
+            return "Relies on file modes denying access; root ignores them.";
+        return null;
+    }
+
+    /// <summary>The process's effective UID on Unix, or null on Windows or if it can't be read.</summary>
+    public static uint? CurrentEffectiveUserId() => OperatingSystem.IsWindows() ? null : EffectiveUserId();
+
+    /// <summary>The process's effective UID (geteuid), or null if it can't be read.</summary>
+    public static uint? EffectiveUserId()
+    {
+        try
+        {
+            return geteuid();
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    [DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint geteuid();
+}

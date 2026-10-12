@@ -70,6 +70,7 @@ public sealed class RelayClient : IDisposable
     private readonly IWindNotifier _notifier;
     private readonly SoundEffectService _sounds;
     private readonly GameCommandRunner _commands;
+    private readonly RelayIdentityStore _identityStore;
 
 #if WINDUP_TESTING
     private CallTravelService? _callTravel;
@@ -90,6 +91,32 @@ public sealed class RelayClient : IDisposable
     private DateTimeOffset? _unreachableSinceUtc;
     private int _dollStatePushQueued;
 
+    /// <summary>
+    /// What to tell the player while the relay rejects this session (session_replaced, or auth_failed /
+    /// auth_required from every reachable host). Written on the framework thread from <see cref="_connectPolicy"/>'s
+    /// block. Cleared by <see cref="Start"/>, a character switch, <see cref="ImportRelaySecret"/>,
+    /// <see cref="RevertRelaySecret"/>, or (partial block only) a host accepting the register.
+    /// </summary>
+    private volatile string? _authBlockStatus;
+
+    /// <summary>Which hosts rejected the identity, the auth block, and whether to register at all.</summary>
+    private readonly RelayConnectPolicy _connectPolicy = new();
+
+    /// <summary>The policy epoch the current connection was opened in (its outcomes are ignored once that is reset).</summary>
+    private int _connectionEpoch;
+
+    /// <summary>The host of the current connection; saved as the sticky host once its register is accepted.</summary>
+    private volatile string? _connectionUrl;
+
+    /// <summary>The secret sent in the last register. Lets an import of the already-saved value reconnect when it differs. Never log it.</summary>
+    private volatile string? _registeredSecret;
+
+    /// <summary>
+    /// Set (framework thread) when the relay answers this connection's register with auth_failed/auth_required.
+    /// Read by the receive loop, which ends the connection so the connect loop can try the next host.
+    /// </summary>
+    private volatile string? _registerRejection;
+
     private readonly object _presenceLock = new();
     private readonly Dictionary<string, PartnerPresence> _presenceByKey = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> _presenceLastQueryUtc = new(StringComparer.Ordinal);
@@ -107,6 +134,12 @@ public sealed class RelayClient : IDisposable
 
     // Written on framework thread, read by background loop — never touch Dalamud APIs off-thread.
     private volatile bool _loggedIn;
+
+    /// <summary>
+    /// True once this login's local player ContentId is the active profile (not the title screen), and until logout:
+    /// zone loads and teleports keep it.
+    /// </summary>
+    private volatile bool _characterReady;
     private volatile string? _cachedIdentity;
     private int _tickLogCounter;
 
@@ -140,6 +173,7 @@ public sealed class RelayClient : IDisposable
         _notifier = notifier;
         _sounds = sounds;
         _commands = commands;
+        _identityStore = new RelayIdentityStore(pi.GetPluginConfigDirectory(), pi.InternalName, message => log.Warning(message));
         _timer.DollWindChanged = QueueDollStatePush;
     }
 
@@ -313,6 +347,9 @@ public sealed class RelayClient : IDisposable
     /// <summary>Short offline hint for the config UI. Never includes URL or token.</summary>
     public string? LastStatus => _lastStatus;
 
+    /// <summary>What to do after the relay rejected this character's session, or null when not blocked.</summary>
+    public string? AuthBlockStatus => _authBlockStatus;
+
     /// <summary>
     /// True when the plugin has been unable to reach the relay long enough that
     /// unwound movement/teleport blocking should be suspended until reconnect.
@@ -407,12 +444,14 @@ public sealed class RelayClient : IDisposable
         {
             _log.Warning(ex, "WindUpKey Tick: failed reading client state");
             _loggedIn = false;
+            _characterReady = false;
             _cachedIdentity = null;
             _lastStatus = "Error reading character state (see dalamud.log).";
             UpdateUnreachableTracking();
             return;
         }
 
+        var characterReady = false;
         if (_loggedIn)
         {
             try
@@ -424,10 +463,12 @@ public sealed class RelayClient : IDisposable
                     if (contentId != 0)
                     {
                         var switched = _config.ActivateCharacter(contentId);
+                        characterReady = true;
                         // Orphan lock: settings locked with no owners (e.g. owner unpaired offline).
                         var unlocked = _config.UnlockOwnerSettingsIfNoOwners();
                         if (switched)
                         {
+                            ClearAuthBlock();
                             ClearAllPresence();
                             ClearAllOwnerSettings();
                             _config.Save();
@@ -448,6 +489,7 @@ public sealed class RelayClient : IDisposable
             }
         }
 
+        _characterReady = RelayConnectPolicy.IdentityCharacterReady(_loggedIn, characterReady, _characterReady);
         SyncPairingKeyFromContentId();
         UpdateUnreachableTracking();
 
@@ -467,6 +509,7 @@ public sealed class RelayClient : IDisposable
     /// <summary>
     /// Counts continuous "should be connected but isn't" time for the movement-lock safety fallback.
     /// Title screen / missing identity do not count — those are not a failed host connection.
+    /// A relay auth block does count (its socket is closed), so a doll is never stuck on an auth problem.
     /// </summary>
     private void UpdateUnreachableTracking()
     {
@@ -521,6 +564,9 @@ public sealed class RelayClient : IDisposable
         Stop();
 
         _lastStatus = "Starting…";
+        ClearAuthBlock();
+        // A login or Reconnect retries the identity file now, not after its retry delay.
+        _identityStore.ResetRetryDelay();
         _reconnectDelayMs = 1000;
         _loopCts = new CancellationTokenSource();
         var ct = _loopCts.Token;
@@ -1202,23 +1248,81 @@ public sealed class RelayClient : IDisposable
                 continue;
             }
 
+            if (_connectPolicy.Block == RelayAuthBlock.Full)
+            {
+                // Every host rejected this identity, or the session was replaced: wait for Start(), a character
+                // switch, an import or a revert.
+                _lastStatus = _authBlockStatus ?? "Waiting for Reconnect…";
+                await Task.Delay(1000, ct).ConfigureAwait(false);
+                continue;
+            }
+
+            // A partial block keeps probing the hosts that were unreachable (the policy skips the ones that rejected).
+            var epoch = _connectPolicy.Epoch;
             try
             {
-                _lastStatus = "Connecting…";
+                _lastStatus = _authBlockStatus ?? "Connecting…";
                 _log.Information("WindUpKey loop: connecting as {Identity}", identity);
-                var socket = await ConnectAndRegisterAsync(generation, ct).ConfigureAwait(false);
+                var connection = await ConnectAndRegisterAsync(generation, epoch, ct).ConfigureAwait(false);
                 _lastStatus = null;
                 _reconnectDelayMs = 1000;
-                await ReceiveLoopAsync(socket, ct).ConfigureAwait(false);
-                _lastStatus = "Disconnected. Reconnecting…";
+                var rejectedCode = await ReceiveLoopAsync(connection.Socket, ct).ConfigureAwait(false);
+                if (rejectedCode is not null)
+                {
+                    // auth_failed/auth_required is per host (each has its own accounts): try the next one now,
+                    // and block only once every reachable host has rejected this identity.
+                    CloseSocketForGeneration(generation);
+                    var verdict = await _framework.RunOnTick(
+                            () => ApplyHostVerdict(_connectPolicy.Rejected(epoch, connection.Url, rejectedCode, connection.Candidates)),
+                            cancellationToken: ct)
+                        .ConfigureAwait(false);
+                    if (verdict == RelayHostVerdict.TryNextHost)
+                    {
+                        _log.Information(
+                            "WindUpKey relay host={Host} rejected the relay identity ({Code}); trying the next host",
+                            SafeHost(connection.Url),
+                            rejectedCode);
+                    }
+
+                    continue;
+                }
+
+                // Rejections were already forgotten when the register was accepted (pairSync), however this ends.
+                _lastStatus = _authBlockStatus ?? "Disconnected. Reconnecting…";
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }
+            catch (StaleConnectAttemptException)
+            {
+                // Started before a character switch (or login, import, revert): retry now for the current one.
+                CloseSocketForGeneration(generation);
+                continue;
+            }
+            catch (RelayConnectWaitException wait)
+            {
+                // Not a host problem (identity file busy or from a newer build): never an auth block.
+                _lastStatus = wait.Status;
+                _log.Debug("WindUpKey not connecting: {Reason}", wait.Step);
+            }
+            catch (NoRelayHostReachableException ex)
+            {
+                // Every host that answered rejected the identity and the rest are down: a partial block, which
+                // keeps probing those on the normal backoff below.
+                var verdict = await _framework.RunOnTick(
+                        () => ApplyHostVerdict(_connectPolicy.NoHostReachable(epoch)),
+                        cancellationToken: ct)
+                    .ConfigureAwait(false);
+                _lastStatus = _authBlockStatus ?? "Cannot reach the host. Is Wind-Up Key Host running?";
+                if (verdict == RelayHostVerdict.Blocked)
+                    _log.Information("WindUpKey no other relay host reachable after an identity rejection");
+                else
+                    _log.Warning(ex, "WindUpKey relay connection issue");
+            }
             catch (Exception ex)
             {
-                _lastStatus = "Cannot reach the host. Is Wind-Up Key Host running?";
+                _lastStatus = _authBlockStatus ?? "Cannot reach the host. Is Wind-Up Key Host running?";
                 _log.Warning(ex, "WindUpKey relay connection issue");
             }
 
@@ -1238,25 +1342,73 @@ public sealed class RelayClient : IDisposable
         _log.Debug("WindUpKey RunLoopAsync end");
     }
 
-    private async Task<ClientWebSocket> ConnectAndRegisterAsync(int generation, CancellationToken ct)
+    /// <summary>An open, registered relay connection and the hosts that were candidates for it.</summary>
+    private sealed record RelayConnection(ClientWebSocket Socket, string Url, IReadOnlyList<string> Candidates);
+
+    /// <summary>No candidate host (other than ones that rejected the identity this cycle) could be opened.</summary>
+    private sealed class NoRelayHostReachableException(Exception? inner)
+        : Exception("Unable to reach any relay host.", inner);
+
+    /// <summary>The connect cycle was reset (character switch, login, import, revert) while this attempt was being prepared.</summary>
+    private sealed class StaleConnectAttemptException()
+        : Exception("The connect attempt is out of date.");
+
+    /// <summary>Not connecting this time (see <see cref="Step"/>); retried on the normal backoff, never an auth block.</summary>
+    private sealed class RelayConnectWaitException(RelayConnectStep step, string status)
+        : Exception(status)
+    {
+        public RelayConnectStep Step { get; } = step;
+
+        public string Status { get; } = status;
+    }
+
+    private async Task<RelayConnection> ConnectAndRegisterAsync(
+        int generation,
+        int epoch,
+        CancellationToken ct)
     {
         CloseSocketForGeneration(generation);
 
+        string? relaySecret = null;
+        var pairingKey = string.Empty;
+        var stale = false;
+        var step = RelayConnectStep.WaitForCharacter;
+        // What the post-register sends need, read in the same tick as the key and secret (config is framework-thread only).
+        string[] pendingKeys = [];
+        (string Key, bool IsOwner)[] partners = [];
+        var isDoll = false;
+        string? ownerIdentity = null;
         // Keep even the connection-preparation config writes on the framework thread.
         await _framework.RunOnTick(() =>
         {
+            // A character switch (or login, import, revert) since this attempt started: start over.
+            stale = _connectPolicy.Epoch != epoch;
+            if (stale)
+                return;
+
             _config.ApplyRelayDefaults();
             var identity = _cachedIdentity;
             if (identity is not null)
                 _config.LastKnownIdentity = identity;
 
-            if (string.IsNullOrEmpty(_config.ActiveContentId))
+            var hasCharacter = !string.IsNullOrEmpty(_config.ActiveContentId);
+            // Read from disk (under the lock) on every connect, so a value another client saved or imported is used.
+            relaySecret = hasCharacter ? EnsureRelaySecret() : null;
+            step = _connectPolicy.BeforeConnect(hasCharacter, relaySecret is not null, _identityStore.Status);
+            if (!hasCharacter)
                 return;
 
             var derived = PairingKeyUtil.FromContentIdHex(_config.ActiveContentId);
             if (!PairingKeyUtil.IsValid(derived))
                 return;
 
+            // The key registered is the one derived in the same tick as the secret, so they always belong to the
+            // same character even if the player switches while the socket opens.
+            pairingKey = derived;
+            pendingKeys = _config.PendingPartnerKeys.ToArray();
+            partners = _config.PairedPartners.Where(p => p is not null).Select(p => (p.PartnerKey, p.IsOwner)).ToArray();
+            isDoll = _config.IsDoll;
+            ownerIdentity = LocalOwnerIdentityLabel();
             if (string.Equals(_config.PairingKey, derived, StringComparison.Ordinal))
                 return;
 
@@ -1264,7 +1416,14 @@ public sealed class RelayClient : IDisposable
             _config.Save();
         }, cancellationToken: ct).ConfigureAwait(false);
 
-        if (!PairingKeyUtil.IsValid(_config.PairingKey))
+        if (stale)
+            throw new StaleConnectAttemptException();
+
+        // Never register without a secret: on a claimed key that is refused, and would block with the wrong advice.
+        if (step != RelayConnectStep.Register)
+            throw new RelayConnectWaitException(step, ConnectWaitStatus(step));
+
+        if (!PairingKeyUtil.IsValid(pairingKey))
             throw new InvalidOperationException("Pairing key unavailable before register.");
 
         var candidates = RelayDefaults.OrderedRelayUrls(_config.LastSuccessfulRelayUrl).ToArray();
@@ -1275,11 +1434,11 @@ public sealed class RelayClient : IDisposable
         ClientWebSocket? socket = null;
         string? connectedUrl = null;
 
-        foreach (var baseUrl in candidates)
+        foreach (var baseUrl in _connectPolicy.HostsToTry(candidates))
         {
             ct.ThrowIfCancellationRequested();
             var safeHost = SafeHost(baseUrl);
-            _lastStatus = $"Connecting ({safeHost})…";
+            _lastStatus = _authBlockStatus ?? $"Connecting ({safeHost})…";
             _log.Information("WindUpKey connect attempt host={Host}", safeHost);
 
             try
@@ -1301,90 +1460,295 @@ public sealed class RelayClient : IDisposable
 
         if (socket is null || connectedUrl is null)
         {
-            throw lastError ?? new InvalidOperationException("Unable to reach any relay host.");
+            throw new NoRelayHostReachableException(lastError);
         }
 
         var connectedHost = SafeHost(connectedUrl);
         _log.Information("WindUpKey WebSocket open host={Host} state={State}", connectedHost, socket.State);
 
-        await _framework.RunOnTick(() =>
-        {
-            _config.RelayUrl = connectedUrl;
-            if (!string.Equals(_config.LastSuccessfulRelayUrl, connectedUrl, StringComparison.Ordinal))
-            {
-                _config.LastSuccessfulRelayUrl = connectedUrl;
-                _config.Save();
-            }
-        }, cancellationToken: ct).ConfigureAwait(false);
+        // The character changed while the socket opened: don't register the old one; start over with the new one.
+        if (_connectPolicy.Epoch != epoch)
+            throw new StaleConnectAttemptException();
+
+        // The sticky host is saved only once this host accepts the register (OnRegisterAccepted).
+        _connectionUrl = connectedUrl;
+        Volatile.Write(ref _connectionEpoch, epoch);
+        _registeredSecret = relaySecret;
 
         var register = new RegisterPayload
         {
             Token = string.IsNullOrEmpty(_config.RelayToken) ? null : _config.RelayToken,
-            PairingKey = _config.PairingKey,
+            PairingKey = pairingKey,
+            Secret = relaySecret,
         };
+        _registerRejection = null;
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.Register, register), ct).ConfigureAwait(false);
-        _log.Information("WindUpKey registered on relay as key={Key}", _config.PairingKey);
+        _log.Information("WindUpKey registered on relay as key={Key}", pairingKey);
 
+        // The sends below use what was read with the key and secret, and stop if the character changed (or a login,
+        // import or revert reset the cycle) meanwhile: the loop then reconnects for the current one.
         // Re-submit pending pair keys after reconnect.
-        foreach (var key in _config.PendingPartnerKeys.ToArray())
+        foreach (var key in pendingKeys)
         {
+            ThrowIfStale(epoch);
             await SendEnvelopeAsync(Envelope.Create(MessageTypes.PairSubmit, new PairSubmitPayload
             {
                 RequestId = Guid.NewGuid().ToString("N"),
-                MyKey = _config.PairingKey,
+                MyKey = pairingKey,
                 TheirKey = key,
             }), ct).ConfigureAwait(false);
         }
 
         // Re-assert established partners so the relay can rebuild durable pairs after upgrades/restarts.
-        foreach (var partner in _config.PairedPartners.ToArray())
+        foreach (var partner in partners)
         {
-            var peer = PairingKeyUtil.Normalize(partner.PartnerKey);
+            var peer = PairingKeyUtil.Normalize(partner.Key);
             if (!PairingKeyUtil.IsValid(peer))
                 continue;
-            if (string.Equals(peer, _config.PairingKey, StringComparison.Ordinal))
+            if (string.Equals(peer, pairingKey, StringComparison.Ordinal))
                 continue;
-            if (_config.PendingPartnerKeys.Contains(peer, StringComparer.Ordinal))
+            if (pendingKeys.Contains(peer, StringComparer.Ordinal))
                 continue;
 
+            ThrowIfStale(epoch);
             await SendEnvelopeAsync(Envelope.Create(MessageTypes.PairSubmit, new PairSubmitPayload
             {
                 RequestId = Guid.NewGuid().ToString("N"),
-                MyKey = _config.PairingKey,
+                MyKey = pairingKey,
                 TheirKey = peer,
             }), ct).ConfigureAwait(false);
         }
 
         // Re-assert ownership once on connect (covers grants made while disconnected).
         // Relay outbox already delivers live grants to offline owners; do not resend on presence polls.
-        if (_config.IsDoll)
+        if (isDoll)
         {
-            foreach (var partner in _config.PairedPartners.ToArray())
+            foreach (var partner in partners)
             {
-                if (partner is not { IsOwner: true })
+                if (!partner.IsOwner)
                     continue;
-                var peer = PairingKeyUtil.Normalize(partner.PartnerKey);
+                var peer = PairingKeyUtil.Normalize(partner.Key);
                 if (!PairingKeyUtil.IsValid(peer))
                     continue;
-                if (string.Equals(peer, _config.PairingKey, StringComparison.Ordinal))
+                if (string.Equals(peer, pairingKey, StringComparison.Ordinal))
                     continue;
 
+                ThrowIfStale(epoch);
                 await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerGrant, new OwnerGrantPayload
                 {
-                    From = _config.PairingKey,
+                    From = pairingKey,
                     To = peer,
-                    Identity = LocalOwnerIdentityLabel(),
+                    Identity = ownerIdentity,
                 }), ct).ConfigureAwait(false);
             }
         }
 
-        return socket;
+        return new RelayConnection(socket, connectedUrl, candidates);
+    }
+
+    /// <summary>The connect cycle was reset since <paramref name="epoch"/> (character switch, login, import, revert).</summary>
+    private void ThrowIfStale(int epoch)
+    {
+        if (_connectPolicy.Epoch != epoch)
+            throw new StaleConnectAttemptException();
+    }
+
+    /// <summary>
+    /// Returns the active character's relay secret as it is on disk now (<see cref="RelayIdentityStore"/>),
+    /// generating and saving one the first time it is needed. Null when the identity file is unavailable, or
+    /// read-only without this character's entry: the client then doesn't register at all.
+    /// Framework thread only. Never log the result.
+    /// </summary>
+    private string? EnsureRelaySecret()
+    {
+        var secret = _identityStore.EnsureSecret(_config.ActiveContentId, out var generated);
+        if (generated)
+            _log.Information("WindUpKey generated a relay identity for this character");
+        return secret;
+    }
+
+    /// <summary>
+    /// True while a character is logged in and is the active profile, so the relay identity UI acts on the
+    /// right character (not a stale one on the title screen). Stays true through zone loads and teleports.
+    /// Framework thread (UI).
+    /// </summary>
+    public bool CanManageRelayIdentity => _characterReady && !string.IsNullOrEmpty(_config.ActiveContentId);
+
+    /// <summary>
+    /// The ContentId whose relay identity the UI manages, or empty when <see cref="CanManageRelayIdentity"/> is false.
+    /// Lets the import confirmation check the character didn't change (or log out) while it was open; a zone load
+    /// doesn't change it. Framework thread (UI).
+    /// </summary>
+    public string RelayIdentityContentId => CanManageRelayIdentity ? _config.ActiveContentId : string.Empty;
+
+    /// <summary>Whether the relay identity file can be used right now (as of its last read or write). Framework thread (UI).</summary>
+    public RelayIdentityStoreStatus RelayIdentityStatus => _identityStore.Status;
+
+    /// <summary>The active character's relay secret for the Copy button, or empty. Framework thread (UI). Never log it.</summary>
+    public string ActiveRelaySecret =>
+        CanManageRelayIdentity ? _identityStore.GetSecret(_config.ActiveContentId) : string.Empty;
+
+    /// <summary>
+    /// What <see cref="ImportRelaySecret"/> would do with this pasted value, without changing anything.
+    /// Framework thread (UI). Lets the UI confirm before replacing the current identity.
+    /// </summary>
+    public RelayIdentityImport CheckRelaySecretImport(string raw) =>
+        CanManageRelayIdentity
+            ? _identityStore.CheckImport(_config.ActiveContentId, raw)
+            : RelayIdentityImport.NoCharacter;
+
+    /// <summary>
+    /// Replaces the active character's relay secret with one copied from another install, keeping the old one
+    /// as its previous secret, then reconnects immediately (which also clears an auth block). Importing the
+    /// saved secret changes nothing on disk; it reconnects (<see cref="RelayIdentityImport.Reconnected"/>) when
+    /// blocked or when this session registered with a different value. Refused when <paramref name="contentId"/> (the character the user
+    /// confirmed for) is no longer the active one. Framework thread (UI).
+    /// </summary>
+    public RelayIdentityImport ImportRelaySecret(string raw, string contentId)
+    {
+        if (!CanManageRelayIdentity
+            || !string.Equals(_config.ActiveContentId, contentId, StringComparison.Ordinal))
+            return RelayIdentityImport.NoCharacter;
+
+        var result = _identityStore.Import(_config.ActiveContentId, raw);
+        if (result == RelayIdentityImport.Unchanged)
+        {
+            // Already saved (for example by another game client), but the relay rejected this session, or this
+            // session registered with a different value: reconnect with the saved one.
+            var sent = _registeredSecret;
+            var differs = sent is not null
+                          && !string.Equals(sent, _identityStore.GetSecret(_config.ActiveContentId), StringComparison.Ordinal);
+            if (_authBlockStatus is null && !differs)
+                return result;
+
+            _log.Information("WindUpKey relay identity already saved; reconnecting with it");
+            Start();
+            return RelayIdentityImport.Reconnected;
+        }
+
+        if (result != RelayIdentityImport.Replace)
+            return result;
+
+        _log.Information("WindUpKey relay identity imported");
+        Start();
+        return result;
+    }
+
+    /// <summary>True when the active character has a previous relay identity to go back to.</summary>
+    public bool CanRevertRelaySecret =>
+        CanManageRelayIdentity && _identityStore.CanRevert(_config.ActiveContentId);
+
+    /// <summary>
+    /// Swaps the active character's current and previous relay secrets, then reconnects immediately.
+    /// Framework thread (UI). Returns false when there is no previous identity or it couldn't be saved.
+    /// </summary>
+    public bool RevertRelaySecret()
+    {
+        if (!CanManageRelayIdentity || !_identityStore.Revert(_config.ActiveContentId))
+            return false;
+
+        _log.Information("WindUpKey relay identity reverted to the previous one");
+        Start();
+        return true;
+    }
+
+    /// <summary>The status shown while not connecting for a reason that isn't a host problem.</summary>
+    private string ConnectWaitStatus(RelayConnectStep step) => step switch
+    {
+        RelayConnectStep.WaitIdentityUnavailable =>
+            "Relay identity file busy (another game client may be using it) or unreadable (see dalamud.log). Retrying…",
+        RelayConnectStep.WaitIdentityNotWritable =>
+            "The relay identity file or its .lock file in pluginConfigs is read-only or not writable, so no relay " +
+            "identity can be saved for this character (see dalamud.log). Make them writable; retrying…",
+        RelayConnectStep.WaitIdentityReadOnly =>
+            "The relay identity file is from a newer version of Wind-Up Key and has no identity for this character. " +
+            "Update the plugin to connect.",
+        RelayConnectStep.WaitForUser => _authBlockStatus ?? "Waiting for Reconnect…",
+        _ => "Waiting for character data…",
+    };
+
+    /// <summary>
+    /// Framework thread. Shows the block the policy just entered (or changed): stops reconnecting when it is full,
+    /// and tells the player what to do — in chat once per occurrence, at most once per 30 minutes per character and
+    /// block kind, plus one line when a partial block becomes full.
+    /// </summary>
+    private RelayHostVerdict ApplyHostVerdict(RelayHostVerdict verdict)
+    {
+        if (verdict == RelayHostVerdict.Blocked && _connectPolicy.BlockCode is { } code)
+            ShowAuthBlock(code, _connectPolicy.Block);
+        return verdict;
+    }
+
+    /// <summary>Framework thread. The relay replaced this connection's session (session_replaced): block until the user acts.</summary>
+    private void ApplySessionReplaced()
+    {
+        if (_connectPolicy.SessionReplaced(Volatile.Read(ref _connectionEpoch)))
+            ShowAuthBlock(ErrorCodes.SessionReplaced, RelayAuthBlock.Full);
+    }
+
+    private void ShowAuthBlock(string code, RelayAuthBlock block)
+    {
+        // A kept-aside copy of a damaged identity file may hold the secret the relay expects.
+        var backup = code == ErrorCodes.SessionReplaced ? null : _identityStore.NewestBackupFileName();
+        var status = RelayConnectPolicy.BlockStatus(code, block, backup);
+
+        var first = _authBlockStatus is null;
+        _authBlockStatus = status;
+        _lastStatus = status;
+        if (first || block == RelayAuthBlock.Full)
+        {
+            _log.Warning(
+                "WindUpKey relay rejected this session ({Code}); {What}",
+                code,
+                block == RelayAuthBlock.Full ? "not reconnecting" : "still trying unreachable hosts");
+        }
+
+        // Chat at most once per 30 minutes per character and block kind (decisions 31 and 33), plus one line when a
+        // partial block becomes full (decision 37); the status line above always updates.
+        if (_connectPolicy.ClaimBlockChat(_config.ActiveContentId, first, DateTime.UtcNow))
+            PluginChat.PrintError(_chat, status);
+
+        if (block == RelayAuthBlock.Full)
+            CloseSocket();
+    }
+
+    /// <summary>
+    /// Framework thread. The relay accepted this connection's register (it sent pairSync): save the host as the
+    /// sticky one, forget the rejections, and lift a partial block.
+    /// </summary>
+    private void OnRegisterAccepted()
+    {
+        if (_connectionUrl is { } url)
+        {
+            _config.RelayUrl = url;
+            if (!string.Equals(_config.LastSuccessfulRelayUrl, url, StringComparison.Ordinal))
+            {
+                _config.LastSuccessfulRelayUrl = url;
+                _config.Save();
+            }
+        }
+
+        if (!_connectPolicy.Accepted(Volatile.Read(ref _connectionEpoch)))
+            return;
+
+        _authBlockStatus = null;
+        _log.Information("WindUpKey relay host={Host} accepted the relay identity; auth block lifted", SafeHost(_connectionUrl ?? string.Empty));
+    }
+
+    /// <summary>Lifts the auth block and forgets which hosts rejected the identity (login, switch, import, revert).</summary>
+    private void ClearAuthBlock()
+    {
+        _connectPolicy.Reset();
+        _authBlockStatus = null;
     }
 
     private async Task<ClientWebSocket> OpenWebSocketAsync(string baseUrl, int generation, CancellationToken ct)
     {
         var uri = BuildUri(baseUrl);
         var socket = new ClientWebSocket();
+        // Shared token goes in a header, not the URL (the relay accepts both).
+        if (!string.IsNullOrEmpty(_config.RelayToken))
+            socket.Options.SetRequestHeader("Authorization", $"Bearer {_config.RelayToken}");
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         // Keep per-host attempts bounded so failover to the other Funnel stays responsive.
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(8));
@@ -1436,26 +1800,33 @@ public sealed class RelayClient : IDisposable
         }
     }
 
-    private Uri BuildUri(string baseUrl)
-    {
-        var url = baseUrl.Trim();
-        if (!string.IsNullOrEmpty(_config.RelayToken))
-        {
-            var sep = url.Contains('?', StringComparison.Ordinal) ? "&" : "?";
-            url = $"{url}{sep}token={Uri.EscapeDataString(_config.RelayToken)}";
-        }
+    private static Uri BuildUri(string baseUrl) => new(baseUrl.Trim());
 
-        return new Uri(url);
-    }
-
-    private async Task ReceiveLoopAsync(ClientWebSocket socket, CancellationToken ct)
+    /// <summary>
+    /// Runs one connection until it ends. Returns auth_failed/auth_required when this host rejected the
+    /// register (the caller then tries the next host), otherwise null.
+    /// </summary>
+    private async Task<string?> ReceiveLoopAsync(ClientWebSocket socket, CancellationToken ct)
     {
         var buffer = new byte[16 * 1024];
         while (socket.State == WebSocketState.Open && !ct.IsCancellationRequested)
         {
             var result = await socket.ReceiveAsync(buffer, ct).ConfigureAwait(false);
             if (result.MessageType == WebSocketMessageType.Close)
+            {
+                // Relay refusals close with PolicyViolation; a secretless refusal sends no error first.
+                switch (RelayConnectPolicy.ClassifyClose(result.CloseStatus, result.CloseStatusDescription))
+                {
+                    case RelaySessionSignal.Rejected:
+                        return result.CloseStatusDescription;
+                    case RelaySessionSignal.SessionReplaced:
+                        await _framework.RunOnTick(ApplySessionReplaced, cancellationToken: ct)
+                            .ConfigureAwait(false);
+                        break;
+                }
+
                 break;
+            }
 
             if (result.MessageType != WebSocketMessageType.Text)
                 continue;
@@ -1473,7 +1844,12 @@ public sealed class RelayClient : IDisposable
                     () => HandleMessageAsync(json, ct),
                     cancellationToken: ct)
                 .ConfigureAwait(false);
+
+            if (_registerRejection is { } rejected)
+                return rejected;
         }
+
+        return _registerRejection;
     }
 
     private async Task HandleMessageAsync(string json, CancellationToken ct)
@@ -1503,6 +1879,8 @@ public sealed class RelayClient : IDisposable
                 HandlePairEstablished(envelope);
                 break;
             case MessageTypes.PairSync:
+                // Relay-originated only (never routed), and sent once the register is accepted.
+                OnRegisterAccepted();
                 HandlePairSync(envelope);
                 break;
             case MessageTypes.PairRemove:
@@ -1699,6 +2077,20 @@ public sealed class RelayClient : IDisposable
         var payload = envelope.GetPayload<ErrorPayload>();
         if (payload is null)
             return;
+
+        // Relay-originated session errors never set `to`; routed (peer-sent) errors always do.
+        switch (RelayConnectPolicy.ClassifyError(payload.Code, payload.To))
+        {
+            case RelaySessionSignal.Ignore:
+                return;
+            case RelaySessionSignal.SessionReplaced:
+                ApplySessionReplaced();
+                return;
+            case RelaySessionSignal.Rejected:
+                // Per host: the receive loop ends this connection and the connect loop tries the next host.
+                _registerRejection = payload.Code;
+                return;
+        }
 
         if (!string.IsNullOrEmpty(payload.RequestId))
         {
