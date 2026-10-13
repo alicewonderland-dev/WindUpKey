@@ -547,6 +547,12 @@ public static class ErrorCodes
     /// wasn't queued (03-D6). Not relay-only; old clients show their generic failure for it.
     /// </summary>
     public const string QueueFull = "queue_full";
+    /// <summary>
+    /// Doll → sender (with <c>requestId</c> and <c>to</c>): the doll used her safeword and has paused remote control, so
+    /// this unwind, call or owner settings update was refused (06-B1). Peer-sent, so never relay-only: the relay routes it
+    /// like any other short code, and old clients show their generic failure for it.
+    /// </summary>
+    public const string SafewordPaused = "safeword_paused";
 
     /// <summary>
     /// Session-level codes only the relay may send. The relay drops routed errors with these codes,

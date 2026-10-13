@@ -91,6 +91,8 @@ public sealed class ProfileSettingsTests
         Assert.Subset(names.ToHashSet(), reflected.ToHashSet());
         Assert.Contains("AutoGroundSit", names);
         Assert.Contains("LockEmoteId", names);
+        // 06-B1: the safeword pause follows the same pattern.
+        Assert.Contains("SafewordPausedUntilUtc", names);
         Assert.Contains("QuestDifficulty", names);
 
         var capture = MethodBody(ConfigurationSource, "public CharacterProfile CaptureActiveAsProfile()");

@@ -65,6 +65,12 @@ public sealed class CharacterProfile
 
     public double SafewordHours { get; set; } = 1;
 
+    /// <summary>
+    /// 06-B1: until when the safeword pauses remote control (owners' unwind, call and settings updates are refused), or
+    /// null for no pause. Read through <see cref="Services.SafewordPause"/>. Older builds ignore it (and drop it on save).
+    /// </summary>
+    public DateTimeOffset? SafewordPausedUntilUtc { get; set; }
+
     public DateTimeOffset? ExpiryUtc { get; set; }
 
     /// <summary>Last-write-wins stamp for <see cref="ExpiryUtc"/> sync with the relay.</summary>

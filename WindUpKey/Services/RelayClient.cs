@@ -40,6 +40,13 @@ public sealed class OwnerSettingsSnapshot
     public List<(ushort Id, string Name)> Emotes { get; set; } = [];
     public string? LastError { get; set; }
     public bool HasData { get; set; }
+
+    /// <summary>
+    /// 06-B3: changes when the doll refused a settings change because her safeword paused remote control. The Owner
+    /// window then drops its draft and shows these values again: the last ones the doll confirmed, which the refused
+    /// change never touched.
+    /// </summary>
+    public long RestoreSeq { get; set; }
 }
 
 /// <summary>
@@ -54,6 +61,8 @@ public sealed class RelayClient : IDisposable
     public const string GenericOwnerSettingsFailure = "Unable to update that doll's settings.";
     /// <summary>03-D6: the relay refused to queue a message for an offline partner (<c>queue_full</c>).</summary>
     public const string QueueFullFailure = "That partner's message queue is full; try again later.";
+    /// <summary>06-B1: the doll refused an unwind or settings update because her safeword paused remote control.</summary>
+    public const string SafewordPausedFailure = "That doll has paused remote control for now.";
     public static readonly TimeSpan WindRequestCooldown = TimeSpan.FromHours(1);
     private static readonly TimeSpan PresenceThrottle = TimeSpan.FromSeconds(10);
 
@@ -165,6 +174,7 @@ public sealed class RelayClient : IDisposable
     private readonly object _ownerSettingsLock = new();
     private readonly Dictionary<string, OwnerSettingsSnapshot> _ownerSettingsByDollKey = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (string DollKey, bool NotifyOnAck)> _pendingOwnerRequests = new(StringComparer.Ordinal);
+    private long _ownerSettingsRestoreSeq;
     private readonly object _emoteCacheLock = new();
     private List<OwnerEmoteInfo> _cachedUnlockedEmotes = [];
 
@@ -1239,6 +1249,15 @@ public sealed class RelayClient : IDisposable
         if (_config.IsDebugEnabled
             && string.Equals(key, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
         {
+            // 06-B3: the pause refuses her own debug settings change too, as it does self-unwind and self-Call.
+            if (_timer.IsRemoteControlPaused)
+            {
+                ApplyLocalOwnerSettingsSnapshot(key);
+                RestoreOwnerSettingsAfterRefusal(key, SafewordPausedFailure);
+                _notifier.NotifyWinderError(SafewordPausedFailure);
+                return;
+            }
+
             ApplyLocalOwnerSettingsUpdate(maxWindHours, autoGroundSit, lockEmoteId, settingsLocked);
             ApplyLocalOwnerSettingsSnapshot(key);
             if (notify)
@@ -2245,6 +2264,9 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
+        if (await RefuseIfSafewordPausedAsync(envelope.Type, payload.RequestId, fromKey, ct).ConfigureAwait(false))
+            return;
+
         var pair = _config.FindPairByKey(fromKey);
         var winderIdentity = pair is not null
             ? pair.GetMessageLabel()
@@ -2262,6 +2284,27 @@ public sealed class RelayClient : IDisposable
             RemainingSeconds = remaining.TotalSeconds,
             RemainingDisplay = WindTimerService.FormatRemaining(remaining),
         }), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 06-B1: framework thread, when the message is handled (so a message queued while offline is checked on delivery).
+    /// While the safeword pauses remote control, an unwind, call or owner settings update from a partner allowed to send
+    /// it is refused with <see cref="ErrorCodes.SafewordPaused"/> and nothing is applied. Checked after the stealth and
+    /// permission checks, so only a partner who could otherwise do it learns of the pause. Returns true when refused.
+    /// </summary>
+    private async Task<bool> RefuseIfSafewordPausedAsync(string messageType, string? requestId, string fromKey, CancellationToken ct)
+    {
+        if (!SafewordPause.Refuses(messageType) || !_timer.IsRemoteControlPaused)
+            return false;
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.Error, new ErrorPayload
+        {
+            RequestId = requestId,
+            To = fromKey,
+            Code = ErrorCodes.SafewordPaused,
+            Message = SafewordPausedFailure,
+        }), ct).ConfigureAwait(false);
+        return true;
     }
 
     private void HandleInboundWindRequest(Envelope envelope)
@@ -2357,8 +2400,14 @@ public sealed class RelayClient : IDisposable
                         ? "That doll is offline."
                         : payload.Code == ErrorCodes.NotAllowed
                             ? "Not allowed to manage that doll."
-                            : GenericOwnerSettingsFailure;
-                SetOwnerSettingsError(dollKey, message);
+                            : payload.Code == ErrorCodes.SafewordPaused
+                                ? SafewordPausedFailure
+                                : GenericOwnerSettingsFailure;
+                // 06-B3: after a pause refused a change, the window shows what's actually set, not the refused values.
+                if (payload.Code == ErrorCodes.SafewordPaused)
+                    RestoreOwnerSettingsAfterRefusal(dollKey, message);
+                else
+                    SetOwnerSettingsError(dollKey, message);
                 _notifier.NotifyWinderError(message);
                 await Task.CompletedTask.ConfigureAwait(false);
                 return;
@@ -2368,6 +2417,13 @@ public sealed class RelayClient : IDisposable
         if (queueFull)
         {
             _notifier.NotifyWinderError(QueueFullFailure);
+            return;
+        }
+
+        // 06-B1: the doll refused an unwind (not tracked by requestId) because her safeword paused remote control.
+        if (payload.Code == ErrorCodes.SafewordPaused)
+        {
+            _notifier.NotifyWinderError(SafewordPausedFailure);
             return;
         }
 
@@ -3002,6 +3058,9 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
+        if (await RefuseIfSafewordPausedAsync(envelope.Type, payload.RequestId, fromKey, ct).ConfigureAwait(false))
+            return;
+
         if (_callTravel is null)
         {
             await SendEnvelopeAsync(Envelope.Create(MessageTypes.Error, new ErrorPayload
@@ -3066,6 +3125,9 @@ public sealed class RelayClient : IDisposable
             }), ct).ConfigureAwait(false);
             return;
         }
+
+        if (await RefuseIfSafewordPausedAsync(envelope.Type, payload.RequestId, fromKey, ct).ConfigureAwait(false))
+            return;
 
         // 06-A1: these are the active character's own settings (Save writes them to its profile only), and 06-A9 makes
         // sure this message arrived for the active character.
@@ -3211,6 +3273,26 @@ public sealed class RelayClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// 06-B3: the doll refused a settings change because her safeword paused remote control. Only a result or an ack
+    /// changes the snapshot, so it still holds the last confirmed values; a new <see cref="OwnerSettingsSnapshot.RestoreSeq"/>
+    /// makes the Owner window drop the refused values from its draft and show these again.
+    /// </summary>
+    private void RestoreOwnerSettingsAfterRefusal(string dollKey, string message)
+    {
+        lock (_ownerSettingsLock)
+        {
+            if (!_ownerSettingsByDollKey.TryGetValue(dollKey, out var snap))
+            {
+                snap = new OwnerSettingsSnapshot { DollKey = dollKey };
+                _ownerSettingsByDollKey[dollKey] = snap;
+            }
+
+            snap.LastError = message;
+            snap.RestoreSeq = ++_ownerSettingsRestoreSeq;
+        }
+    }
+
     private void ClearOwnerSettings(string dollKey)
     {
         lock (_ownerSettingsLock)
@@ -3239,6 +3321,7 @@ public sealed class RelayClient : IDisposable
             TravelReady = snap.TravelReady,
             LastError = snap.LastError,
             HasData = snap.HasData,
+            RestoreSeq = snap.RestoreSeq,
         };
 
     private void RefreshUnlockedEmoteCache()

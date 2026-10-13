@@ -63,6 +63,15 @@ public sealed record SessionSnapshot
     /// <summary>Consent and wind stamps more than 5 minutes after the local clock (02-D6).</summary>
     public int FutureStampCount { get; init; }
 
+    /// <summary>06-B1: the active character's stored safeword pause end (null: none), as stored.</summary>
+    public DateTimeOffset? SafewordPausedUntilUtc { get; init; }
+
+    /// <summary>06-B1: Hardcore is on for the active character.</summary>
+    public bool HardcoreMode { get; init; }
+
+    /// <summary>When the snapshot was taken (UTC), to judge <see cref="SafewordPausedUntilUtc"/>.</summary>
+    public DateTimeOffset TakenAtUtc { get; init; }
+
     public RelayIdentityDiagnosis? Identity { get; init; }
 
     /// <summary>The Copy button has a valid identity to give.</summary>
@@ -143,6 +152,8 @@ public static class SessionFactsJudge
             : !s.ShouldSuspendMovementLocks ? CheckResult.Pass("X-suspend", "locks are not suspended while connected")
             : CheckResult.Fail("X-suspend", "locks are suspended although the relay is connected"));
 
+        results.Add(SafewordPauseState(s));
+
         results.Add(CheckResult.Info("X-pending", $"{s.PartnerKeys.Count} partner(s), {s.PendingKeys.Count} pending pair request(s), {s.PendingRemovalKeys.Count} queued unpair(s), {s.OwnedDollKeys.Count} owned doll(s)"));
 
         // ---- partial checklist items, local part ----
@@ -167,6 +178,24 @@ public static class SessionFactsJudge
             ? CheckResult.Pass("02-4", $"every owned doll ({s.OwnedDollKeys.Count}) is a partner")
             : CheckResult.Warn("02-4", $"{stale} owned doll(s) aren't partners (stale Owner entries)"));
         return results;
+    }
+
+    /// <summary>
+    /// 06-B1: the pause is consistent: none, ended, or ending within 24 h, and never kept in Hardcore. The timer tidies
+    /// an ended or out-of-range one on its next tick, so a FAIL means that didn't happen.
+    /// </summary>
+    private static CheckResult SafewordPauseState(SessionSnapshot s)
+    {
+        const string id = "X-safeword-pause";
+        if (s.SafewordPausedUntilUtc is not { } stored)
+            return CheckResult.Pass(id, "remote control isn't paused");
+        if (s.HardcoreMode)
+            return CheckResult.Fail(id, "a safeword pause is stored while Hardcore is on");
+        if (stored - s.TakenAtUtc > SafewordPause.MaxLength)
+            return CheckResult.Fail(id, "the stored safeword pause ends more than 24 h from now");
+        return SafewordPause.IsActive(stored, s.TakenAtUtc, hardcore: false)
+            ? CheckResult.Pass(id, $"remote control is paused for about {Math.Max(1, (int)Math.Ceiling((stored - s.TakenAtUtc).TotalHours))} more hour(s)")
+            : CheckResult.Pass(id, "the stored safeword pause has ended");
     }
 
     private static CheckResult FirstConnect(SessionSnapshot s)

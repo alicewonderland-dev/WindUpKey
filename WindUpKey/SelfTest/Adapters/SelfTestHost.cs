@@ -77,6 +77,9 @@ internal sealed class SelfTestHost(
             CompiledUrls = RelayDefaults.RelayUrls,
             ShouldSuspendMovementLocks = relay.ShouldSuspendMovementLocks,
             FutureStampCount = futureStamps,
+            SafewordPausedUntilUtc = config.SafewordPausedUntilUtc,
+            HardcoreMode = config.HardcoreMode,
+            TakenAtUtc = now,
             // The store's current view only: no lock, no read, no write (04-D10). 01-4's copy and import parts come from
             // IdentityCopyCheckAsync, once per run.
             Identity = relay.DiagnoseRelayIdentity(_pluginConfigDirectory),

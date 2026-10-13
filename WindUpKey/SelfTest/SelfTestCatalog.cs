@@ -179,6 +179,7 @@ public static class SelfTestCatalog
         new("X-register", "Register", CheckCoverage.Extra, "The register was accepted.", []),
         new("X-stamps", "Sync stamps", CheckCoverage.Extra, "No future-dated consent or wind stamps.", []),
         new("X-suspend", "Lock safety", CheckCoverage.Extra, "ShouldSuspendMovementLocks is false while connected.", []),
+        new("X-safeword-pause", "Safeword pause", CheckCoverage.Extra, "A stored safeword pause ends within 24 h and isn't kept in Hardcore (06-B1).", []),
         new("X-pending", "Pending lists", CheckCoverage.Extra, "Pending pair requests and queued unpairs (counts).", []),
         new("X-standby", "Standby host", CheckCoverage.Extra, "The other compiled host is reachable without registering (INFO).", []),
         new("X-clock", "Clock skew", CheckCoverage.Extra, "Clock skew against the relay's /stats Date header (WARN over 2 minutes).", []),

@@ -13,7 +13,10 @@ namespace WindUpKey;
 [Serializable]
 public class Configuration : IPluginConfiguration
 {
-    /// <summary>12: per-character lock emote (06-A1).</summary>
+    /// <summary>
+    /// 12: per-character lock emote (06-A1). 06-B1's <see cref="SafewordPausedUntilUtc"/> needs no bump: absent means no
+    /// pause.
+    /// </summary>
     public const int CurrentVersion = 12;
 
     /// <summary>Orphan profile from pre-v6 flat config until the first logged-in ContentId claims it.</summary>
@@ -144,6 +147,13 @@ public class Configuration : IPluginConfiguration
     /// <summary>Stored as double for config compatibility; always whole hours 1–24.</summary>
     public double SafewordHours { get; set; } = 1;
 
+    /// <summary>
+    /// 06-B1: until when the safeword pauses remote control, or null (per character, mirrored like the fields above).
+    /// Read it through <see cref="SafewordPause"/>, which ignores an end that has passed, clamps one more than 24 h
+    /// ahead, and never counts it in Hardcore.
+    /// </summary>
+    public DateTimeOffset? SafewordPausedUntilUtc { get; set; }
+
     /// <summary>Absolute expiry. Null or past => locked. Never display remaining duration to the doll.</summary>
     public DateTimeOffset? ExpiryUtc { get; set; }
 
@@ -233,10 +243,15 @@ public class Configuration : IPluginConfiguration
         // Whole hours only (also cleans up older fractional configs).
         SafewordHours = Math.Clamp(Math.Round(SafewordHours), 1, 24);
 
+        // 06-B1: the active character's pause (a reload as the same character applies no profile): a passed end is
+        // dropped, and one more than 24 h ahead is clamped.
+        SafewordPausedUntilUtc = SafewordPause.Normalize(SafewordPausedUntilUtc, DateTimeOffset.UtcNow);
+
         if (HardcoreMode)
         {
             Role = PlayerRole.Doll;
             SafewordEnabled = false;
+            SafewordPausedUntilUtc = null;
         }
 
         // Pairing key is seeded from ContentId when empty; do not invent a random one here.
@@ -331,6 +346,7 @@ public class Configuration : IPluginConfiguration
             SafewordEnabled = SafewordEnabled,
             Safeword = Safeword,
             SafewordHours = SafewordHours,
+            SafewordPausedUntilUtc = SafewordPausedUntilUtc,
             ExpiryUtc = ExpiryUtc,
             WindUpdatedUtc = WindUpdatedUtc,
             LastWindRequestUtc = LastWindRequestUtc,
@@ -371,6 +387,8 @@ public class Configuration : IPluginConfiguration
         SafewordEnabled = profile.SafewordEnabled;
         Safeword = string.IsNullOrEmpty(profile.Safeword) ? "safeword" : profile.Safeword;
         SafewordHours = Math.Clamp(Math.Round(profile.SafewordHours <= 0 ? 1 : profile.SafewordHours), 1, 24);
+        // 06-B1: a passed pause is dropped, and one more than 24 h ahead (a clock that jumped back) is clamped.
+        SafewordPausedUntilUtc = SafewordPause.Normalize(profile.SafewordPausedUntilUtc, DateTimeOffset.UtcNow);
         ExpiryUtc = profile.ExpiryUtc;
         WindUpdatedUtc = profile.WindUpdatedUtc;
         LastWindRequestUtc = profile.LastWindRequestUtc;
@@ -392,6 +410,8 @@ public class Configuration : IPluginConfiguration
         {
             Role = PlayerRole.Doll;
             SafewordEnabled = false;
+            // 06-B1: Hardcore has no safeword, so no pause either.
+            SafewordPausedUntilUtc = null;
         }
 
         NormalizePendingKeys();

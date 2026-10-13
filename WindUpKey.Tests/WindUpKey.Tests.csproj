@@ -47,6 +47,8 @@
     <Compile Include="..\WindUpKey\Services\LowWindProfileGuard.cs" Link="Plugin\LowWindProfileGuard.cs" />
     <Compile Include="..\WindUpKey\Services\MoodlesSyncGate.cs" Link="Plugin\MoodlesSyncGate.cs" />
     <Compile Include="..\WindUpKey\Services\SafewordText.cs" Link="Plugin\SafewordText.cs" />
+    <!-- 06 Part B: the safeword pause. -->
+    <Compile Include="..\WindUpKey\Services\SafewordPause.cs" Link="Plugin\SafewordPause.cs" />
     <Compile Include="..\WindUpKey\Services\ClipLedger.cs" Link="Plugin\ClipLedger.cs" />
     <Compile Include="..\WindUpKey\Services\WindMath.cs" Link="Plugin\WindMath.cs" />
     <Compile Include="..\WindUpKey\Services\LoginSitRule.cs" Link="Plugin\LoginSitRule.cs" />

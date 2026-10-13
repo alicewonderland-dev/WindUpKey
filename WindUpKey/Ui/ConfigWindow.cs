@@ -73,6 +73,7 @@ public sealed class ConfigWindow : Window, IDisposable
         public ushort EmoteId = 52;
         public bool Locked;
         public bool Synced;
+        public long RestoreSeq;
     }
 
     public ConfigWindow(
@@ -1069,13 +1070,15 @@ public sealed class ConfigWindow : Window, IDisposable
             return;
         }
 
-        if (!draft.Synced)
+        // 06-B3: a change the doll's pause refused is dropped, so the window shows what's actually set.
+        if (!draft.Synced || draft.RestoreSeq != snap.RestoreSeq)
         {
             draft.MaxHours = snap.MaxWindHours;
             draft.AutoSit = snap.AutoGroundSit;
             draft.EmoteId = snap.LockEmoteId == 0 ? (ushort)52 : snap.LockEmoteId;
             draft.Locked = snap.SettingsLocked;
             draft.Synced = true;
+            draft.RestoreSeq = snap.RestoreSeq;
         }
 
         ImGui.Spacing();
@@ -1656,6 +1659,8 @@ public sealed class ConfigWindow : Window, IDisposable
                 _config.SafewordHours = Math.Clamp(safewordHours, 1, 24);
             if (ImGui.IsItemDeactivatedAfterEdit())
                 _config.Save();
+
+            DrawSafewordPause();
         }
 
         ImGui.Spacing();
@@ -1684,6 +1689,8 @@ public sealed class ConfigWindow : Window, IDisposable
             {
                 _config.HardcoreMode = true;
                 _config.SafewordEnabled = false;
+                // 06-B1: Hardcore has no safeword, so it ends a pause too.
+                _config.SafewordPausedUntilUtc = null;
                 _config.Role = PlayerRole.Doll;
                 _config.Save();
                 _hardcoreConfirm = null;
@@ -1698,6 +1705,36 @@ public sealed class ConfigWindow : Window, IDisposable
         if (ImGui.Button("Save"))
             _config.Save();
     }
+
+    /// <summary>
+    /// 06-B1: the pause of remote control that using the safeword started, when it ends, and the button that ends it
+    /// early (as <c>/windup safeword resume</c> does).
+    /// </summary>
+    private void DrawSafewordPause()
+    {
+        ImGui.Spacing();
+        if (_timer.SafewordPauseEndsAt is not { } pauseEnd)
+        {
+            ImGui.TextWrapped(SafewordPauseHelp);
+            return;
+        }
+
+        ImGui.TextColored(
+            new Vector4(0.45f, 0.85f, 0.45f, 1f),
+            $"Remote control is paused until {pauseEnd.ToLocalTime():g}.");
+        ImGui.TextWrapped(PausedRemoteControlText + " Winding still works.");
+        if (ImGui.Button("End pause now"))
+            _timer.ResumeRemoteControl();
+    }
+
+    // 06-B1: Release builds have no Call feature, so only Testing builds mention it (as 06-A11 does).
+#if WINDUP_TESTING
+    private const string PausedRemoteControlText = "Partners can't unwind you, and owners can't change your settings or call you.";
+#else
+    private const string PausedRemoteControlText = "Partners can't unwind you, and owners can't change your settings.";
+#endif
+    private const string SafewordPauseHelp =
+        "Using the safeword also pauses remote control for the safeword hours. " + PausedRemoteControlText + " Winding still works.";
 
     private void DrawDebugTab()
     {

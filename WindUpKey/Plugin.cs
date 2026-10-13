@@ -193,7 +193,7 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
             HelpMessage =
-                "Open Wind-Up Key config.\n/windup safeword <word> uses your safeword.\n/windup unlock clears Hardcore and all owners (confirmation required)."
+                "Open Wind-Up Key config.\n/windup safeword <word> uses your safeword (and pauses remote control).\n/windup safeword resume ends that pause early.\n/windup unlock clears Hardcore and all owners (confirmation required)."
 #if WINDUP_TESTING
                 + "\n/windup stopcall cancels an active owner call."
                 + "\n/windup selftest runs the relay self-test (debug mode)."
@@ -482,7 +482,18 @@ public sealed class Plugin : IDalamudPlugin
         {
             if (string.IsNullOrEmpty(rest))
             {
-                PluginChat.PrintError(ChatGui, "Usage: /windup safeword <word>");
+                PluginChat.PrintError(ChatGui, "Usage: /windup safeword <word>, or /windup safeword resume");
+                return;
+            }
+
+            // 06-B1: "resume" ends the pause early (whatever the role or Hardcore), unless it is her usable safeword.
+            var safewordUsable = Configuration.IsDoll && Configuration.SafewordEnabled && !Configuration.HardcoreMode;
+            if (SafewordPause.IsResume(rest, safewordUsable, Configuration.Safeword))
+            {
+                if (_timer.ResumeRemoteControl())
+                    PluginChat.Print(ChatGui, "Remote control resumed.", PluginChat.Green);
+                else
+                    PluginChat.Print(ChatGui, "Remote control isn't paused.", PluginChat.Grey);
                 return;
             }
 
@@ -511,9 +522,15 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
-            _timer.AddHours(Configuration.SafewordHours);
+            // 06-B1: pauses remote control, adds the safeword hours ignoring the owner's cap (never shortening the timer),
+            // and stops an owner's Call. The safeword itself is never logged.
+            // 06-B3: wind first, so cancelling the Call never briefly sees her unwound (re-lock, sit, then nudge).
+            _timer.UseSafeword(Configuration.SafewordHours);
+#if WINDUP_TESTING
+            _relay.CancelActiveCall();
+#endif
             // Confirmation only — never print remaining time to the doll.
-            PluginChat.Print(ChatGui, "Safeword used.", PluginChat.Green);
+            PluginChat.Print(ChatGui, "Safeword used. Remote control is paused for now.", PluginChat.Green);
             return;
         }
 

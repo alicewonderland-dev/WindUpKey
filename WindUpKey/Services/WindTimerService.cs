@@ -157,6 +157,47 @@ public sealed class WindTimerService
     }
 
     /// <summary>
+    /// 06-B1: whether the safeword has paused remote control (owners' unwind, call and settings updates are refused).
+    /// </summary>
+    public bool IsRemoteControlPaused =>
+        SafewordPause.IsActive(_config.SafewordPausedUntilUtc, DateTimeOffset.UtcNow, _config.HardcoreMode);
+
+    /// <summary>06-B1: when the safeword's pause of remote control ends, or null when there is none.</summary>
+    public DateTimeOffset? SafewordPauseEndsAt =>
+        SafewordPause.EndsAt(_config.SafewordPausedUntilUtc, DateTimeOffset.UtcNow, _config.HardcoreMode);
+
+    /// <summary>
+    /// 06-B1: the safeword was used (the caller checked it, and cancels an active Call). Pauses remote control until
+    /// <c>max(current, now + hours)</c>, and adds <paramref name="hours"/> of wind ignoring the owner's
+    /// <see cref="Configuration.MaxWindHours"/> cap, though never shortening a longer timer (06-A8). Doll only.
+    /// </summary>
+    public void UseSafeword(double hours)
+    {
+        if (!_config.IsDoll)
+            return;
+
+        _config.SafewordPausedUntilUtc = SafewordPause.Extend(_config.SafewordPausedUntilUtc, DateTimeOffset.UtcNow, hours);
+        _config.Save();
+
+        var actualAdded = AddWind(TimeSpan.FromHours(hours), ignoreMaxCap: true);
+        if (actualAdded > TimeSpan.Zero)
+            _lowWind.OnWoundReceived(actualAdded);
+    }
+
+    /// <summary>06-B1: the doll ends the pause early. Returns false when remote control wasn't paused.</summary>
+    public bool ResumeRemoteControl()
+    {
+        var wasPaused = IsRemoteControlPaused;
+        if (_config.SafewordPausedUntilUtc is not null)
+        {
+            _config.SafewordPausedUntilUtc = null;
+            _config.Save();
+        }
+
+        return wasPaused;
+    }
+
+    /// <summary>
     /// Adds a commendation bonus using the normal timer cap (never shortening the timer, 06-A8), but emits only the
     /// dedicated vague commendation RP echo. Returns the time actually added after applying the cap.
     /// </summary>
@@ -258,6 +299,25 @@ public sealed class WindTimerService
 
         SyncLockState();
         TryPendingLoginSit();
+        TidySafewordPause();
+    }
+
+    /// <summary>
+    /// 06-B1: a pause that has ended (or any pause in Hardcore) is cleared, and one more than 24 h ahead (a clock that
+    /// jumped back while running) is clamped, so it still lifts. Saved only when it changes.
+    /// </summary>
+    private void TidySafewordPause()
+    {
+        var stored = _config.SafewordPausedUntilUtc;
+        if (stored is null)
+            return;
+
+        var tidy = SafewordPause.EndsAt(stored, DateTimeOffset.UtcNow, _config.HardcoreMode);
+        if (tidy == stored)
+            return;
+
+        _config.SafewordPausedUntilUtc = tidy;
+        _config.Save();
     }
 
     private void TryPendingLoginSit()
