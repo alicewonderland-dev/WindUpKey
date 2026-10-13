@@ -27,6 +27,17 @@ public static class RelayWireRules
     }
 
     /// <summary>
+    /// The client's <c>register</c>: its pairing key and relay secret. Never the shared token (05-D6): it goes only in the
+    /// upgrade's <c>Authorization</c> header (01-D8), and no relay ever read it from the body, so the field is left out.
+    /// </summary>
+    public static Envelope Register(string pairingKey, string? secret) =>
+        Envelope.Create(MessageTypes.Register, new RegisterPayload
+        {
+            PairingKey = pairingKey,
+            Secret = secret,
+        });
+
+    /// <summary>
     /// The doll's emotes as sent in <c>ownerSettingsResult</c> (03-D13): at most <see cref="WireLimits.ListEntries"/>,
     /// each name within <see cref="WireLimits.ShortField"/>, so the relay never drops the reply as malformed.
     /// </summary>
@@ -79,6 +90,13 @@ public static class RelaySocketSetup
         if (!string.IsNullOrEmpty(token))
             options.SetRequestHeader("Authorization", $"Bearer {token}");
         options.CollectHttpResponseDetails = collectHttpResponseDetails;
+
+        // 05-D3: ping the relay and drop a connection whose pong doesn't come back, so a half-open path is noticed (the
+        // 60 s lock-safety rule then applies) instead of the socket staying Open forever. A dead connection is aborted
+        // at about interval + timeout; the receive then ends in an OperationCanceledException with the loop's own
+        // token not cancelled, which the connect loop treats as an ordinary disconnect.
+        options.KeepAliveInterval = WireLimits.KeepAliveInterval;
+        options.KeepAliveTimeout = WireLimits.KeepAliveTimeout;
     }
 }
 

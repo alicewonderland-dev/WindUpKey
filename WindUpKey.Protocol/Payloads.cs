@@ -5,6 +5,11 @@ namespace WindUpKey.Protocol;
 
 public sealed class RegisterPayload
 {
+    /// <summary>
+    /// The shared relay token, as every client before 05 sent it. Never sent by new clients (05-D6: null, so it's left out
+    /// of the JSON) and never read by any relay: the token is checked only at the HTTP upgrade (the
+    /// <c>Authorization</c> header or <c>?token=</c>). Kept so the type still describes what old clients send.
+    /// </summary>
     [JsonPropertyName("token")]
     public string? Token { get; set; }
 

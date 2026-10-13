@@ -1381,11 +1381,11 @@ public sealed class RelayClient : IDisposable
             var epoch = _connectPolicy.Epoch;
             try
             {
-                _lastStatus = _authBlockStatus ?? "Connecting…";
+                _lastStatus = _authBlockStatus ?? _connectPolicy.CurrentCloseStatus ?? "Connecting…";
                 _log.Information("WindUpKey loop: connecting as {Identity}", LogRedact.Identity(identity));
                 var connection = await ConnectAndRegisterAsync(generation, epoch, ct).ConfigureAwait(false);
                 _lastStatus = null;
-                var rejectedCode = await ReceiveLoopAsync(connection.Socket, ct).ConfigureAwait(false);
+                var rejectedCode = await ReceiveLoopAsync(connection.Socket, epoch, ct).ConfigureAwait(false);
                 if (rejectedCode is not null)
                 {
                     // auth_failed/auth_required is per host (each has its own accounts): try the next one now,
@@ -1407,8 +1407,10 @@ public sealed class RelayClient : IDisposable
                 }
 
                 // Rejections were already forgotten when the register was accepted (pairSync), however this ends.
-                _lastStatus = _authBlockStatus ?? "Disconnected. Reconnecting…";
+                _lastStatus = _authBlockStatus ?? _connectPolicy.CurrentCloseStatus ?? "Disconnected. Reconnecting…";
             }
+            // Only our own cancel stops the loop. A keep-alive abort (05-D3) is an OperationCanceledException with ct not
+            // cancelled: it falls through to the general catch, an ordinary disconnect that reconnects on the backoff.
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
@@ -1433,6 +1435,7 @@ public sealed class RelayClient : IDisposable
                         () => ApplyHostVerdict(_connectPolicy.NoHostReachable(epoch)),
                         cancellationToken: ct)
                     .ConfigureAwait(false);
+                _connectPolicy.ClearCloseStatus();
                 _lastStatus = _authBlockStatus ?? "Cannot reach the host. Is Wind-Up Key Host running?";
                 if (verdict == RelayHostVerdict.Blocked)
                     _log.Information("WindUpKey no other relay host reachable after an identity rejection");
@@ -1441,6 +1444,7 @@ public sealed class RelayClient : IDisposable
             }
             catch (Exception ex)
             {
+                _connectPolicy.ClearCloseStatus();
                 _lastStatus = _authBlockStatus ?? "Cannot reach the host. Is Wind-Up Key Host running?";
                 _log.Warning(ex, "WindUpKey relay connection issue");
             }
@@ -1565,7 +1569,7 @@ public sealed class RelayClient : IDisposable
         {
             ct.ThrowIfCancellationRequested();
             var safeHost = SafeHost(baseUrl);
-            _lastStatus = _authBlockStatus ?? $"Connecting ({safeHost})…";
+            _lastStatus = _authBlockStatus ?? _connectPolicy.CurrentCloseStatus ?? $"Connecting ({safeHost})…";
             _log.Information("WindUpKey connect attempt host={Host}", safeHost);
 
             try
@@ -1610,14 +1614,9 @@ public sealed class RelayClient : IDisposable
         _selfTestRegisteredKey = pairingKey;
 #endif
 
-        var register = new RegisterPayload
-        {
-            Token = string.IsNullOrEmpty(_config.RelayToken) ? null : _config.RelayToken,
-            PairingKey = pairingKey,
-            Secret = relaySecret,
-        };
+        // 05-D6: no token in the body; the upgrade's Authorization header already carried it.
         _registerRejection = null;
-        await SendEnvelopeAsync(Envelope.Create(MessageTypes.Register, register), ct).ConfigureAwait(false);
+        await SendEnvelopeAsync(RelayWireRules.Register(pairingKey, relaySecret), ct).ConfigureAwait(false);
         _log.Information("WindUpKey registered on relay as key={Key}", LogRedact.Key(pairingKey));
 
         // The sends below use what was read with the key and secret, and stop if the character changed (or a login,
@@ -1889,6 +1888,7 @@ public sealed class RelayClient : IDisposable
         Interlocked.Increment(ref _acceptedConnections);
 #endif
         _backoff.RegisterAccepted();
+        _connectPolicy.ClearCloseStatus();
         if (_connectionUrl is { } url)
         {
             _config.RelayUrl = url;
@@ -1909,6 +1909,8 @@ public sealed class RelayClient : IDisposable
     /// <summary>Lifts the auth block and forgets which hosts rejected the identity (login, switch, import, revert).</summary>
     private void ClearAuthBlock()
     {
+        // Also starts a new epoch without the last close's status (05-D13). Start() comes here too, so a new loop
+        // generation is always a new epoch.
         _connectPolicy.Reset();
         _authBlockStatus = null;
     }
@@ -1976,7 +1978,7 @@ public sealed class RelayClient : IDisposable
     /// Runs one connection until it ends. Returns auth_failed/auth_required when this host rejected the
     /// register (the caller then tries the next host), otherwise null.
     /// </summary>
-    private async Task<string?> ReceiveLoopAsync(ClientWebSocket socket, CancellationToken ct)
+    private async Task<string?> ReceiveLoopAsync(ClientWebSocket socket, int epoch, CancellationToken ct)
     {
         // 03-D10: messages over the client's limit are discarded and the connection kept, logged once per connection.
         var pump = new RelayInboundPump(limit => _log.Warning(
@@ -1990,6 +1992,10 @@ public sealed class RelayClient : IDisposable
 #if WINDUP_TESTING
                 RecordSelfTestClose(inbound.CloseStatus, inbound.CloseDescription);
 #endif
+                // 05-D9: a close that explains itself (the first-bind limit) is shown while reconnecting; any other
+                // close clears it. 05-D13: only for this connection's own epoch, so a close read after a character
+                // switch (or login, Reconnect, import, revert) can't carry its message into the new cycle.
+                _connectPolicy.RecordClose(epoch, inbound.CloseStatus, inbound.CloseDescription);
                 // Relay refusals close with PolicyViolation; a secretless refusal sends no error first.
                 switch (RelayConnectPolicy.ClassifyClose(inbound.CloseStatus, inbound.CloseDescription))
                 {

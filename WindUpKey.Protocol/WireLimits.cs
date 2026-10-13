@@ -37,6 +37,19 @@ public static class WireLimits
     /// <summary>The most pending, quota-counted outbox rows for one recipient (03-D6).</summary>
     public const int OutboxPerRecipient = 1000;
 
+    /// <summary>
+    /// How often both ends ping an idle connection (05-D3): the relay's default for <c>Relay:KeepAliveIntervalSeconds</c>,
+    /// and the client's <c>ClientWebSocket</c> setting.
+    /// </summary>
+    public static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long either end waits for the pong before dropping the connection as dead (05-D3): the relay's default for
+    /// <c>Relay:KeepAliveTimeoutSeconds</c>, and the client's setting. Long enough for a long game hitch, since a client
+    /// answers pings only while a receive is pending.
+    /// </summary>
+    public static readonly TimeSpan KeepAliveTimeout = TimeSpan.FromSeconds(90);
+
     /// <summary>The largest message the client reads; anything bigger is discarded and the connection kept (03-D10).</summary>
     public const int ClientMessageBytes = 1024 * 1024;
 
@@ -197,4 +210,10 @@ public static class WireCloseReasons
 
     /// <summary>Close 1008: more than <see cref="WireLimits.PreRegisterMessages"/> messages before register (03-D3).</summary>
     public const string RegisterRequired = "register_required";
+
+    /// <summary>
+    /// Close 1013 (try again later): this client address created too many accounts recently, so a register that would
+    /// create one is refused (05-D2). Never an auth signal: the client reconnects on its normal backoff.
+    /// </summary>
+    public const string BindRateLimited = "bind_rate_limited";
 }

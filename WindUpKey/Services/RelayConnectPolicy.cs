@@ -116,6 +116,7 @@ public sealed class RelayConnectPolicy
     private string? _blockCode;
     private bool _becameFullChatPending;
     private int _epoch;
+    private string? _closeStatus;
 
     /// <summary>The current cycle. Captured when an attempt starts, and passed back with its outcome.</summary>
     public int Epoch
@@ -386,6 +387,56 @@ public sealed class RelayConnectPolicy
         };
     }
 
+    /// <summary>What the config window shows while the relay refuses registers that would create an account (05-D9).</summary>
+    public const string BindRateLimitedStatus =
+        "The relay is limiting new accounts from your network right now; retrying automatically.";
+
+    /// <summary>
+    /// The status a relay close explains (05-D9), or null when it explains none: the first-bind limit's close (1013
+    /// <see cref="WireCloseReasons.BindRateLimited"/>) shows <see cref="BindRateLimitedStatus"/> until a register is
+    /// accepted. Status only: no chat line and no block (<see cref="ClassifyClose"/> stays None), and the normal backoff
+    /// applies.
+    /// </summary>
+    public static string? CloseStatus(WebSocketCloseStatus? status, string? description) =>
+        status == (WebSocketCloseStatus)1013 && description == WireCloseReasons.BindRateLimited
+            ? BindRateLimitedStatus
+            : null;
+
+    /// <summary>
+    /// What the relay's last close explained in the current cycle (05-D9), shown while reconnecting; null when it
+    /// explained nothing, or once a register is accepted, the host can't be reached, or the cycle is reset.
+    /// </summary>
+    public string? CurrentCloseStatus
+    {
+        get
+        {
+            lock (_gate)
+                return _closeStatus;
+        }
+    }
+
+    /// <summary>
+    /// The relay closed a connection started in <paramref name="epoch"/>: keep what the close explains
+    /// (<see cref="CloseStatus"/>), or clear it for any other close. 05-D13: a close from an earlier cycle (a character
+    /// switch, login, Reconnect, import or revert since) is ignored, so its message never carries into the new cycle.
+    /// </summary>
+    public void RecordClose(int epoch, WebSocketCloseStatus? status, string? description)
+    {
+        var explained = CloseStatus(status, description);
+        lock (_gate)
+        {
+            if (epoch == _epoch)
+                _closeStatus = explained;
+        }
+    }
+
+    /// <summary>A register was accepted, or the host can't be reached: the last close no longer explains the status.</summary>
+    public void ClearCloseStatus()
+    {
+        lock (_gate)
+            _closeStatus = null;
+    }
+
     /// <summary>Login, Reconnect, character switch, import or revert: lift any block and start a new cycle (the chat throttle stays).</summary>
     public void Reset()
     {
@@ -396,6 +447,8 @@ public sealed class RelayConnectPolicy
             _rejectionCode = null;
             _block = RelayAuthBlock.None;
             _blockCode = null;
+            // 05-D13: a new cycle starts without the last one's close status.
+            _closeStatus = null;
         }
     }
 }
