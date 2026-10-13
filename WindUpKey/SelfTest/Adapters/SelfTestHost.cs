@@ -38,6 +38,7 @@ internal sealed class SelfTestHost(
     InputDiagnosticLog diagnostics,
     GameCommandRunner commands,
     Func<bool?> travelReady,
+    Func<CallIdleFact?> callIdle,
     Action<int> expectEpoch,
     Func<bool> reconnectAllowed) : ISelfTestHost, ISelfTestLink
 {
@@ -93,6 +94,8 @@ internal sealed class SelfTestHost(
             // The store's current view only: no lock, no read, no write (04-D10). 01-4's copy and import parts come from
             // IdentityCopyCheckAsync, once per run.
             Identity = relay.DiagnoseRelayIdentity(_pluginConfigDirectory),
+            // 07-A1: read only (X-call-idle); the self-test never sends a Call, an ack or a Yes.
+            CallIdle = callIdle(),
         };
     }
 
@@ -247,6 +250,10 @@ internal sealed class SelfTestHost(
                 var met = present && city is not null && HousingCallLocation.TryGetCityByPlaceNameRegion(row.PlaceNameRegion.RowId) == city;
                 rows.Add(new SheetRowFact("P-data-territory", "TerritoryType", territory, "residential district", present,
                     "its PlaceNameRegion maps to the same city", met));
+                // 07-A5: Call's position bound for an outdoor destination comes from the territory's Map.SizeFactor.
+                var map = present ? row.Map.ValueNullable : null;
+                rows.Add(new SheetRowFact("P-data-territory", "TerritoryType", territory, "residential district map", present,
+                    "its Map has a SizeFactor", map is { SizeFactor: > 0 }));
             }
         }
 
@@ -255,7 +262,9 @@ internal sealed class SelfTestHost(
         if (worlds is not null && localWorldId is { } worldId)
         {
             var present = worlds.TryGetRow(worldId, out var world);
-            rows.Add(new SheetRowFact("P-data-world", "World", worldId, "this world", present, "a data center is set", present && world.DataCenter.RowId != 0));
+            // 07-A5: Call accepts a destination world only when it is public and on her data center.
+            rows.Add(new SheetRowFact("P-data-world", "World", worldId, "this world", present, "public, with a data center set",
+                present && world.IsPublic && world.DataCenter.RowId != 0));
         }
 
         var aetherytes = data.GetExcelSheet<Aetheryte>();

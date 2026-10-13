@@ -168,6 +168,9 @@ public sealed unsafe class LockController : IDisposable
         // Facing is captured on the next Framework Tick when RestrictionsActive.
     }
 
+    /// <summary>07-A1: the Call input mute is on (the self-test's X-call-idle reads it).</summary>
+    public bool IsInputMuted => _inputMute;
+
     /// <summary>
     /// Mute raw player movement during owner-call auto-travel without freezing facing or blocking
     /// teleport/return. Shared walk/fly output is zeroed unless automation is driving

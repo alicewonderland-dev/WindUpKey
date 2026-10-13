@@ -102,6 +102,9 @@ public sealed class WindTimerService
         SyncLockState();
     }
 
+    /// <summary>07-A1: the Call bypass is on (the self-test's X-call-idle reads it).</summary>
+    public bool IsCallTravelBypassActive => _callTravelBypass;
+
     /// <summary>Mute jump during Call auto-travel; walk/fly blocked unless automation is driving.</summary>
     public void SetCallTravelInputMute(bool mute, System.Numerics.Vector3? destination = null) =>
         _lock.SetInputMute(mute, destination);

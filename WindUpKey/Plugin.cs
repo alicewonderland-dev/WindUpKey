@@ -132,7 +132,8 @@ public sealed class Plugin : IDalamudPlugin
             _timer,
             _callPrompt,
             ack => _relay.SendCallAckAsync(ack),
-            result => _relay.SendCallResultAsync(result));
+            result => _relay.SendCallResultAsync(result),
+            _consent.CanReceiveCallFromKey);
         _relay.AttachCallTravel(_callTravel);
 
         // 04: /windup selftest (Testing builds only, debug mode). The run's own Reconnect sets the epoch it expects.
@@ -149,6 +150,11 @@ public sealed class Plugin : IDalamudPlugin
                 _inputDiagnostics,
                 commands,
                 () => _callTravel.IsTravelReady,
+                () => new CallIdleFact(
+                    _callTravel.HasActiveCall,
+                    _callTravel.IsLandingGraceActive,
+                    _timer.IsCallTravelBypassActive,
+                    _lockController.IsInputMuted),
                 epoch => selfTest?.ExpectEpoch(epoch),
                 () => selfTest?.ReconnectAllowed == true),
             _relay,

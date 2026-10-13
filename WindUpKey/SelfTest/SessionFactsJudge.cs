@@ -8,6 +8,12 @@ using WindUpKey.Services;
 namespace WindUpKey.SelfTest;
 
 /// <summary>
+/// 07-A1: the Call's lock state for <c>X-call-idle</c>: a Call being answered, a finished Call's landing grace, and
+/// whether the Call bypass and the input mute are on.
+/// </summary>
+public sealed record CallIdleFact(bool CallActive, bool LandingGrace, bool Bypass, bool InputMute);
+
+/// <summary>
 /// The client's own state as one framework-thread snapshot (04-D6 "no game or config state off the framework thread").
 /// Keys and URLs are held only to compare and to address probes; the report shows them redacted (04-D3). Secrets and
 /// the token never enter it: the host compares them on the framework thread and passes only the answers.
@@ -80,6 +86,9 @@ public sealed record SessionSnapshot
     /// doll, or the unwound emote is off) or no character is logged in (06-C3).
     /// </summary>
     public bool? LockEmoteUnlocked { get; init; }
+
+    /// <summary>07-A1: the Call's lock state (Testing builds), or null when it wasn't read.</summary>
+    public CallIdleFact? CallIdle { get; init; }
 
     public RelayIdentityDiagnosis? Identity { get; init; }
 
@@ -162,6 +171,7 @@ public static class SessionFactsJudge
             : CheckResult.Fail("X-suspend", "locks are suspended although the relay is connected"));
 
         results.Add(SafewordPauseState(s));
+        results.Add(CallIdleState(s));
 
         results.Add(s.LockEmoteUnlocked switch
         {
@@ -212,6 +222,21 @@ public static class SessionFactsJudge
         return SafewordPause.IsActive(stored, s.TakenAtUtc, hardcore: false)
             ? CheckResult.Pass(id, $"remote control is paused for about {Math.Max(1, (int)Math.Ceiling((stored - s.TakenAtUtc).TotalHours))} more hour(s)")
             : CheckResult.Pass(id, "the stored safeword pause has ended");
+    }
+
+    /// <summary>07-A1: with no Call pending, nothing of a Call is left on (a landing grace aside, for up to 60 s).</summary>
+    private static CheckResult CallIdleState(SessionSnapshot s)
+    {
+        const string id = "X-call-idle";
+        if (s.CallIdle is not { } call)
+            return CheckResult.Skip(id, "the Call state wasn't read");
+        if (call.CallActive)
+            return CheckResult.Skip(id, "a Call is being answered");
+        if (call.LandingGrace)
+            return CheckResult.Info(id, "a finished Call keeps the bypass until the doll has landed (at most 60 s)");
+        if (call.Bypass || call.InputMute)
+            return CheckResult.Fail(id, $"no Call is pending, but the Call {(call.Bypass && call.InputMute ? "bypass and input mute are" : call.Bypass ? "bypass is" : "input mute is")} still on");
+        return CheckResult.Pass(id, "no Call pending: the Call bypass and input mute are off");
     }
 
     private static CheckResult FirstConnect(SessionSnapshot s)

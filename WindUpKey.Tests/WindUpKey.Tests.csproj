@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
     Dalamud-free tests for the plugin's relay identity, sync, unpair-queue, wire-limit and self-test code, and the rules
-    behind issue 06's review fixes. Not part of the plugin build or its packaging:
+    behind issue 06's review fixes and issue 07's Call safety. Not part of the plugin build or its packaging:
     nothing references this project, and deploy/Pack-Plugin.ps1 builds only WindUpKey/WindUpKey.csproj.
     Run with: dotnet test WindUpKey.Tests
   -->
@@ -17,6 +17,8 @@
     <GenerateProgramFile>false</GenerateProgramFile>
     <!-- 04-D1: the self-test units are compiled into the plugin only under WINDUP_TESTING; here they always are. -->
     <DefineConstants>$(DefineConstants);WINDUP_SELFTEST_UNITS</DefineConstants>
+    <!-- 07: the Call rules are compiled into the plugin only under WINDUP_TESTING (Call is Testing-only); here they always are. -->
+    <DefineConstants>$(DefineConstants);WINDUP_CALL_UNITS</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -56,6 +58,16 @@
     <Compile Include="..\WindUpKey\Services\EmoteCancelPlan.cs" Link="Plugin\EmoteCancelPlan.cs" />
     <Compile Include="..\WindUpKey\Services\LockEmoteRule.cs" Link="Plugin\LockEmoteRule.cs" />
     <Compile Include="..\WindUpKey\Sources\CommendationTracker.cs" Link="Plugin\CommendationTracker.cs" />
+    <!-- 07 Part A: the Call's Dalamud-free safety rules (CallTravelService and RelayClient need Dalamud). -->
+    <Compile Include="..\WindUpKey\Services\CallLockPolicy.cs" Link="Plugin\CallLockPolicy.cs" />
+    <Compile Include="..\WindUpKey\Services\CallAckGate.cs" Link="Plugin\CallAckGate.cs" />
+    <Compile Include="..\WindUpKey\Services\CallDeadlines.cs" Link="Plugin\CallDeadlines.cs" />
+    <Compile Include="..\WindUpKey\Services\PendingCallBook.cs" Link="Plugin\PendingCallBook.cs" />
+    <Compile Include="..\WindUpKey\Services\CallStuckDetector.cs" Link="Plugin\CallStuckDetector.cs" />
+    <Compile Include="..\WindUpKey\Services\CallRequestRules.cs" Link="Plugin\CallRequestRules.cs" />
+    <Compile Include="..\WindUpKey\Services\HousingYesnoMatcher.cs" Link="Plugin\HousingYesnoMatcher.cs" />
+    <Compile Include="..\WindUpKey\Services\CallLogRules.cs" Link="Plugin\CallLogRules.cs" />
+    <Compile Include="..\WindUpKey\Services\NoticeThrottle.cs" Link="Plugin\NoticeThrottle.cs" />
     <!-- The self-test's Dalamud-free units (04 Architecture); its thin adapters (SelfTestHost, SelfTestController) need Dalamud. -->
     <Compile Include="..\WindUpKey\SelfTest\*.cs" LinkBase="Plugin\SelfTest" />
     <ProjectReference Include="..\WindUpKey.Protocol\WindUpKey.Protocol.csproj" />

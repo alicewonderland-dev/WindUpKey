@@ -2,15 +2,18 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Types;
+using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Ipc.Exceptions;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
+using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
 using WindUpKey.Protocol;
@@ -50,6 +53,12 @@ public sealed class CallTravelService : IDisposable
     private static readonly TimeSpan MountGrace = TimeSpan.FromSeconds(12);
     /// <summary>Short retry guard for entrance targeting/interact; confirmation is checked every tick.</summary>
     private static readonly TimeSpan HouseEnterAttemptCooldown = TimeSpan.FromMilliseconds(250);
+    /// <summary>After our own Entrance interaction, wait this long for its Yes/No before interacting again.</summary>
+    private const long HouseEnterConfirmWaitMs = 4_000;
+    private const string CallExpiredEcho = "Your owner's Call expired.";
+    private const string CallStuckEcho = "Couldn't reach your owner; the Call was stopped.";
+    private const string ApartmentConfirmHint =
+        "Press Yes to enter your owner's apartment (Wind-Up Key can't confirm it in this client language).";
 
     // Event object names for private house doors (Lifestream Lang.Entrance).
     private static readonly string[] HouseEntranceNames =
@@ -61,17 +70,6 @@ public sealed class CallTravelService : IDisposable
         "Eingang",
         "Entrée",
         "주택으로 들어가기",
-    ];
-
-    private static readonly string[] HouseEnterConfirmText =
-    [
-        "Enter the estate hall?",
-        "「ハウス」へ入りますか？",
-        "要进入这间房屋吗？",
-        "要進入這間房屋嗎？",
-        "Das Gebäude betreten?",
-        "Entrer dans la maison ?",
-        "'주택'으로 들어가시겠습니까?",
     ];
 
     // Lifestream ResidentialAethernet.ApartmentSubdivisionAetherytes — used to hop main→subdivision.
@@ -98,6 +96,17 @@ public sealed class CallTravelService : IDisposable
     private readonly CallPromptWindow _prompt;
     private readonly Func<CallAckPayload, Task> _sendAck;
     private readonly Func<CallResultPayload, Task> _sendResult;
+    /// <summary>07-A9: <c>ConsentService.CanReceiveCallFromKey</c>, re-checked every tick.</summary>
+    private readonly Func<string, bool> _canReceiveCallFromKey;
+    /// <summary>Monotonic milliseconds (<c>Environment.TickCount64</c>) for the 07 rules.</summary>
+    private readonly Func<long> _clock;
+    private readonly ICallSheetFacts _sheets;
+    private readonly CallLandingGrace _landing;
+    private readonly CallAckGate _ackGate;
+    private readonly CallDeadlines _deadlines;
+    private readonly CallStuckDetector _stuck;
+    /// <summary>07-A11, 07-A15: vnav's current waypoint for the stuck detector, and whether its IPC is missing this Call.</summary>
+    private readonly CallWaypointReader _waypoints;
 
     private ICallGateSubscriber<bool>? _lsIsBusy;
     private ICallGateSubscriber<object>? _lsAbort;
@@ -114,6 +123,10 @@ public sealed class CallTravelService : IDisposable
     private ICallGateSubscriber<bool>? _vnavPathRunning;
     private ICallGateSubscriber<bool>? _vnavPathfindInProgress;
     private ICallGateSubscriber<object>? _vnavPathStop;
+    /// <summary>07-A11: vnav's waypoint count, polled each pathing tick (vnavmesh 1.2.3.14 and later).</summary>
+    private ICallGateSubscriber<int>? _vnavNumWaypoints;
+    /// <summary>07-A11: vnav's waypoints; it allocates, so it is read only when the count changes.</summary>
+    private ICallGateSubscriber<List<Vector3>>? _vnavListWaypoints;
 
     private bool _disposed;
     private bool _ipcBound;
@@ -129,38 +142,47 @@ public sealed class CallTravelService : IDisposable
     /// state changes to the framework tick instead of performing native work while ImGui is drawing.
     /// </summary>
     private bool _acceptRequested;
+    /// <summary>07-A9: the Debug tab's Store and Recall, raised from Draw and run on the next tick.</summary>
+    private bool _storeDebugRequested;
+    private bool _recallDebugRequested;
     private bool _houseEntrancePathStarted;
-    private bool _awaitingHouseEnterConfirm;
+    /// <summary>Where the current door approach is pathing to (the stuck detector's target, 07-A4).</summary>
+    private Vector3? _houseEntranceDest;
+    /// <summary>
+    /// 07-A4: an indoor Call is walking to the door (set by the entry step). 07-A15: it holds across the entry step's
+    /// throttled ticks and is cleared only where she really isn't approaching (in transit, off the ward, at the door
+    /// interacting or confirming, dismounting, inside) or the phase changes.
+    /// </summary>
+    private bool _doorApproachActive;
     private bool _pathingSeenBusy;
+    /// <summary>07-A1: the input mute as last applied by <see cref="ApplyLockPolicy"/>.</summary>
+    private bool _muteOn;
+    private bool _apartmentHintShown;
+    /// <summary>07-A10: the last "yesno: not confirmed" detail logged; it is logged again only when it changes.</summary>
+    private string? _lastYesnoIgnoredDetail;
     private DateTimeOffset _lastMountAttemptUtc;
     private DateTimeOffset _lastHouseEnterAttemptUtc;
-    private DateTimeOffset _houseEnterInteractedUtc;
+    /// <summary>07-A6: when this Call last interacted with an Entrance itself (monotonic ms), or null.</summary>
+    private long? _houseEnterInteractedMs;
+    /// <summary>07-A6: when <c>MansionSelectRoom</c> was last visible during an apartment Call (monotonic ms), or null.</summary>
+    private long? _selectRoomSeenMs;
     private DateTimeOffset _lastTeleportRetryUtc;
     private DateTimeOffset? _pathStartDeadlineUtc;
     private DateTimeOffset? _mountDeadlineUtc;
     private bool _localDebugCall;
     private CallPayload? _debugStoredPoint;
     private DateTimeOffset _stepStartedUtc;
-    private TravelPhase _phase = TravelPhase.Idle;
+    /// <summary>07-A1: changed only by <see cref="SetPhase"/>.</summary>
+    private CallPhase _phase = CallPhase.Idle;
     private string? _lastCallDebugKey;
     private DateTimeOffset _lastCallDebugUtc;
-
-    private enum TravelPhase
-    {
-        Idle,
-        WaitingGates,
-        WaitingAccept,
-        ChangingWorld,
-        Teleporting,
-        Pathing,
-    }
 
     private sealed class PendingCall
     {
         public required string RequestId { get; init; }
         public required string OwnerKey { get; init; }
+        /// <summary>07-A5 (K1): the payload's WorldName is never kept; travel resolves the name from this id.</summary>
         public required uint WorldId { get; init; }
-        public required string WorldName { get; init; }
         public required uint TerritoryId { get; init; }
         public required Vector3 Position { get; init; }
         public int HousingCity { get; init; }
@@ -189,7 +211,9 @@ public sealed class CallTravelService : IDisposable
         WindTimerService timer,
         CallPromptWindow prompt,
         Func<CallAckPayload, Task> sendAck,
-        Func<CallResultPayload, Task> sendResult)
+        Func<CallResultPayload, Task> sendResult,
+        Func<string, bool> canReceiveCallFromKey,
+        Func<long>? clock = null)
     {
         _pi = pi;
         _clientState = clientState;
@@ -205,6 +229,18 @@ public sealed class CallTravelService : IDisposable
         _prompt = prompt;
         _sendAck = sendAck;
         _sendResult = sendResult;
+        _canReceiveCallFromKey = canReceiveCallFromKey;
+        _clock = clock ?? (() => Environment.TickCount64);
+        _sheets = new LuminaCallSheets(data);
+        _landing = new CallLandingGrace(_clock);
+        _ackGate = new CallAckGate(_clock);
+        _deadlines = new CallDeadlines(_clock);
+        _stuck = new CallStuckDetector(_clock);
+        // 07-A15: an older vnavmesh has no waypoint IPC; IpcNotReadyError says so, and the reader remembers it.
+        _waypoints = new CallWaypointReader(
+            () => _vnavNumWaypoints?.InvokeFunc(),
+            () => _vnavListWaypoints?.InvokeFunc(),
+            ex => ex is IpcNotReadyError);
 
         _prompt.OnAccept = OnPromptAccept;
         BindIpc();
@@ -213,6 +249,9 @@ public sealed class CallTravelService : IDisposable
     public bool IsTravelReady => ProbeTravelReady();
 
     public bool HasActiveCall => _pending is not null;
+
+    /// <summary>07-A1: a finished Call still keeps the bypass until she has landed (the self-test's X-call-idle).</summary>
+    public bool IsLandingGraceActive => _landing.IsActive;
 
     /// <summary>True when <see cref="TryStoreDebugPoint"/> has captured a recall target this session.</summary>
     public bool HasDebugStoredPoint => _debugStoredPoint is not null;
@@ -224,20 +263,46 @@ public sealed class CallTravelService : IDisposable
         _disposed = true;
         _prompt.OnAccept = null;
         _prompt.IsOpen = false;
-        CancelInternal(sendResult: false);
+        // Unloading: nothing is left on, not even a landing grace.
+        CancelInternal(landingGrace: false);
     }
 
     public void CancelActiveCall()
     {
         if (_pending is null)
             return;
-        _ = FinishAsync(CallResultStatuses.Cancelled, "Call cancelled.");
+        Forget(FinishAsync(CallResultStatuses.Cancelled, "Call cancelled."), "cancel result");
+    }
+
+    /// <summary>
+    /// 07-A9: the Debug tab's Store, from ConfigWindow's Draw. Only sets a flag: the next tick stores the point, as it
+    /// reads housing state and the recall runs IPC and <c>SyncLockState</c>.
+    /// </summary>
+    public void RequestStoreDebugPoint() => _storeDebugRequested = true;
+
+    /// <summary>07-A9: the Debug tab's Recall, from ConfigWindow's Draw; run on the next tick.</summary>
+    public void RequestRecallDebugPoint() => _recallDebugRequested = true;
+
+    /// <summary>Framework thread: runs a Store or Recall raised from the Debug tab since the last tick.</summary>
+    private void TickDebugRequests()
+    {
+        if (_storeDebugRequested)
+        {
+            _storeDebugRequested = false;
+            TryStoreDebugPoint();
+        }
+
+        if (_recallDebugRequested)
+        {
+            _recallDebugRequested = false;
+            TryRecallDebugPoint();
+        }
     }
 
     /// <summary>
     /// Debug: snapshot the local player's current call destination (position + housing ward/division).
     /// </summary>
-    public bool TryStoreDebugPoint()
+    private bool TryStoreDebugPoint()
     {
         if (_disposed)
             return false;
@@ -248,7 +313,6 @@ public sealed class CallTravelService : IDisposable
             return false;
         }
 
-        var world = player.CurrentWorld.ValueNullable;
         var territoryId = _clientState.TerritoryType;
         var stored = new CallPayload
         {
@@ -256,7 +320,6 @@ public sealed class CallTravelService : IDisposable
             From = _config.PairingKey,
             To = _config.PairingKey,
             WorldId = player.CurrentWorld.RowId,
-            WorldName = world?.Name.ToString() ?? string.Empty,
             TerritoryId = territoryId,
             X = player.Position.X,
             Y = player.Position.Y,
@@ -287,10 +350,10 @@ public sealed class CallTravelService : IDisposable
     }
 
     /// <summary>
-    /// Debug: start Call travel to the last stored point (local only — no relay).
-    /// No-op when nothing has been stored.
+    /// Debug: start Call travel to the last stored point (local only — no relay), through the same
+    /// destination rules as an owner's Call (07-A5). No-op when nothing has been stored.
     /// </summary>
-    public bool TryRecallDebugPoint()
+    private bool TryRecallDebugPoint()
     {
         if (_disposed || _debugStoredPoint is null)
             return false;
@@ -301,13 +364,20 @@ public sealed class CallTravelService : IDisposable
             return false;
         }
 
+        // 07-A10: refused during the safeword pause, before RequestAsync aborts her own travel.
+        if (_timer.IsRemoteControlPaused)
+        {
+            PluginChat.PrintError(_chat, "Call recall isn't available while remote control is paused.");
+            return false;
+        }
+
         var payload = CloneCallPayload(_debugStoredPoint);
         payload.RequestId = Guid.NewGuid().ToString("N");
         payload.From = PairingKeyUtil.IsValid(_config.PairingKey)
             ? _config.PairingKey
             : "DEBUGCALL";
         payload.To = payload.From;
-        _ = RequestAsync(payload, localDebug: true);
+        Forget(RequestAsync(payload, localDebug: true), "debug recall");
         return true;
     }
 
@@ -321,9 +391,25 @@ public sealed class CallTravelService : IDisposable
         if (_pending is not null)
         {
             ReportEdgeCaseError(
-                "request rejected: already answering another call"
-                + $" | incoming terr={payload.TerritoryId} world={payload.WorldId}");
+                "request rejected: already answering another call",
+                $"incoming terr={payload.TerritoryId} world={payload.WorldId}");
             await SendResultOrLocalAsync(payload, CallResultStatuses.Failed, "Already answering another call.", localDebug)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        // 07-A5: the destination's numbers are checked against the sheets before anything else (debug recall too).
+        // 07-A10: her territory too, so a same-zone Call in an aethernet-only city needs no aetheryte there.
+        var validation = CallRequestRules.Validate(
+            payload,
+            new CallDollContext(_objects.LocalPlayer?.CurrentWorld.RowId ?? 0, _clientState.TerritoryType),
+            _sheets);
+        if (!validation.Ok)
+        {
+            ReportEdgeCaseError(
+                $"request rejected: {validation.Reason}",
+                $"terr={payload.TerritoryId} world={payload.WorldId}");
+            await SendResultOrLocalAsync(payload, CallResultStatuses.Failed, $"Call refused: {validation.Reason}.", localDebug)
                 .ConfigureAwait(false);
             return;
         }
@@ -334,19 +420,9 @@ public sealed class CallTravelService : IDisposable
         if (!hasDeferredGameGate && !IsTravelReady)
         {
             ReportEdgeCaseError(
-                "request rejected: travel plugins unavailable"
-                + $" | terr={payload.TerritoryId} world={payload.WorldId}");
+                "request rejected: travel plugins unavailable",
+                $"terr={payload.TerritoryId} world={payload.WorldId}");
             await SendResultOrLocalAsync(payload, CallResultStatuses.Failed, "Lifestream and vnavmesh are required.", localDebug)
-                .ConfigureAwait(false);
-            return;
-        }
-
-        if (!SameDataCenter(payload.WorldId))
-        {
-            ReportEdgeCaseError(
-                "request rejected: cross-data-center travel"
-                + $" | terr={payload.TerritoryId} world={payload.WorldId}");
-            await SendResultOrLocalAsync(payload, CallResultStatuses.Failed, "Cannot travel across data centers.", localDebug)
                 .ConfigureAwait(false);
             return;
         }
@@ -388,8 +464,6 @@ public sealed class CallTravelService : IDisposable
             RequestId = payload.RequestId,
             OwnerKey = ownerKey,
             WorldId = payload.WorldId,
-            // 03-D11: an over-long remote world name is ignored (empty), so travel falls back to WorldId → name.
-            WorldName = RemoteText.WholeOrEmpty(payload.WorldName, WireLimits.ShortField),
             TerritoryId = payload.TerritoryId,
             Position = new Vector3(payload.X, payload.Y, payload.Z),
             HousingCity = payload.HousingCity,
@@ -406,34 +480,49 @@ public sealed class CallTravelService : IDisposable
         _housingGoRetryAttempted = false;
         _teleportProgressSeen = false;
         _houseEntrancePathStarted = false;
-        _awaitingHouseEnterConfirm = false;
+        _houseEntranceDest = null;
+        _doorApproachActive = false;
         _pathingSeenBusy = false;
+        _apartmentHintShown = false;
+        _lastYesnoIgnoredDetail = null;
         _lastMountAttemptUtc = default;
         _lastHouseEnterAttemptUtc = default;
-        _houseEnterInteractedUtc = default;
+        _houseEnterInteractedMs = null;
+        _selectRoomSeenMs = null;
         _lastTeleportRetryUtc = default;
         _pathStartDeadlineUtc = null;
         _mountDeadlineUtc = null;
         _weOwnTravel = false;
         _lastCallDebugKey = null;
-        _phase = TravelPhase.WaitingGates;
+        _ackGate.Reset();
+        _deadlines.Start();
+        ResetStuckDetection(newCall: true);
+        // 07-A1: no bypass here. It goes on in BeginTravel, so an unwound doll stays locked while the Call waits for a
+        // duty, combat, crafting or her answer.
+        SetPhase(CallPhase.WaitingGates);
         // Prior cancel/fail must not leave Lifestream mid-task or Accept stays dead.
         AbortCallAutomation();
-        _timer.SetCallTravelBypass(true);
 
         DebugCall($"accepted request → {FormatPendingSummary(_pending)}", throttle: false);
 
         if (localDebug)
             PluginChat.Print(_chat, "Debug call recall started.", PluginChat.Yellow);
 
-        var status = ClassifyGateStatus();
-        await AckAsync(status).ConfigureAwait(false);
+        if (_ackGate.Offer(ClassifyGateStatus()) is { } status)
+            await AckAsync(status).ConfigureAwait(false);
     }
 
     public void Tick()
     {
-        if (_disposed || _pending is null)
+        if (_disposed)
             return;
+
+        TickDebugRequests();
+        if (_pending is null)
+        {
+            TickLandingGrace();
+            return;
+        }
 
         try
         {
@@ -441,30 +530,46 @@ public sealed class CallTravelService : IDisposable
             // Treating that as logout cancelled the Call the moment the doll landed.
             if (!_clientState.IsLoggedIn)
             {
-                _ = FinishAsync(CallResultStatuses.Cancelled, "Logged out.");
+                Forget(FinishAsync(CallResultStatuses.Cancelled, "Logged out."), "logout result");
                 return;
             }
+
+            // 07-A9: unpaired, no longer allowed to call her, or her safeword paused remote control: silently cancelled.
+            if (ConsentLost())
+            {
+                DebugCall(CallLogRules.Forced("cancelled: consent lost", _phase, PendingKind()), throttle: false, force: true);
+                Forget(FinishAsync(CallResultStatuses.Cancelled, "Call cancelled."), "consent result");
+                return;
+            }
+
+            ApplyLockPolicy();
+            FlushAck();
+            if (TickDeadlines())
+                return;
 
             if (_objects.LocalPlayer is null)
                 return;
 
+            TrackSelectRoom();
             SyncLifestreamDrivingRmi();
+            if (TickStuckDetection())
+                return;
 
             switch (_phase)
             {
-                case TravelPhase.WaitingGates:
+                case CallPhase.WaitingGates:
                     TickWaitingGates();
                     break;
-                case TravelPhase.WaitingAccept:
+                case CallPhase.WaitingAccept:
                     TickWaitingAccept();
                     break;
-                case TravelPhase.ChangingWorld:
+                case CallPhase.ChangingWorld:
                     TickChangingWorld();
                     break;
-                case TravelPhase.Teleporting:
+                case CallPhase.Teleporting:
                     TickTeleporting();
                     break;
-                case TravelPhase.Pathing:
+                case CallPhase.Pathing:
                     _timer.SetCallTravelMuteDestination(_pending.Position);
                     TickPathing();
                     break;
@@ -473,8 +578,215 @@ public sealed class CallTravelService : IDisposable
         catch (Exception ex)
         {
             _log.Warning(ex, "Call travel tick failed");
-            EnterFailedPrompt($"Unhandled tick exception: {ex}");
+            try
+            {
+                EnterFailedPrompt("Unhandled tick exception.", ex.GetType().Name);
+            }
+            catch (Exception inner)
+            {
+                // 07-A1: the exception path still restores the lock and the mute.
+                _log.Warning(inner, "Call travel failed prompt failed");
+                CancelInternal();
+            }
         }
+    }
+
+    /// <summary>
+    /// 07-A1: the one place the phase changes. It applies <see cref="CallLockPolicy"/> (bypass and mute only while
+    /// travelling, a landing grace when a travel phase ends in the air) and drops a click from before the change.
+    /// </summary>
+    private void SetPhase(CallPhase next)
+    {
+        var previous = _phase;
+        if (CallLockPolicy.IsTravelPhase(next))
+            _landing.End();
+        else if (CallLockPolicy.IsTravelPhase(previous))
+            _landing.Begin(IsAirborne());
+
+        _phase = next;
+        // 07-A15: a door approach belongs to the Teleporting step it started in.
+        if (previous != next)
+            _doorApproachActive = false;
+        // A stale accept: Accept clicked, then a duty or zone load in the same tick, must not accept the next prompt
+        // by itself. (Part B clears its decline flag here too.)
+        _acceptRequested = false;
+        ApplyLockPolicy();
+        if (previous != next)
+            DebugCall($"phase {previous} → {next}", throttle: false);
+    }
+
+    /// <summary>07-A1: sets the bypass and the mute for the current phase and landing grace (each tick and on each change).</summary>
+    private void ApplyLockPolicy()
+    {
+        var landing = _landing.IsActive && _landing.Update(IsAirborne());
+        var state = CallLockPolicy.For(_phase, landing);
+        // The bypass first: turning it on runs SyncLockState, which must unlock before any travel call.
+        _timer.SetCallTravelBypass(state.Bypass);
+        if (state.Mute == _muteOn)
+            return;
+
+        _muteOn = state.Mute;
+        _timer.SetCallTravelInputMute(state.Mute);
+    }
+
+    /// <summary>No Call left, but a landing grace may still hold the bypass: it ends on landing or after 60 s (07-A1).</summary>
+    private void TickLandingGrace()
+    {
+        // 07-A10: the release is decided by the Dalamud-free rule (unit-tested).
+        if (_landing.ReleaseBypass(IsAirborne()))
+            _timer.SetCallTravelBypass(false);
+    }
+
+    private bool IsAirborne() => _condition[ConditionFlag.InFlight] || _condition[ConditionFlag.Diving];
+
+    /// <summary>07-A9: the Call's consent no longer holds (checked every tick, after it was accepted on arrival).</summary>
+    private bool ConsentLost()
+    {
+        if (_pending is null)
+            return false;
+        // Second line of defence for 06-B1: the safeword command cancels the Call itself, right after pausing.
+        if (!_config.IsDoll || _timer.IsRemoteControlPaused)
+            return true;
+        // The debug recall is her own, with no owner to consent.
+        return !_localDebugCall && !_canReceiveCallFromKey(_pending.OwnerKey);
+    }
+
+    /// <summary>07-A3 (D7): ends a Call past its wait, failed-prompt or overall limit, with a chat line. True when it ended.</summary>
+    private bool TickDeadlines()
+    {
+        var kind = CallLockPolicy.IsTravelPhase(_phase)
+            ? CallWaitKind.Traveling
+            : _phase == CallPhase.WaitingAccept && _prompt.Reason == CallPromptReason.Failed
+                ? CallWaitKind.FailedPrompt
+                : CallWaitKind.Waiting;
+        var expiry = _deadlines.Check(kind, IsBetweenAreas());
+        if (expiry == CallExpiry.None)
+            return false;
+
+        DebugCall(CallLogRules.Forced($"expired: {expiry}", _phase, PendingKind()), throttle: false, force: true);
+        PluginChat.Print(_chat, CallExpiredEcho, PluginChat.Yellow);
+        Forget(FinishAsync(CallResultStatuses.Failed, "Call expired."), "expiry result");
+        return true;
+    }
+
+    /// <summary>
+    /// 07-A4 (D6), 07-D14: feeds the stuck detector while pathing (to the owner, or to the door of an indoor Call) and
+    /// stops a Call that makes no headway, in Hardcore too. True when it ended.
+    /// </summary>
+    private bool TickStuckDetection()
+    {
+        if (_pending is null || _objects.LocalPlayer is not { } player)
+            return false;
+
+        if (!CallLockPolicy.IsTravelPhase(_phase))
+        {
+            ResetStuckDetection(newCall: false);
+            return false;
+        }
+
+        Vector3 target;
+        if (_phase == CallPhase.Pathing)
+            target = _pending.Position;
+        else if (_phase == CallPhase.Teleporting && _doorApproachActive && _houseEntranceDest is { } door)
+            target = door;
+        else
+        {
+            // A travel step that isn't pathing (world change, teleport, mount, mesh build): its time doesn't count.
+            _stuck.Pause();
+            return false;
+        }
+
+        // 07-D14 / 07-A11: headway is measured to vnav's next waypoint (the final target without one), in 3D while
+        // flying or diving and XZ on the ground; the final target is the reset key and drives the door pause.
+        var position = player.Position;
+        var waypointIpcMissing = _waypoints.Missing;
+        var node = _waypoints.Read(target, out var waypointCount, out var waypointsAvailable);
+        // 07-A15: an older vnavmesh (no waypoint IPC) keeps only the can't-path check and the step timeout; said once a Call.
+        if (_waypoints.Missing && !waypointIpcMissing)
+            DebugCall("stuck: vnavmesh has no waypoint IPC (older than 1.2.3.14); no-progress check off", throttle: false);
+        var airborne = IsAirborne();
+        var distance = CallStuckDetector.ProgressDistance(position, node, airborne);
+        var paused = IsBetweenAreas()
+                     || IsMountTransition()
+                     || IsPlayerCasting()
+                     // At the door, interacting and its Yes/No take over.
+                     || (_phase == CallPhase.Teleporting && Vector3.Distance(position, target) <= HouseEntranceInteractYalms);
+        var reason = _stuck.Observe(
+            target,
+            node,
+            waypointCount,
+            waypointsAvailable,
+            distance,
+            airborne,
+            IsVnavPathRunning(),
+            IsVnavPathfindPending(),
+            paused);
+        if (reason == CallStuckReason.None)
+            return false;
+
+        DebugCall(CallLogRules.Forced($"stuck: {reason}", _phase, PendingKind()), throttle: false, force: true);
+        // Ours only: never another plugin's travel.
+        if (_weOwnTravel)
+            AbortCallAutomation();
+        PluginChat.Print(_chat, CallStuckEcho, PluginChat.Yellow);
+        Forget(FinishAsync(CallResultStatuses.Failed, "Couldn't reach the destination."), "stuck result");
+        return true;
+    }
+
+    /// <summary>
+    /// 07-D14: forget the stuck detector's target and the cached vnav waypoint (a waiting phase, a new Call, a cancel).
+    /// 07-A15: a new Call also tries vnav's waypoint IPC again.
+    /// </summary>
+    private void ResetStuckDetection(bool newCall)
+    {
+        _stuck.Reset();
+        _waypoints.Reset(newCall);
+    }
+
+    private bool IsMountTransition() =>
+        _condition[ConditionFlag.Mounting]
+        || _condition[ConditionFlag.Mounting71]
+        || _condition[ConditionFlag.MountOrOrnamentTransition];
+
+    /// <summary>07-A6: when the apartment room list was last visible (apartment Calls only).</summary>
+    private void TrackSelectRoom()
+    {
+        if (_pending is not { HousingIsApartment: true })
+            return;
+
+        var addon = _gameGui.GetAddonByName("MansionSelectRoom");
+        if (!addon.IsNull && addon.IsVisible)
+            _selectRoomSeenMs = _clock();
+    }
+
+    private string PendingKind() =>
+        _pending is null
+            ? "none"
+            : CallRequestRules.CoarseKind(_pending.IsHousingCall, _pending.HousingIndoor, _pending.HousingIsApartment);
+
+    /// <summary>
+    /// 07-A9: a send nobody awaits (from the tick or a UI callback). A failure is logged at Debug, never left
+    /// unobserved.
+    /// </summary>
+    private void Forget(Task task, string what) =>
+        _ = task.ContinueWith(
+            t => _log.Debug(t.Exception?.GetBaseException(), "Call {What} failed", what),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+    /// <summary>07-A2: an ack through the gate (only a changed status, at most one every 2 s).</summary>
+    private void Ack(string status)
+    {
+        if (_ackGate.Offer(status) is { } send)
+            Forget(AckAsync(send), "ack");
+    }
+
+    /// <summary>07-A2: an ack the gate held back, once its floor has passed.</summary>
+    private void FlushAck()
+    {
+        if (_ackGate.Flush() is { } held)
+            Forget(AckAsync(held), "ack");
     }
 
     private void TickWaitingGates()
@@ -485,30 +797,31 @@ public sealed class CallTravelService : IDisposable
             {
                 _craftNotified = true;
                 PluginChat.Print(_chat, PresenceRequiredEcho(), PluginChat.Yellow);
-                _ = AckAsync(CallAckStatuses.Crafting);
+                Ack(CallAckStatuses.Crafting);
             }
             return;
         }
 
+        // 07-A2: every tick of a duty or zone load lands here; the gate sends the status once.
         if (IsInInstance())
         {
-            _ = AckAsync(CallAckStatuses.Instance);
+            Ack(CallAckStatuses.Instance);
             return;
         }
 
         if (IsInCombat())
         {
             ShowPrompt(CallPromptReason.Combat, canAccept: false);
-            _phase = TravelPhase.WaitingAccept;
-            _ = AckAsync(CallAckStatuses.Combat);
+            SetPhase(CallPhase.WaitingAccept);
+            Ack(CallAckStatuses.Combat);
             return;
         }
 
         if (IsExternallyBusy())
         {
             ShowPrompt(CallPromptReason.Busy, canAccept: false);
-            _phase = TravelPhase.WaitingAccept;
-            _ = AckAsync(CallAckStatuses.Busy);
+            SetPhase(CallPhase.WaitingAccept);
+            Ack(CallAckStatuses.Busy);
             return;
         }
 
@@ -523,8 +836,7 @@ public sealed class CallTravelService : IDisposable
         if (IsCrafting() || IsInInstance())
         {
             _prompt.IsOpen = false;
-            _timer.SetCallTravelInputMute(false);
-            _phase = TravelPhase.WaitingGates;
+            SetPhase(CallPhase.WaitingGates);
             return;
         }
 
@@ -576,7 +888,7 @@ public sealed class CallTravelService : IDisposable
 
         if (IsCrafting() || IsInInstance() || IsInCombat())
         {
-            _phase = TravelPhase.WaitingGates;
+            SetPhase(CallPhase.WaitingGates);
             return;
         }
 
@@ -585,14 +897,14 @@ public sealed class CallTravelService : IDisposable
         {
             _prompt.IsOpen = true;
             _prompt.CanAccept = false;
-            _phase = TravelPhase.WaitingAccept;
+            SetPhase(CallPhase.WaitingAccept);
             return;
         }
 
         // After a failed attempt, leftover Lifestream/vnav must not bounce us back to Busy.
         if (_prompt.Reason != CallPromptReason.Failed && IsExternallyBusy())
         {
-            _phase = TravelPhase.WaitingGates;
+            SetPhase(CallPhase.WaitingGates);
             return;
         }
 
@@ -613,15 +925,17 @@ public sealed class CallTravelService : IDisposable
         _pathStartDeadlineUtc = null;
         _mountDeadlineUtc = null;
         _lastCallDebugKey = null;
-        _ = AckAsync(CallAckStatuses.Traveling);
-        // Mute input immediately, but do not steer toward the destination until local pathing —
+        var localWorld = _objects.LocalPlayer?.CurrentWorld.RowId ?? 0;
+        var changeWorld = localWorld != 0 && localWorld != _pending.WorldId;
+        // 07-A1: a travel phase before any travel call, so the bypass is on and SyncLockState has unlocked (and stood
+        // her up) first. It also mutes input, but nothing steers toward the destination until local pathing —
         // otherwise we walk housing coords through the current zone's mesh (into walls).
-        _timer.SetCallTravelInputMute(true);
+        SetPhase(changeWorld ? CallPhase.ChangingWorld : CallPhase.Teleporting);
+        Ack(CallAckStatuses.Traveling);
         PluginChat.Print(_chat, PresenceRequiredEcho(), PluginChat.Yellow);
         DebugCall($"begin travel → {FormatPendingSummary(_pending)} | {FormatLocalHousingSnapshot()}", throttle: false);
 
-        var localWorld = _objects.LocalPlayer?.CurrentWorld.RowId ?? 0;
-        if (localWorld != 0 && localWorld != _pending.WorldId)
+        if (changeWorld)
         {
             DebugCall($"change world {localWorld} → {_pending.WorldId}", throttle: false);
             if (!TryChangeWorld(_pending))
@@ -631,7 +945,6 @@ public sealed class CallTravelService : IDisposable
             }
 
             _weOwnTravel = true;
-            _phase = TravelPhase.ChangingWorld;
             _stepStartedUtc = DateTimeOffset.UtcNow;
             return;
         }
@@ -646,7 +959,7 @@ public sealed class CallTravelService : IDisposable
 
         if (DateTimeOffset.UtcNow - _stepStartedUtc > TravelStepTimeout)
         {
-            EnterFailedPrompt();
+            EnterFailedPrompt("World change timed out.");
             return;
         }
 
@@ -675,7 +988,7 @@ public sealed class CallTravelService : IDisposable
             {
                 DebugCall("start: waiting for groundsit get-up", key: "start-sit");
                 _weOwnTravel = true;
-                _phase = TravelPhase.Teleporting;
+                SetPhase(CallPhase.Teleporting);
                 _pathStartDeadlineUtc ??= DateTimeOffset.UtcNow + PathStartGrace;
                 _stepStartedUtc = DateTimeOffset.UtcNow;
                 return;
@@ -685,7 +998,7 @@ public sealed class CallTravelService : IDisposable
             {
                 DebugCall("start: waiting for leftover vnav pathfind", key: "start-vnav-pending");
                 _weOwnTravel = true;
-                _phase = TravelPhase.Teleporting;
+                SetPhase(CallPhase.Teleporting);
                 _pathStartDeadlineUtc ??= DateTimeOffset.UtcNow + PathStartGrace;
                 _stepStartedUtc = DateTimeOffset.UtcNow;
                 return;
@@ -698,7 +1011,7 @@ public sealed class CallTravelService : IDisposable
             {
                 DebugCall("start: waiting for mount", key: "start-mount");
                 _weOwnTravel = true;
-                _phase = TravelPhase.Teleporting;
+                SetPhase(CallPhase.Teleporting);
                 _stepStartedUtc = DateTimeOffset.UtcNow;
                 return;
             }
@@ -708,7 +1021,7 @@ public sealed class CallTravelService : IDisposable
                 DebugCall($"start: path start deferred | {DescribePathStartFailure()}", key: "start-path-defer");
                 // Mesh often not ready on the first tick in-zone — keep trying in Teleporting.
                 _weOwnTravel = true;
-                _phase = TravelPhase.Teleporting;
+                SetPhase(CallPhase.Teleporting);
                 _pathStartDeadlineUtc ??= DateTimeOffset.UtcNow + PathStartGrace;
                 _stepStartedUtc = DateTimeOffset.UtcNow;
                 return;
@@ -732,7 +1045,7 @@ public sealed class CallTravelService : IDisposable
             }
 
             _weOwnTravel = true;
-            _phase = TravelPhase.Teleporting;
+            SetPhase(CallPhase.Teleporting);
             _stepStartedUtc = DateTimeOffset.UtcNow;
             return;
         }
@@ -753,7 +1066,7 @@ public sealed class CallTravelService : IDisposable
         }
 
         _weOwnTravel = true;
-        _phase = TravelPhase.Teleporting;
+        SetPhase(CallPhase.Teleporting);
         _stepStartedUtc = DateTimeOffset.UtcNow;
     }
 
@@ -762,14 +1075,18 @@ public sealed class CallTravelService : IDisposable
         if (_pending is null)
             return;
 
+        // 07-A15: the door-approach flag isn't cleared here every tick. The entry step sets it while pathing to the door
+        // and leaves it alone on its 250 ms throttled ticks (14 in 15), so the stuck detector, which reads it next tick,
+        // isn't paused through a blocked approach. Each branch below that isn't approaching clears it.
+
         // Lifestream remains busy while waiting on the selected apartment's confirmation.
         // Confirm before the general busy early-return or the Call can wait here forever.
         if (_pending.IsHousingCall
             && _pending.HousingIndoor
             && _pending.HousingIsApartment
-            && IsAtHousingWard()
             && TryConfirmHousingEntranceYesno(apartment: true, out var apartmentYesnoDetail))
         {
+            _doorApproachActive = false;
             _teleportProgressSeen = true;
             DebugCall($"enter-apartment: confirmed SelectYesno ({apartmentYesnoDetail})", key: "enter-apartment-yesno");
             return;
@@ -784,6 +1101,7 @@ public sealed class CallTravelService : IDisposable
         // Aetheryte Teleport does not set Lifestream.IsBusy — only the cast + BetweenAreas.
         if (IsBetweenAreas() || IsLifestreamBusy() || IsPlayerCasting())
         {
+            _doorApproachActive = false;
             _teleportProgressSeen = true;
             DebugCall(
                 $"teleport: in transit (betweenAreas={IsBetweenAreas()} lsBusy={IsLifestreamBusy()} casting={IsPlayerCasting()}) | {FormatLocalHousingSnapshot()}",
@@ -795,6 +1113,7 @@ public sealed class CallTravelService : IDisposable
         {
             if (!IsAtHousingWard())
             {
+                _doorApproachActive = false;
                 DebugCall(
                     $"teleport: not at housing ward yet | {FormatPathGateSummary()}",
                     key: "teleport-not-ward");
@@ -817,6 +1136,7 @@ public sealed class CallTravelService : IDisposable
                         key: "teleport-wait-enter");
                     if (!IsWithinSameInstancePathRange() && TryHopToSubdivisionIfNeeded())
                     {
+                        _doorApproachActive = false;
                         _teleportProgressSeen = true;
                         return;
                     }
@@ -833,9 +1153,10 @@ public sealed class CallTravelService : IDisposable
                     return;
                 }
 
+                _doorApproachActive = false;
                 StopOurPath();
                 DebugCall("teleport: entered house — arrived (no indoor pathing)", throttle: false);
-                _ = FinishAsync(CallResultStatuses.Arrived, "Arrived at owner's house.");
+                Forget(FinishAsync(CallResultStatuses.Arrived, "Arrived at owner's house."), "arrived result");
                 return;
             }
 
@@ -960,7 +1281,7 @@ public sealed class CallTravelService : IDisposable
         if (dist <= CloseRangeYalms + ArrivedSlopYalms)
         {
             StopOurPath();
-            _ = FinishAsync(CallResultStatuses.Arrived, "Arrived near owner.");
+            Forget(FinishAsync(CallResultStatuses.Arrived, "Arrived near owner."), "arrived result");
             return;
         }
 
@@ -987,30 +1308,34 @@ public sealed class CallTravelService : IDisposable
 
         // Remount / re-settle via Teleporting; overall TravelStepTimeout still applies.
         _timer.SetCallTravelPathingPassThrough(false);
-        _phase = TravelPhase.Teleporting;
+        SetPhase(CallPhase.Teleporting);
         _pathStartDeadlineUtc = DateTimeOffset.UtcNow + PathStartGrace;
         DebugCall("pathing: retry deferred to Teleporting", key: "pathing-defer");
     }
 
-    private void EnterFailedPrompt(string? detail = null)
+    /// <summary>
+    /// A travel step failed: the failed prompt opens. <paramref name="detail"/> must be location-free (it goes in the
+    /// forced line, 07-A8); the location goes in a debug line.
+    /// </summary>
+    private void EnterFailedPrompt(string detail, string? exceptionType = null)
     {
         if (_pending is null)
             return;
 
-        DebugCall(
-            $"FAILED: {detail ?? "(no detail)"} | {FormatPendingSummary(_pending)} | {FormatPathGateSummary()}",
-            throttle: false,
-            force: true);
+        DebugCall(CallLogRules.Forced($"FAILED: {detail}", _phase, PendingKind(), exceptionType), throttle: false, force: true);
+        DebugCall($"FAILED at: {FormatPendingSummary(_pending)} | {FormatPathGateSummary()}", throttle: false);
 
         AbortCallAutomation();
         _timer.SetCallTravelPathingPassThrough(false);
         _timer.SetCallTravelLifestreamDriving(false);
         _timer.SetCallTravelCastingFlyPass(false);
-        _timer.SetCallTravelInputMute(false);
         PluginChat.Print(_chat, CallErrorEcho, PluginChat.Yellow);
         ShowPrompt(CallPromptReason.Failed, canAccept: !IsInCombat() && IsTravelReady);
-        _phase = TravelPhase.WaitingAccept;
-        _ = AckAsync(CallAckStatuses.Busy);
+        // 07-A1: out of travel, so the bypass and mute go off (after landing, when in the air): an unwound doll is
+        // locked again, and sits, while the failed prompt waits. 07-A3: the failed-prompt limit starts over.
+        SetPhase(CallPhase.WaitingAccept);
+        _deadlines.MarkFailure();
+        Ack(CallAckStatuses.Busy);
     }
 
     private void ShowPrompt(CallPromptReason reason, bool canAccept)
@@ -1042,7 +1367,7 @@ public sealed class CallTravelService : IDisposable
     {
         var pending = _pending;
         var localDebug = _localDebugCall;
-        CancelInternal(sendResult: false);
+        CancelInternal();
         if (pending is null)
             return;
 
@@ -1087,20 +1412,28 @@ public sealed class CallTravelService : IDisposable
         }).ConfigureAwait(false);
     }
 
-    private void CancelInternal(bool sendResult)
+    /// <summary>
+    /// Ends the Call: the final safety net for every exit (arrival, failure, expiry, stuck, cancel, consent lost,
+    /// logout, Dispose, the tick exception path). Nothing is left on but a landing grace's bypass (07-A1), and not even
+    /// that with <paramref name="landingGrace"/> false (unloading).
+    /// </summary>
+    private void CancelInternal(bool landingGrace = true)
     {
         AbortCallAutomation();
-        _phase = TravelPhase.Idle;
+        SetPhase(CallPhase.Idle);
+        if (!landingGrace)
+            _landing.End();
         _prompt.IsOpen = false;
         _acceptRequested = false;
-        _timer.SetCallTravelBypass(false);
+        _timer.SetCallTravelBypass(_landing.IsActive);
         _timer.SetCallTravelPathingPassThrough(false);
         _timer.SetCallTravelLifestreamDriving(false);
         _timer.SetCallTravelCastingFlyPass(false);
         _timer.SetCallTravelInputMute(false);
+        _muteOn = false;
+        ResetStuckDetection(newCall: false);
         _pending = null;
         _localDebugCall = false;
-        _ = sendResult;
     }
 
     private static CallPayload CloneCallPayload(CallPayload source) =>
@@ -1110,7 +1443,6 @@ public sealed class CallTravelService : IDisposable
             From = source.From,
             To = source.To,
             WorldId = source.WorldId,
-            WorldName = source.WorldName,
             TerritoryId = source.TerritoryId,
             X = source.X,
             Y = source.Y,
@@ -1203,22 +1535,6 @@ public sealed class CallTravelService : IDisposable
         return IsLifestreamBusy() || IsVnavBusy();
     }
 
-    private bool SameDataCenter(uint targetWorldId)
-    {
-        var localWorldId = _objects.LocalPlayer?.CurrentWorld.RowId ?? 0;
-        if (localWorldId == 0 || targetWorldId == 0)
-            return false;
-        if (localWorldId == targetWorldId)
-            return true;
-
-        var sheet = _data.GetExcelSheet<World>();
-        if (sheet is null)
-            return false;
-        if (!sheet.TryGetRow(localWorldId, out var local) || !sheet.TryGetRow(targetWorldId, out var target))
-            return false;
-        return local.DataCenter.RowId == target.DataCenter.RowId;
-    }
-
     private void BindIpc()
     {
         if (_ipcBound)
@@ -1244,6 +1560,19 @@ public sealed class CallTravelService : IDisposable
         catch (Exception ex)
         {
             _log.Debug(ex, "Call travel IPC bind failed");
+        }
+
+        // 07-A11: optional; without them the stuck detector measures to the final target.
+        try
+        {
+            _vnavNumWaypoints = _pi.GetIpcSubscriber<int>("vnavmesh.Path.NumWaypoints");
+            _vnavListWaypoints = _pi.GetIpcSubscriber<List<Vector3>>("vnavmesh.Path.ListWaypoints");
+        }
+        catch (Exception ex)
+        {
+            _vnavNumWaypoints = null;
+            _vnavListWaypoints = null;
+            _log.Debug(ex, "Call travel vnav waypoint IPC bind failed");
         }
 
         try
@@ -1307,7 +1636,7 @@ public sealed class CallTravelService : IDisposable
     /// </summary>
     private void SyncLifestreamDrivingRmi()
     {
-        var inTransitPhase = _phase is TravelPhase.ChangingWorld or TravelPhase.Teleporting;
+        var inTransitPhase = _phase is CallPhase.ChangingWorld or CallPhase.Teleporting;
         var casting = inTransitPhase && IsPlayerCasting();
         var driving = inTransitPhase && (IsLifestreamBusy() || IsBetweenAreas());
         _timer.SetCallTravelLifestreamDriving(driving);
@@ -1334,9 +1663,11 @@ public sealed class CallTravelService : IDisposable
         {
             if (_lsChangeWorldById is not null && _lsChangeWorldById.InvokeFunc(call.WorldId))
                 return true;
-            if (!string.IsNullOrWhiteSpace(call.WorldName)
+            // 07-A5 (K1): the name fallback is resolved from WorldId, never taken from the payload.
+            var worldName = ResolveWorldName(call.WorldId);
+            if (!string.IsNullOrWhiteSpace(worldName)
                 && _lsChangeWorld is not null
-                && _lsChangeWorld.InvokeFunc(call.WorldName))
+                && _lsChangeWorld.InvokeFunc(worldName))
                 return true;
         }
         catch (Exception ex)
@@ -1356,9 +1687,8 @@ public sealed class CallTravelService : IDisposable
         var apartment = call.HousingApartment > 0 ? call.HousingApartment : 1;
         var isSub = HousingCallLocation.EffectiveDivision(plot, call.HousingDivision, call.HousingIsApartment) == 2;
         var propertyType = call.HousingIsApartment ? 1 : 0; // House=0, Apartment=1
-        var worldName = !string.IsNullOrWhiteSpace(call.WorldName)
-            ? call.WorldName
-            : ResolveWorldName(call.WorldId);
+        // 07-A5 (K1): resolved from WorldId; the payload's WorldName is never used.
+        var worldName = ResolveWorldName(call.WorldId);
         var cityName = ResidentialCityName(call.HousingCity);
         var plotOrApt = call.HousingIsApartment ? apartment : plot;
 
@@ -1666,7 +1996,7 @@ public sealed class CallTravelService : IDisposable
         _weOwnTravel = true;
         _pathingSeenBusy = false;
         _pathStartDeadlineUtc = DateTimeOffset.UtcNow + PathStartGrace;
-        _phase = TravelPhase.Pathing;
+        SetPhase(CallPhase.Pathing);
         _stepStartedUtc = DateTimeOffset.UtcNow;
         return true;
     }
@@ -2012,6 +2342,8 @@ public sealed class CallTravelService : IDisposable
 
         if (_pending.HousingIsApartment)
         {
+            // Lifestream walks an apartment Call; there's no door approach of ours.
+            _doorApproachActive = false;
             if (TryConfirmHousingEntranceYesno(apartment: true, out var apartmentYesnoDetail))
             {
                 _teleportProgressSeen = true;
@@ -2027,28 +2359,25 @@ public sealed class CallTravelService : IDisposable
         // Always prefer confirming an open estate-hall prompt (do not re-interact over it).
         if (TryConfirmHousingEntranceYesno(apartment: false, out var yesnoDetail))
         {
-            _awaitingHouseEnterConfirm = false;
+            _doorApproachActive = false;
+            _houseEnterInteractedMs = null;
             _teleportProgressSeen = true;
             DebugCall($"enter-house: confirmed SelectYesno ({yesnoDetail})", key: "enter-yesno");
             return;
         }
 
-        if (_awaitingHouseEnterConfirm)
+        // Give our own interaction's Yes/No time to open before interacting again; a dialog that never matched or
+        // never appeared allows another interact afterwards.
+        if (_houseEnterInteractedMs is { } interacted && _clock() - interacted < HouseEnterConfirmWaitMs)
         {
-            var waited = DateTimeOffset.UtcNow - _houseEnterInteractedUtc;
-            if (waited < TimeSpan.FromSeconds(4))
-            {
-                DebugCall(
-                    $"enter-house: waiting for SelectYesno ({yesnoDetail})",
-                    key: "enter-wait-yesno");
-                return;
-            }
-
-            // Dialog never matched / never appeared — allow another interact.
-            _awaitingHouseEnterConfirm = false;
-            DebugCall($"enter-house: SelectYesno wait timed out ({yesnoDetail})", throttle: false);
+            _doorApproachActive = false;
+            DebugCall(
+                $"enter-house: waiting for SelectYesno ({yesnoDetail})",
+                key: "enter-wait-yesno");
+            return;
         }
 
+        // 07-A15: a throttled tick changes nothing, so the door-approach flag stays as the last attempt left it.
         var now = DateTimeOffset.UtcNow;
         if (now - _lastHouseEnterAttemptUtc < HouseEnterAttemptCooldown)
             return;
@@ -2063,6 +2392,7 @@ public sealed class CallTravelService : IDisposable
             || _condition[ConditionFlag.Mounting]
             || _condition[ConditionFlag.MountOrOrnamentTransition])
         {
+            _doorApproachActive = false;
             DebugCall("enter-house: waiting to dismount", key: "enter-dismount");
             return;
         }
@@ -2070,6 +2400,7 @@ public sealed class CallTravelService : IDisposable
         var entrance = FindNearestHouseEntrance(out var dist);
         if (entrance is not null && dist <= HouseEntranceInteractYalms)
         {
+            _doorApproachActive = false;
             if (IsVnavPathRunning())
                 StopVnavPath();
             // Door approach done — block player walk again while interacting / confirming.
@@ -2088,8 +2419,8 @@ public sealed class CallTravelService : IDisposable
                     return;
                 ts->InteractWithObject((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)entrance.Address, false);
                 _teleportProgressSeen = true;
-                _awaitingHouseEnterConfirm = true;
-                _houseEnterInteractedUtc = now;
+                // 07-A6: the entrance prompt is accepted only within 5 s of this, our own interaction.
+                _houseEnterInteractedMs = _clock();
                 DebugCall("enter-house: interacted with Entrance", key: "enter-interact");
             }
             catch (Exception ex)
@@ -2102,6 +2433,7 @@ public sealed class CallTravelService : IDisposable
 
         if (IsVnavPathRunning())
         {
+            _doorApproachActive = _houseEntrancePathStarted;
             DebugCall(
                 $"enter-house: approaching door (entrance={(entrance is null ? "none" : $"{dist:0.0}y")})",
                 key: "enter-approach");
@@ -2109,6 +2441,7 @@ public sealed class CallTravelService : IDisposable
         }
 
         TryPathTowardPlotEntrance(player.Position, entrance, dist);
+        _doorApproachActive = _houseEntrancePathStarted;
         DebugCall(
             $"enter-house: seeking door (entrance={(entrance is null ? "none" : $"{dist:0.0}y")})",
             key: "enter-seek");
@@ -2155,15 +2488,18 @@ public sealed class CallTravelService : IDisposable
     }
 
     /// <summary>
-    /// Confirm a housing entrance SelectYesno. Prompt text lives on node 15 (same as Lifestream),
-    /// not in AtkValues. Apartment calls may accept the visible dialog after Lifestream has already
-    /// selected the exact room; private-house calls still require an entrance-text match.
+    /// 07-A6: press Yes on a housing SelectYesno only when <see cref="HousingYesnoMatcher"/> accepts it: the house
+    /// entrance prompt (exactly this client language's text) within 5 s of our own Entrance interaction, or an apartment
+    /// room confirm matching this language's pattern while Lifestream, in the right ward, has just shown the room list.
+    /// In a language with no known apartment text she gets a chat hint instead (D10). Never an empty prompt.
     /// </summary>
     private unsafe bool TryConfirmHousingEntranceYesno(bool apartment, out string detail)
     {
         detail = "no addon";
         try
         {
+            HousingYesnoContext? context = null;
+            var language = HousingYesnoMatcher.FromClientLanguage(_clientState.ClientLanguage.ToString());
             // Scan a few SelectYesno instances (index 1+), matching Lifestream.
             for (var index = 1; index <= 8; index++)
             {
@@ -2176,122 +2512,84 @@ public sealed class CallTravelService : IDisposable
                     continue;
 
                 var prompt = ReadSelectYesnoPrompt(addon);
-                detail = string.IsNullOrEmpty(prompt)
-                    ? $"addon#{index} empty prompt"
-                    : $"addon#{index} '{TruncateForDebug(prompt, 80)}'";
 
-                if (string.IsNullOrEmpty(prompt))
+                // Read the Call's state once, only when a dialog is up.
+                context ??= new HousingYesnoContext(
+                    ApartmentCall: apartment,
+                    NowMs: _clock(),
+                    EntranceInteractedMs: _houseEnterInteractedMs,
+                    InRightWard: apartment && IsAtHousingWard(),
+                    LifestreamBusy: apartment && IsLifestreamBusy(),
+                    SelectRoomSeenMs: _selectRoomSeenMs);
+
+                switch (HousingYesnoMatcher.Decide(prompt, language, context.Value))
                 {
-                    // Apartment selection is already exact and owned by Lifestream. For houses,
-                    // accept an empty prompt only after our own entrance interaction.
-                    if (!apartment && !_awaitingHouseEnterConfirm)
-                        continue;
-                }
-                else
-                {
-                    var normalized = prompt.Replace(" ", "", StringComparison.Ordinal);
-                    // At this point an apartment Call is in the correct ward and Lifestream is
-                    // waiting after selecting the requested apartment, so its visible Yes/No is safe.
-                    var matched = apartment;
-                    foreach (var fragment in HouseEnterConfirmText)
-                    {
-                        var needle = fragment.Replace(" ", "", StringComparison.Ordinal);
-                        if (normalized.Contains(needle, StringComparison.OrdinalIgnoreCase))
+                    case YesnoDecision.Confirm:
+                        addon->FireCallbackInt(0); // Yes
+                        // 07-A10: the confirmed lines carry no prompt text.
+                        detail = $"addon#{index} → Yes";
+                        return true;
+                    case YesnoDecision.Hint:
+                        if (!_apartmentHintShown)
                         {
-                            matched = true;
-                            break;
+                            _apartmentHintShown = true;
+                            PluginChat.Print(_chat, ApartmentConfirmHint, PluginChat.Yellow);
                         }
-                    }
 
-                    // Loose fallback: estate / house / ハウス / Gebäude etc.
-                    if (!matched
-                        && (normalized.Contains("estate", StringComparison.OrdinalIgnoreCase)
-                            || normalized.Contains("ハウス", StringComparison.Ordinal)
-                            || normalized.Contains("房屋", StringComparison.Ordinal)
-                            || normalized.Contains("Gebäude", StringComparison.OrdinalIgnoreCase)
-                            || normalized.Contains("maison", StringComparison.OrdinalIgnoreCase)
-                            || normalized.Contains("주택", StringComparison.Ordinal)))
-                    {
-                        matched = true;
-                    }
-
-                    if (!matched && !_awaitingHouseEnterConfirm)
+                        detail = $"addon#{index} {HousingYesnoMatcher.PromptLogDetail(prompt, language, context.Value)}"
+                                 + " → hint (no known apartment text for this language)";
+                        continue;
+                    default:
+                        // 07-A10 (04-D10): the raw text only where it still needs recording, else only its length.
+                        detail = $"addon#{index} {HousingYesnoMatcher.PromptLogDetail(prompt, language, context.Value)}";
                         continue;
                 }
-
-                addon->FireCallbackInt(0); // Yes
-                detail += " → Yes";
-                return true;
             }
 
-            if (detail == "no addon" && _awaitingHouseEnterConfirm)
-                detail = "waiting (SelectYesno not visible)";
+            // Debug only, and only when the prompt (or its length) changed, so it can't alternate with another line
+            // every tick (07-A10).
+            if (detail != "no addon" && !string.Equals(detail, _lastYesnoIgnoredDetail, StringComparison.Ordinal))
+            {
+                _lastYesnoIgnoredDetail = detail;
+                DebugCall($"yesno: not confirmed ({detail})", key: "yesno-ignored", throttle: false);
+            }
+
             return false;
         }
         catch (Exception ex)
         {
             _log.Debug(ex, "House entrance SelectYesno failed");
-            detail = $"exception: {ex.Message}";
+            detail = $"exception: {ex.GetType().Name}";
             return false;
         }
     }
 
+    /// <summary>
+    /// 07-A7: the prompt's plain text from the typed <see cref="AddonSelectYesno.PromptText"/> node, with Lifestream's
+    /// <c>NodeList[15]</c> as the second choice. AtkValues are never read: a value's string pointer is only valid for a
+    /// string type, and reading it from another type crashed the game.
+    /// </summary>
     private static unsafe string ReadSelectYesnoPrompt(AtkUnitBase* addon)
     {
         try
         {
-            // Lifestream: UldManager.NodeList[15] text node holds the prompt.
-            if (addon->UldManager.NodeListCount > 15)
-            {
-                var node = addon->UldManager.NodeList[15];
-                if (node is not null)
-                {
-                    var textNode = node->GetAsAtkTextNode();
-                    if (textNode is not null)
-                    {
-                        var fromGetText = textNode->GetText();
-                        if (fromGetText.HasValue)
-                        {
-                            var s = fromGetText.ToString();
-                            if (!string.IsNullOrWhiteSpace(s))
-                                return s;
-                        }
+            var textNode = ((AddonSelectYesno*)addon)->PromptText;
+            if (textNode is null
+                && addon->UldManager.NodeList is not null
+                && addon->UldManager.NodeListCount > 15
+                && addon->UldManager.NodeList[15] is not null)
+                textNode = addon->UldManager.NodeList[15]->GetAsAtkTextNode();
+            if (textNode is null)
+                return string.Empty;
 
-                        var fromNodeText = textNode->NodeText.ToString();
-                        if (!string.IsNullOrWhiteSpace(fromNodeText))
-                            return fromNodeText;
-                    }
-                }
-            }
-
-            // Fallback: AtkValues string payloads.
-            for (var i = 0; i < addon->AtkValuesCount; i++)
-            {
-                ref var value = ref addon->AtkValues[i];
-                try
-                {
-                    if (!value.String.HasValue)
-                        continue;
-                    var s = value.String.ToString();
-                    if (!string.IsNullOrWhiteSpace(s) && s.Length > 3)
-                        return s;
-                }
-                catch
-                {
-                    // ignore bad value types
-                }
-            }
+            // The SeString's text only: macros and payloads (colours, links) are dropped.
+            return SeString.Parse(textNode->NodeText.AsSpan()).TextValue;
         }
         catch
         {
-            // ignore
+            return string.Empty;
         }
-
-        return string.Empty;
     }
-
-    private static string TruncateForDebug(string s, int max)
-        => s.Length <= max ? s : s[..max] + "…";
 
     /// <summary>
     /// Walk to the plot door. Prefer a visible Entrance object; else Lifestream GetPlotEntrance.
@@ -2373,6 +2671,7 @@ public sealed class CallTravelService : IDisposable
             if (_vnavMoveCloseTo.InvokeFunc(dest.Value, false, HouseEntranceInteractYalms))
             {
                 _houseEntrancePathStarted = true;
+                _houseEntranceDest = dest.Value;
                 _weOwnTravel = true;
                 _teleportProgressSeen = true;
                 _timer.SetCallTravelPathingPassThrough(true);
@@ -2405,15 +2704,22 @@ public sealed class CallTravelService : IDisposable
         return $"Your presence is required by {label}.";
     }
 
-    private void ReportEdgeCaseError(string detail)
+    /// <summary>
+    /// The generic chat line, a forced log line with the location-free <paramref name="reason"/> (07-A8), and the
+    /// location only in a debug line.
+    /// </summary>
+    private void ReportEdgeCaseError(string reason, string? locationDetail = null)
     {
         PluginChat.Print(_chat, CallErrorEcho, PluginChat.Yellow);
-        DebugCall($"ERROR: {detail}", throttle: false, force: true);
+        DebugCall(CallLogRules.Forced($"ERROR: {reason}", _phase, PendingKind()), throttle: false, force: true);
+        if (locationDetail is not null)
+            DebugCall($"ERROR at: {locationDetail}", throttle: false);
     }
 
     /// <summary>
-    /// Append to config-dir CallTravel.debug.log. Routine diagnostics require debug mode;
-    /// error details are forced so the generic player-facing echo always has a useful report.
+    /// Append to config-dir CallTravel.debug.log. Routine diagnostics require debug mode; a failure's reason is forced
+    /// so the generic player-facing echo always has a report. 07-A8: a forced line is built by
+    /// <see cref="CallLogRules.Forced"/> and never carries a location or an exception message.
     /// </summary>
     private void DebugCall(string message, string? key = null, bool throttle = true, bool force = false)
     {
@@ -2633,6 +2939,51 @@ public sealed class CallTravelService : IDisposable
         var x = (markerX - 1024f) / num;
         var y = (markerY - 1024f) / num;
         return new Vector2(x, y);
+    }
+
+    /// <summary>07-A5: the Lumina sheets behind <see cref="CallRequestRules.Validate"/>. Framework thread.</summary>
+    private sealed class LuminaCallSheets(IDataManager data) : ICallSheetFacts
+    {
+        public bool TryGetWorld(uint worldId, out CallWorldFacts world)
+        {
+            world = default;
+            if (data.GetExcelSheet<World>()?.TryGetRow(worldId, out var row) != true)
+                return false;
+
+            world = new CallWorldFacts(row.IsPublic, row.DataCenter.RowId);
+            return true;
+        }
+
+        public bool TryGetTerritory(uint territoryId, out CallTerritoryFacts territory)
+        {
+            territory = default;
+            if (data.GetExcelSheet<TerritoryType>()?.TryGetRow(territoryId, out var row) != true)
+                return false;
+
+            var map = row.Map.ValueNullable;
+            territory = new CallTerritoryFacts(
+                row.ContentFinderCondition.RowId,
+                row.QuestBattle.RowId,
+                map?.SizeFactor ?? 0,
+                map?.OffsetX ?? 0,
+                map?.OffsetY ?? 0);
+            return true;
+        }
+
+        public bool HasAetheryte(uint territoryId)
+        {
+            var sheet = data.GetExcelSheet<Aetheryte>();
+            if (sheet is null)
+                return false;
+
+            foreach (var row in sheet)
+            {
+                if (row.IsAetheryte && row.Territory.RowId == territoryId)
+                    return true;
+            }
+
+            return false;
+        }
     }
 }
 #endif

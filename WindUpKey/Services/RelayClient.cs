@@ -97,8 +97,9 @@ public sealed class RelayClient : IDisposable
 
 #if WINDUP_TESTING
     private CallTravelService? _callTravel;
-    private readonly object _pendingCallLock = new();
-    private readonly HashSet<string> _pendingCallRequestIds = new(StringComparer.Ordinal);
+    /// <summary>07-A3: the owner's Calls awaiting a reply (30 min, at most 32); thread-safe (sends come from Draw).</summary>
+    private readonly PendingCallBook _pendingCalls = new(() => Environment.TickCount64);
+    private const string CallIndoorPlotUnknownFailure = "You can't Call from this house: its plot couldn't be read.";
 #endif
 
     private ClientWebSocket? _socket;
@@ -107,6 +108,9 @@ public sealed class RelayClient : IDisposable
     private CancellationTokenSource? _loopCts;
     private Task? _loopTask;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+    /// <summary>07-A2: how often the relay's "busy" chat line may show.</summary>
+    private const long RelayBusyNoticeIntervalMs = 30_000;
+    private readonly NoticeThrottle _relayBusyNotice = new(RelayBusyNoticeIntervalMs, () => Environment.TickCount64);
     /// <summary>03-D14: reset when a register is accepted (pairSync), not when the socket opens.</summary>
     private readonly RelayReconnectBackoff _backoff = new();
     private string? _lastStatus;
@@ -286,17 +290,19 @@ public sealed class RelayClient : IDisposable
 
         if (!IsCallOriginReachable(out var originFailure))
         {
+            // 07-A8: a forced line carries no location (the territory is in debug lines only).
             CallTravelDebugLog.Write(
                 _pi,
                 _config,
                 _log,
-                $"owner Call blocked at origin → terr={_clientState.TerritoryType} | {originFailure}",
+                $"owner Call blocked at origin | {originFailure}",
                 force: true);
             return;
         }
 
         var world = player.CurrentWorld.ValueNullable;
         var worldId = player.CurrentWorld.RowId;
+        // Still sent (07-A5): older dolls prefer it. New dolls resolve the name from WorldId.
         var worldName = world?.Name.ToString() ?? string.Empty;
         var requestId = Guid.NewGuid().ToString("N");
         var territoryId = _clientState.TerritoryType;
@@ -317,6 +323,14 @@ public sealed class RelayClient : IDisposable
         var housingDiag = new StringBuilder();
         if (HousingCallLocation.TryRead(territoryId, territoryRow: null, out var housing, _data, housingDiag))
         {
+            // 07-A5 (D9): an indoor house with an unknown plot can't be reached; new dolls would refuse it anyway.
+            if (!CallRequestRules.IsIndoorPlotKnown(housing.Indoor, housing.IsApartment, housing.Plot))
+            {
+                CallTravelDebugLog.Write(_pi, _config, _log, "owner Call blocked at origin | indoor house with an unknown plot", force: true);
+                PluginChat.PrintError(_chat, CallIndoorPlotUnknownFailure);
+                return;
+            }
+
             payload.HousingCity = housing.City;
             payload.HousingWard = housing.Ward;
             payload.HousingDivision = housing.Division;
@@ -345,8 +359,7 @@ public sealed class RelayClient : IDisposable
                 + $"pos=({payload.X:0.0},{payload.Y:0.0},{payload.Z:0.0}) world={payload.WorldId} | {housingDiag}");
         }
 
-        lock (_pendingCallLock)
-            _pendingCallRequestIds.Add(requestId);
+        _pendingCalls.Add(requestId);
 
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.Call, payload), CancellationToken.None)
             .ConfigureAwait(false);
@@ -388,15 +401,16 @@ public sealed class RelayClient : IDisposable
 
         // Sheet metadata catches duties and quest-battle/solo maps even when their live condition
         // flags are absent or delayed (notably isolated society quest locations).
+        // 07-A8: the failure goes in a forced line, so it names no duty or quest (no row ids).
         if (territory.ContentFinderCondition.RowId != 0)
         {
-            failure = $"content instance (cfc={territory.ContentFinderCondition.RowId})";
+            failure = "content instance";
             return false;
         }
 
         if (territory.QuestBattle.RowId != 0)
         {
-            failure = $"solo quest territory (questBattle={territory.QuestBattle.RowId})";
+            failure = "solo quest territory";
             return false;
         }
 
@@ -427,9 +441,11 @@ public sealed class RelayClient : IDisposable
 
     public bool HasDebugCallPoint => _callTravel?.HasDebugStoredPoint == true;
 
-    public bool TryStoreDebugCallPoint() => _callTravel?.TryStoreDebugPoint() == true;
+    /// <summary>07-A9: from ConfigWindow's Draw; the store runs on the next framework tick.</summary>
+    public void RequestStoreDebugCallPoint() => _callTravel?.RequestStoreDebugPoint();
 
-    public bool TryRecallDebugCallPoint() => _callTravel?.TryRecallDebugPoint() == true;
+    /// <summary>07-A9: from ConfigWindow's Draw; the recall runs on the next framework tick.</summary>
+    public void RequestRecallDebugCallPoint() => _callTravel?.RequestRecallDebugPoint();
 #endif
 
     public bool IsConnected => _socket?.State == WebSocketState.Open;
@@ -2438,7 +2454,9 @@ public sealed class RelayClient : IDisposable
 
         if (payload.Code == ErrorCodes.RateLimited)
         {
-            _notifier.NotifyWinderError("Relay is busy; try again shortly.");
+            // 07-A2: a burst of refused messages shows this once per 30 s, not once each.
+            if (_relayBusyNotice.TryShow())
+                _notifier.NotifyWinderError("Relay is busy; try again shortly.");
             return;
         }
 
@@ -3092,14 +3110,7 @@ public sealed class RelayClient : IDisposable
         TryTakePendingCall(payload.RequestId);
     }
 
-    private bool TryTakePendingCall(string? requestId)
-    {
-        if (string.IsNullOrEmpty(requestId))
-            return false;
-
-        lock (_pendingCallLock)
-            return _pendingCallRequestIds.Remove(requestId);
-    }
+    private bool TryTakePendingCall(string? requestId) => _pendingCalls.TryTake(requestId);
 #endif
 
     private async Task HandleInboundOwnerSettingsUpdateAsync(Envelope envelope, CancellationToken ct)

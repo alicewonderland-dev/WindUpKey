@@ -1763,14 +1763,15 @@ public sealed class ConfigWindow : Window, IDisposable
 #if WINDUP_TESTING
         ImGui.Spacing();
         ImGui.TextUnformatted("Call travel");
+        // 07-A9: Draw only raises the request; the store and recall run on the next framework tick.
         if (ImGui.Button("Store"))
-            _relay.TryStoreDebugCallPoint();
+            _relay.RequestStoreDebugCallPoint();
 
         ImGui.SameLine();
         if (!_relay.HasDebugCallPoint)
             ImGui.BeginDisabled();
         if (ImGui.Button("Recall"))
-            _relay.TryRecallDebugCallPoint();
+            _relay.RequestRecallDebugCallPoint();
         if (!_relay.HasDebugCallPoint)
             ImGui.EndDisabled();
 
