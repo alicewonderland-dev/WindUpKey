@@ -8,10 +8,13 @@ public enum CallPhase
 {
     Idle,
 
-    /// <summary>Waiting for a duty, combat, crafting or another plugin's travel to end.</summary>
+    /// <summary>
+    /// Before travel: waiting for her answer (07-B1, outside Hardcore) and for a duty, combat, crafting or another plugin's
+    /// travel to end.
+    /// </summary>
     WaitingGates,
 
-    /// <summary>The prompt is open: combat, busy, or the failed prompt.</summary>
+    /// <summary>07-B1: the failed prompt, waiting for her retry (or her Decline).</summary>
     WaitingAccept,
 
     ChangingWorld,

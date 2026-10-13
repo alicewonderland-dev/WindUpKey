@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
     Dalamud-free tests for the plugin's relay identity, sync, unpair-queue, wire-limit and self-test code, and the rules
-    behind issue 06's review fixes and issue 07's Call safety. Not part of the plugin build or its packaging:
-    nothing references this project, and deploy/Pack-Plugin.ps1 builds only WindUpKey/WindUpKey.csproj.
+    behind issue 06's review fixes and issue 07's Call safety and behaviour. Not part of the plugin build or its
+    packaging: nothing references this project, and deploy/Pack-Plugin.ps1 builds only WindUpKey/WindUpKey.csproj.
     Run with: dotnet test WindUpKey.Tests
   -->
   <PropertyGroup>
@@ -68,6 +68,10 @@
     <Compile Include="..\WindUpKey\Services\HousingYesnoMatcher.cs" Link="Plugin\HousingYesnoMatcher.cs" />
     <Compile Include="..\WindUpKey\Services\CallLogRules.cs" Link="Plugin\CallLogRules.cs" />
     <Compile Include="..\WindUpKey\Services\NoticeThrottle.cs" Link="Plugin\NoticeThrottle.cs" />
+    <!-- 07 Part B: asking first, Decline and its quiet period, and the cross-check on arrival. -->
+    <Compile Include="..\WindUpKey\Services\CallAskFirst.cs" Link="Plugin\CallAskFirst.cs" />
+    <Compile Include="..\WindUpKey\Services\CallQuietPeriod.cs" Link="Plugin\CallQuietPeriod.cs" />
+    <Compile Include="..\WindUpKey\Services\CallCorroboration.cs" Link="Plugin\CallCorroboration.cs" />
     <!-- The self-test's Dalamud-free units (04 Architecture); its thin adapters (SelfTestHost, SelfTestController) need Dalamud. -->
     <Compile Include="..\WindUpKey\SelfTest\*.cs" LinkBase="Plugin\SelfTest" />
     <ProjectReference Include="..\WindUpKey.Protocol\WindUpKey.Protocol.csproj" />

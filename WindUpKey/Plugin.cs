@@ -32,6 +32,10 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IContextMenu ContextMenu { get; private set; } = null!;
     [PluginService] internal static IGameInteropProvider GameInterop { get; private set; } = null!;
     [PluginService] internal static IObjectTable ObjectTable { get; private set; } = null!;
+#if WINDUP_TESTING
+    /// <summary>07-B3: a Call is cross-checked against the owner's party-list territory.</summary>
+    [PluginService] internal static IPartyList PartyList { get; private set; } = null!;
+#endif
     [PluginService] internal static ITargetManager TargetManager { get; private set; } = null!;
     [PluginService] internal static ICondition Condition { get; private set; } = null!;
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
@@ -122,6 +126,7 @@ public sealed class Plugin : IDalamudPlugin
             PluginInterface,
             ClientState,
             ObjectTable,
+            PartyList,
             TargetManager,
             GameGui,
             Condition,
@@ -202,7 +207,7 @@ public sealed class Plugin : IDalamudPlugin
             HelpMessage =
                 "Open Wind-Up Key config.\n/windup safeword <word> uses your safeword (and pauses remote control).\n/windup safeword resume ends that pause early.\n/windup unlock clears Hardcore and all owners (confirmation required)."
 #if WINDUP_TESTING
-                + "\n/windup stopcall cancels an active owner call."
+                + "\n/windup stopcall declines an active owner call (not in Hardcore)."
                 + "\n/windup selftest runs the relay self-test (debug mode)."
 #endif
                 ,
@@ -405,8 +410,17 @@ public sealed class Plugin : IDalamudPlugin
 
         if (string.Equals(verb, "stopcall", StringComparison.OrdinalIgnoreCase))
         {
-            _relay.CancelActiveCall();
-            PluginChat.Print(ChatGui, "Call cancelled.", PluginChat.Grey);
+            // 07-B1 (D5): Hardcore has no way out of a Call (its deadlines, stuck detection, consent loss and logout
+            // still end it).
+            if (!CallAskFirst.MayDecline(Configuration.HardcoreMode))
+            {
+                PluginChat.PrintError(ChatGui, CallAskFirst.HardcoreStopRefusal);
+                return;
+            }
+
+            // 07-B1: like the Stop button, it counts as a Decline (the next tick runs it, and says so in chat).
+            if (!_relay.RequestDeclineActiveCall())
+                PluginChat.Print(ChatGui, "There's no Call to stop.", PluginChat.Grey);
             return;
         }
 #endif

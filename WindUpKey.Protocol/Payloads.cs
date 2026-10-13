@@ -476,6 +476,12 @@ public static class CallResultStatuses
     public const string Arrived = "arrived";
     public const string Failed = "failed";
     public const string Cancelled = "cancelled";
+
+    /// <summary>
+    /// 07-B1 (D4): the doll declined (or stopped) the Call, or her quiet period after a Decline answered it. Only a
+    /// new status value, no new field: the relay checks only its length, and older owners ignore it.
+    /// </summary>
+    public const string Declined = "declined";
 }
 
 public sealed class CallResultPayload

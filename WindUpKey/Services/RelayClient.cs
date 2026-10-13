@@ -437,7 +437,11 @@ public sealed class RelayClient : IDisposable
         return true;
     }
 
+    /// <summary>A silent cancel (the safeword, logout): never a Decline (07-B1).</summary>
     public void CancelActiveCall() => _callTravel?.CancelActiveCall();
+
+    /// <summary>07-B1: <c>/windup stopcall</c>, which counts as a Decline; false when there's no Call.</summary>
+    public bool RequestDeclineActiveCall() => _callTravel?.RequestDecline() == true;
 
     public bool HasDebugCallPoint => _callTravel?.HasDebugStoredPoint == true;
 
@@ -3107,7 +3111,17 @@ public sealed class RelayClient : IDisposable
         if (payload is null)
             return;
 
-        TryTakePendingCall(payload.RequestId);
+        // A reply to none of our pending Calls (or one already pruned, 07-A3) stays silent.
+        if (!TryTakePendingCall(payload.RequestId))
+            return;
+
+        var dollKey = PairingKeyUtil.Normalize(payload.From);
+        if (!PairingKeyUtil.IsValid(dollKey))
+            return;
+
+        // 07-B1 (D4): "<label> declined your Call."; every other status keeps its silence.
+        if (CallResultNotice.ForOwner(payload.Status, GetPairMessageLabel(dollKey)) is { } notice)
+            PluginChat.Print(_chat, notice, PluginChat.Yellow);
     }
 
     private bool TryTakePendingCall(string? requestId) => _pendingCalls.TryTake(requestId);

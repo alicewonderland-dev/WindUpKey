@@ -1551,7 +1551,7 @@ public sealed class CallSafetyTests
     [Fact]
     public void DebugRecall_IsRefusedDuringTheSafewordPause_BeforeAnythingStarts()
     {
-        // 07-A10: before RequestAsync, which aborts her own travel.
+        // 07-A10: before RequestAsync starts anything (07-B2: it no longer aborts her own travel on arrival).
         var recall = ProfileSettingsTests.MethodBody(CallTravelSource, "    private bool TryRecallDebugPoint()");
         var paused = recall.IndexOf("if (_timer.IsRemoteControlPaused)", StringComparison.Ordinal);
         Assert.True(paused >= 0);
@@ -1583,8 +1583,9 @@ public sealed class CallSafetyTests
     {
         var source = CallTravelSource;
         Assert.DoesNotMatch(@"_\s*=\s*(FinishAsync|AckAsync|RequestAsync)\(", source);
-        // The original eleven, with the acks behind one gated helper (Ack, FlushAck) and the new expiry, stuck and consent exits.
-        Assert.Equal(10, Regex.Matches(source, @"\bForget\((FinishAsync|AckAsync|RequestAsync)\(").Count);
+        // The original eleven, with the acks behind one gated helper (Ack, FlushAck) and the new expiry, stuck and consent exits,
+        // and 07-B1's Decline.
+        Assert.Equal(11, Regex.Matches(source, @"\bForget\((FinishAsync|AckAsync|RequestAsync)\(").Count);
         var forget = ProfileSettingsTests.MethodBody(source, "    private void Forget(Task task, string what)");
         Assert.Contains("_log.Debug(", forget);
         Assert.Contains("TaskContinuationOptions.OnlyOnFaulted", forget);

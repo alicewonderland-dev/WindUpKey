@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Types;
+using Dalamud.Game.ClientState.Party;
 using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
@@ -57,6 +58,8 @@ public sealed class CallTravelService : IDisposable
     private const long HouseEnterConfirmWaitMs = 4_000;
     private const string CallExpiredEcho = "Your owner's Call expired.";
     private const string CallStuckEcho = "Couldn't reach your owner; the Call was stopped.";
+    /// <summary>07-B3: <c>TerritoryType.TerritoryIntendedUse</c> of a housing interior (ClientStructs <c>HousingIndoor</c>).</summary>
+    private const uint HousingIndoorIntendedUse = (uint)FFXIVClientStructs.FFXIV.Client.Enums.TerritoryIntendedUse.HousingIndoor;
     private const string ApartmentConfirmHint =
         "Press Yes to enter your owner's apartment (Wind-Up Key can't confirm it in this client language).";
 
@@ -85,6 +88,8 @@ public sealed class CallTravelService : IDisposable
     private readonly IDalamudPluginInterface _pi;
     private readonly IClientState _clientState;
     private readonly IObjectTable _objects;
+    /// <summary>07-B3: the owner's party-list territory, checked once when a Call arrives.</summary>
+    private readonly IPartyList _party;
     private readonly ITargetManager _targets;
     private readonly IGameGui _gameGui;
     private readonly ICondition _condition;
@@ -107,6 +112,8 @@ public sealed class CallTravelService : IDisposable
     private readonly CallStuckDetector _stuck;
     /// <summary>07-A11, 07-A15: vnav's current waypoint for the stuck detector, and whether its IPC is missing this Call.</summary>
     private readonly CallWaypointReader _waypoints;
+    /// <summary>07-B1 (D4): five minutes of automatic declines per owner after her Decline (in memory only).</summary>
+    private readonly CallQuietPeriod _quiet;
 
     private ICallGateSubscriber<bool>? _lsIsBusy;
     private ICallGateSubscriber<object>? _lsAbort;
@@ -142,6 +149,18 @@ public sealed class CallTravelService : IDisposable
     /// state changes to the framework tick instead of performing native work while ImGui is drawing.
     /// </summary>
     private bool _acceptRequested;
+    /// <summary>
+    /// 07-B1: Decline (or Stop) from the prompt's Draw, or <c>/windup stopcall</c>; the next tick declines the Call, in
+    /// any state. Cleared by <see cref="SetPhase"/> (a click from before the change, or for an earlier Call).
+    /// </summary>
+    private bool _declineRequested;
+    /// <summary>
+    /// 07-B1 (D3): her Accept, remembered for this Call: travel starts when the gates clear, with no second prompt. A
+    /// failure asks her again. Not cleared by <see cref="SetPhase"/>.
+    /// </summary>
+    private bool _callAccepted;
+    /// <summary>07-B2: when we last aborted our own Lifestream/vnav automation (monotonic ms), across Calls; null before.</summary>
+    private long? _lastOwnAbortMs;
     /// <summary>07-A9: the Debug tab's Store and Recall, raised from Draw and run on the next tick.</summary>
     private bool _storeDebugRequested;
     private bool _recallDebugRequested;
@@ -193,6 +212,9 @@ public sealed class CallTravelService : IDisposable
         public bool HousingIsApartment { get; init; }
         public bool HousingIndoor { get; init; }
 
+        /// <summary>07-B4 (D13): the prompt's destination, from Lumina names and the Call's numbers (never payload text).</summary>
+        public string Destination { get; set; } = string.Empty;
+
         public bool IsHousingCall =>
             HousingWard > 0 && HousingCity != 0 && HousingDivision is 1 or 2;
     }
@@ -201,6 +223,7 @@ public sealed class CallTravelService : IDisposable
         IDalamudPluginInterface pi,
         IClientState clientState,
         IObjectTable objects,
+        IPartyList party,
         ITargetManager targets,
         IGameGui gameGui,
         ICondition condition,
@@ -218,6 +241,7 @@ public sealed class CallTravelService : IDisposable
         _pi = pi;
         _clientState = clientState;
         _objects = objects;
+        _party = party;
         _targets = targets;
         _gameGui = gameGui;
         _condition = condition;
@@ -241,8 +265,10 @@ public sealed class CallTravelService : IDisposable
             () => _vnavNumWaypoints?.InvokeFunc(),
             () => _vnavListWaypoints?.InvokeFunc(),
             ex => ex is IpcNotReadyError);
+        _quiet = new CallQuietPeriod(_clock);
 
         _prompt.OnAccept = OnPromptAccept;
+        _prompt.OnDecline = OnPromptDecline;
         BindIpc();
     }
 
@@ -262,16 +288,33 @@ public sealed class CallTravelService : IDisposable
             return;
         _disposed = true;
         _prompt.OnAccept = null;
+        _prompt.OnDecline = null;
         _prompt.IsOpen = false;
         // Unloading: nothing is left on, not even a landing grace.
         CancelInternal(landingGrace: false);
     }
 
+    /// <summary>
+    /// A silent cancel (<see cref="CallResultStatuses.Cancelled"/>): the safeword (06-B1) and logout, in Hardcore too.
+    /// A cancel is never a Decline and starts no quiet period (07-B1).
+    /// </summary>
     public void CancelActiveCall()
     {
         if (_pending is null)
             return;
         Forget(FinishAsync(CallResultStatuses.Cancelled, "Call cancelled."), "cancel result");
+    }
+
+    /// <summary>
+    /// 07-B1: <c>/windup stopcall</c> (non-Hardcore; Plugin refuses it in Hardcore, D5). Stop counts as a Decline. Only
+    /// sets a flag, which the next tick consumes. False when there is no Call to stop.
+    /// </summary>
+    public bool RequestDecline()
+    {
+        if (_pending is null)
+            return false;
+        _declineRequested = true;
+        return true;
     }
 
     /// <summary>
@@ -364,7 +407,8 @@ public sealed class CallTravelService : IDisposable
             return false;
         }
 
-        // 07-A10: refused during the safeword pause, before RequestAsync aborts her own travel.
+        // 07-A10: refused during the safeword pause, before RequestAsync starts anything (07-B2: the recall needs no
+        // Accept, so it stops her own travel as soon as the gates clear).
         if (_timer.IsRemoteControlPaused)
         {
             PluginChat.PrintError(_chat, "Call recall isn't available while remote control is paused.");
@@ -398,6 +442,22 @@ public sealed class CallTravelService : IDisposable
             return;
         }
 
+        // 07-B1 (D4): this owner's Calls are declined straight away for 5 minutes after her Decline, with a chat line
+        // (not in Hardcore, where she can't decline, D5). The quiet period isn't extended by this.
+        var callerKey = PairingKeyUtil.Normalize(payload.From);
+        if (!localDebug
+            && CallAskFirst.AutoDeclines(_config.HardcoreMode, _quiet.IsQuiet(callerKey, out var quietMinutes)))
+        {
+            DebugCall("request declined: quiet period after her Decline", throttle: false);
+            PluginChat.Print(
+                _chat,
+                $"Declined {OwnerLabel(callerKey)}'s Call (quiet for {quietMinutes} more min).",
+                PluginChat.Grey);
+            await SendResultOrLocalAsync(payload, CallResultStatuses.Declined, "Call declined.", localDebug)
+                .ConfigureAwait(false);
+            return;
+        }
+
         // 07-A5: the destination's numbers are checked against the sheets before anything else (debug recall too).
         // 07-A10: her territory too, so a same-zone Call in an aethernet-only city needs no aetheryte there.
         var validation = CallRequestRules.Validate(
@@ -414,6 +474,22 @@ public sealed class CallTravelService : IDisposable
             return;
         }
 
+        // 07-B3 (D2): once, on arrival, against her party list and object table: an owner she can check must be where
+        // the Call says. Nothing to check accepts. The debug recall skips it. The computed keys are never logged.
+        if (!localDebug)
+        {
+            var corroboration = CallCorroboration.Check(payload, OwnerPartyPlace(callerKey), OwnerSighting(callerKey));
+            if (!corroboration.Ok)
+            {
+                ReportEdgeCaseError(
+                    $"request rejected: {corroboration.Reason}",
+                    $"terr={payload.TerritoryId} world={payload.WorldId}");
+                await SendResultOrLocalAsync(payload, CallResultStatuses.Failed, $"Call refused: {corroboration.Reason}.", localDebug)
+                    .ConfigureAwait(false);
+                return;
+            }
+        }
+
         // vnavmesh may report not-ready while combat/instance/crafting already prevents travel.
         // Preserve the Call and show its normal wait state; probe again when Accept can become active.
         var hasDeferredGameGate = IsCrafting() || IsInInstance() || IsInCombat();
@@ -427,7 +503,7 @@ public sealed class CallTravelService : IDisposable
             return;
         }
 
-        var ownerKey = PairingKeyUtil.Normalize(payload.From);
+        var ownerKey = callerKey;
         if (string.IsNullOrEmpty(ownerKey))
             ownerKey = localDebug ? "DEBUGCALL" : string.Empty;
         if (string.IsNullOrEmpty(ownerKey))
@@ -493,6 +569,9 @@ public sealed class CallTravelService : IDisposable
         _pathStartDeadlineUtc = null;
         _mountDeadlineUtc = null;
         _weOwnTravel = false;
+        // 07-B1 (D3): a non-Hardcore Call waits for her Accept. Her own debug recall needs none.
+        _callAccepted = localDebug;
+        _pending.Destination = DescribeDestination(_pending);
         _lastCallDebugKey = null;
         _ackGate.Reset();
         _deadlines.Start();
@@ -500,8 +579,9 @@ public sealed class CallTravelService : IDisposable
         // 07-A1: no bypass here. It goes on in BeginTravel, so an unwound doll stays locked while the Call waits for a
         // duty, combat, crafting or her answer.
         SetPhase(CallPhase.WaitingGates);
-        // Prior cancel/fail must not leave Lifestream mid-task or Accept stays dead.
-        AbortCallAutomation();
+        // 07-B2: her own Lifestream or vnav trip isn't aborted here any more. The prompt shows it as Busy, and it is
+        // stopped only once she accepts (or Hardcore starts on its own); our own automation still draining after an
+        // earlier Call's abort is aborted again instead (IsHerTravelBusy).
 
         DebugCall($"accepted request → {FormatPendingSummary(_pending)}", throttle: false);
 
@@ -542,6 +622,14 @@ public sealed class CallTravelService : IDisposable
                 return;
             }
 
+            // 07-B1 (D4): her Decline or Stop, raised since the last tick, in any state (never in Hardcore, D5).
+            if (_declineRequested)
+            {
+                _declineRequested = false;
+                if (TryDeclineActiveCall())
+                    return;
+            }
+
             ApplyLockPolicy();
             FlushAck();
             if (TickDeadlines())
@@ -555,13 +643,15 @@ public sealed class CallTravelService : IDisposable
             if (TickStuckDetection())
                 return;
 
+            // 07-B1: the small "Answering…" window (with Stop outside Hardcore) while the Call drives her.
+            if (CallLockPolicy.IsTravelPhase(_phase))
+                ShowTravelWindow();
+
             switch (_phase)
             {
                 case CallPhase.WaitingGates:
-                    TickWaitingGates();
-                    break;
                 case CallPhase.WaitingAccept:
-                    TickWaitingAccept();
+                    TickWaiting();
                     break;
                 case CallPhase.ChangingWorld:
                     TickChangingWorld();
@@ -608,8 +698,9 @@ public sealed class CallTravelService : IDisposable
         if (previous != next)
             _doorApproachActive = false;
         // A stale accept: Accept clicked, then a duty or zone load in the same tick, must not accept the next prompt
-        // by itself. (Part B clears its decline flag here too.)
+        // by itself. 07-B1: nor a stale Decline decline a later Call. (Her remembered Accept, _callAccepted, stays.)
         _acceptRequested = false;
+        _declineRequested = false;
         ApplyLockPolicy();
         if (previous != next)
             DebugCall($"phase {previous} → {next}", throttle: false);
@@ -654,9 +745,10 @@ public sealed class CallTravelService : IDisposable
     /// <summary>07-A3 (D7): ends a Call past its wait, failed-prompt or overall limit, with a chat line. True when it ended.</summary>
     private bool TickDeadlines()
     {
+        // 07-B1: WaitingAccept is only the failed prompt now.
         var kind = CallLockPolicy.IsTravelPhase(_phase)
             ? CallWaitKind.Traveling
-            : _phase == CallPhase.WaitingAccept && _prompt.Reason == CallPromptReason.Failed
+            : _phase == CallPhase.WaitingAccept
                 ? CallWaitKind.FailedPrompt
                 : CallWaitKind.Waiting;
         var expiry = _deadlines.Check(kind, IsBetweenAreas());
@@ -789,126 +881,148 @@ public sealed class CallTravelService : IDisposable
             Forget(AckAsync(held), "ack");
     }
 
-    private void TickWaitingGates()
-    {
-        if (IsCrafting())
-        {
-            if (!_craftNotified)
-            {
-                _craftNotified = true;
-                PluginChat.Print(_chat, PresenceRequiredEcho(), PluginChat.Yellow);
-                Ack(CallAckStatuses.Crafting);
-            }
-            return;
-        }
-
-        // 07-A2: every tick of a duty or zone load lands here; the gate sends the status once.
-        if (IsInInstance())
-        {
-            Ack(CallAckStatuses.Instance);
-            return;
-        }
-
-        if (IsInCombat())
-        {
-            ShowPrompt(CallPromptReason.Combat, canAccept: false);
-            SetPhase(CallPhase.WaitingAccept);
-            Ack(CallAckStatuses.Combat);
-            return;
-        }
-
-        if (IsExternallyBusy())
-        {
-            ShowPrompt(CallPromptReason.Busy, canAccept: false);
-            SetPhase(CallPhase.WaitingAccept);
-            Ack(CallAckStatuses.Busy);
-            return;
-        }
-
-        BeginTravel();
-    }
-
-    private void TickWaitingAccept()
+    /// <summary>
+    /// 07-B1 (D3, D5), 07-B2: a Call that isn't travelling. Her Accept (from the prompt's Draw) is remembered for the
+    /// Call; <see cref="CallAskFirst.Decide"/> rules whether it travels now. While it waits, the prompt shows who is
+    /// calling, where to, and what is in the way: Accept and Decline outside Hardcore, information only in Hardcore
+    /// (a failed prompt keeps its Accept, the retry). WaitingGates waits before travel; WaitingAccept is the failed
+    /// prompt.
+    /// </summary>
+    private void TickWaiting()
     {
         if (_pending is null)
             return;
 
-        if (IsCrafting() || IsInInstance())
-        {
-            _prompt.IsOpen = false;
-            SetPhase(CallPhase.WaitingGates);
-            return;
-        }
-
-        var reason = _prompt.Reason;
-        var clear = reason switch
-        {
-            CallPromptReason.Combat => !IsInCombat() && !IsExternallyBusy() && IsTravelReady,
-            CallPromptReason.Busy => !IsExternallyBusy() && !IsInCombat() && IsTravelReady,
-            // Failed retries abort leftover automation on Accept — don't keep the button locked
-            // because Lifestream is still draining from the attempt that just failed.
-            CallPromptReason.Failed => !IsInCombat() && IsTravelReady,
-            _ => !IsInCombat() && !IsExternallyBusy(),
-        };
-
-        _prompt.CanAccept = clear;
+        var hardcore = _config.HardcoreMode;
 
         if (_acceptRequested)
         {
             _acceptRequested = false;
-            TryAcceptPendingCall();
-            return;
+            // 07-B6: the rule remembers her Accept; on the failed prompt it is the retry, back to WaitingGates.
+            var step = CallAskFirst.OnAccept(hardcore, _callAccepted, _phase);
+            _callAccepted = step.Accepted;
+            if (step.Phase != _phase)
+            {
+                // A failed retry: the attempt that just failed may still be draining Lifestream/vnav.
+                AbortCallAutomation();
+                SetPhase(step.Phase);
+            }
         }
 
-        if (!_prompt.IsOpen)
-            _prompt.IsOpen = true;
+        // Read after her Accept: a retry is no longer failed.
+        var failed = _phase == CallPhase.WaitingAccept;
+        var gate = CurrentGate();
+        // 07-B2: her own trip shows as Busy until she accepts; read once a tick (it may abort our own draining).
+        // 07-B6: never on the failed prompt, so a trip she starts right after a failure isn't aborted without her Accept.
+        var herTravel = CallAskFirst.ReadsHerTravel(failed, gate) && IsHerTravelBusy();
+        switch (CallAskFirst.Decide(hardcore, _callAccepted, failed, gate, herTravel))
+        {
+            case CallStart.StopHerTravelThenTravel:
+                // 07-B2: only now, after her Accept (or Hardcore's own start), is her own trip stopped.
+                DebugCall("start: stopping her own travel first", throttle: false);
+                AbortCallAutomation();
+                BeginTravel();
+                return;
+            case CallStart.Travel:
+                BeginTravel();
+                return;
+        }
+
+        if (gate == CallGate.Crafting && !_craftNotified)
+        {
+            _craftNotified = true;
+            PluginChat.Print(_chat, PresenceRequiredEcho(), PluginChat.Yellow);
+        }
+
+        // 07-A2: every waiting tick lands here (a duty or zone load too); the gate sends a changed status once.
+        if (!failed)
+            Ack(AckStatusFor(gate));
+
+        ShowWaitingPrompt(failed ? CallPromptReason.Failed : PromptReasonFor(gate, herTravel), hardcore, failed);
     }
 
-    private void OnPromptAccept()
+    /// <summary>07-B1: the Accept button's callback, from the prompt's Draw. Only sets a flag; the next tick consumes it.</summary>
+    private void OnPromptAccept() => _acceptRequested = true;
+
+    /// <summary>07-B1: the Decline or Stop button's callback, from the prompt's Draw. Only sets a flag; the next tick consumes it.</summary>
+    private void OnPromptDecline() => _declineRequested = true;
+
+    /// <summary>
+    /// 07-B1 (D4): her Decline, or Stop during travel: <see cref="CallResultStatuses.Declined"/> to the owner, our travel
+    /// stopped and the lock restored (<see cref="CancelInternal"/>), and that owner's quiet period started (in
+    /// <see cref="FinishAsync"/>). Never in Hardcore (D5). True when the Call ended.
+    /// </summary>
+    private bool TryDeclineActiveCall()
     {
-        if (_pending is null || !_prompt.CanAccept)
-            return;
+        if (_pending is null || !CallAskFirst.MayDecline(_config.HardcoreMode))
+            return false;
 
-        // This callback runs during UI drawing. Native IPC, automation cancellation, and input
-        // hook activation are handled by TickWaitingAccept on the next framework update.
-        _acceptRequested = true;
-        _prompt.IsOpen = false;
+        DebugCall($"declined by her in {_phase}", throttle: false);
+        PluginChat.Print(_chat, $"You declined {OwnerLabel(_pending.OwnerKey)}'s Call.", PluginChat.Grey);
+        Forget(FinishAsync(CallResultStatuses.Declined, "Call declined."), "decline result");
+        return true;
     }
 
-    private void TryAcceptPendingCall()
+    /// <summary>07-B1: the first gate that keeps a Call from travelling (her own travel is <see cref="IsHerTravelBusy"/>).</summary>
+    private CallGate CurrentGate()
+    {
+        if (IsCrafting())
+            return CallGate.Crafting;
+        if (IsInInstance())
+            return CallGate.Instance;
+        if (IsInCombat())
+            return CallGate.Combat;
+        // vnavmesh may report not-ready briefly after a zone load: waited out, within the wait limit.
+        return IsTravelReady ? CallGate.None : CallGate.NotReady;
+    }
+
+    /// <summary>The ack for a waiting Call: its gate, or busy while it waits for her answer, her own trip or readiness.</summary>
+    private static string AckStatusFor(CallGate gate) => gate switch
+    {
+        CallGate.Crafting => CallAckStatuses.Crafting,
+        CallGate.Instance => CallAckStatuses.Instance,
+        CallGate.Combat => CallAckStatuses.Combat,
+        _ => CallAckStatuses.Busy,
+    };
+
+    private static CallPromptReason PromptReasonFor(CallGate gate, bool herTravel) => gate switch
+    {
+        CallGate.Crafting => CallPromptReason.Crafting,
+        CallGate.Instance => CallPromptReason.Instance,
+        CallGate.Combat => CallPromptReason.Combat,
+        CallGate.NotReady => CallPromptReason.NotReady,
+        _ => herTravel ? CallPromptReason.Busy : CallPromptReason.Asking,
+    };
+
+    /// <summary>07-B1, 07-B4: the waiting prompt, set each tick (Esc and a close button can't dismiss it).</summary>
+    private void ShowWaitingPrompt(CallPromptReason reason, bool hardcore, bool failed)
     {
         if (_pending is null)
             return;
 
-        // A fresh request was already cleaned when it was received. Repeating both synchronous
-        // stop/abort IPC calls here causes a visible hitch immediately after combat. Failed retries
-        // are the only Accept path where stale plugin task queues may still need another drain.
-        if (_prompt.Reason == CallPromptReason.Failed)
-            AbortCallAutomation();
+        _prompt.Reason = reason;
+        _prompt.OwnerLabel = OwnerLabel(_pending.OwnerKey);
+        _prompt.Destination = _pending.Destination;
+        _prompt.Accepted = _callAccepted;
+        _prompt.Hardcore = hardcore;
+        _prompt.ShowAccept = CallAskFirst.OffersAccept(hardcore, _callAccepted, failed);
+        _prompt.ShowDecline = CallAskFirst.MayDecline(hardcore);
+        _prompt.IsOpen = true;
+    }
 
-        if (IsCrafting() || IsInInstance() || IsInCombat())
-        {
-            SetPhase(CallPhase.WaitingGates);
+    /// <summary>07-B1: the small non-modal "Answering &lt;label&gt;'s Call…" window during travel; Stop only outside Hardcore.</summary>
+    private void ShowTravelWindow()
+    {
+        if (_pending is null)
             return;
-        }
 
-        // Readiness can change between drawing the button and handling its click.
-        if (!IsTravelReady)
-        {
-            _prompt.IsOpen = true;
-            _prompt.CanAccept = false;
-            SetPhase(CallPhase.WaitingAccept);
-            return;
-        }
-
-        // After a failed attempt, leftover Lifestream/vnav must not bounce us back to Busy.
-        if (_prompt.Reason != CallPromptReason.Failed && IsExternallyBusy())
-        {
-            SetPhase(CallPhase.WaitingGates);
-            return;
-        }
-
-        BeginTravel();
+        var hardcore = _config.HardcoreMode;
+        _prompt.Reason = CallPromptReason.Travelling;
+        _prompt.OwnerLabel = OwnerLabel(_pending.OwnerKey);
+        _prompt.Hardcore = hardcore;
+        _prompt.ShowAccept = false;
+        _prompt.ShowDecline = CallAskFirst.MayDecline(hardcore);
+        _prompt.IsOpen = true;
     }
 
     private void BeginTravel()
@@ -916,7 +1030,6 @@ public sealed class CallTravelService : IDisposable
         if (_pending is null)
             return;
 
-        _prompt.IsOpen = false;
         _subdivisionHopAttempted = false;
         _housingCityTeleportAttempted = false;
         _housingGoRetryAttempted = false;
@@ -931,6 +1044,8 @@ public sealed class CallTravelService : IDisposable
         // her up) first. It also mutes input, but nothing steers toward the destination until local pathing —
         // otherwise we walk housing coords through the current zone's mesh (into walls).
         SetPhase(changeWorld ? CallPhase.ChangingWorld : CallPhase.Teleporting);
+        // 07-B1: the prompt becomes the small "Answering…" window (Stop outside Hardcore).
+        ShowTravelWindow();
         Ack(CallAckStatuses.Traveling);
         PluginChat.Print(_chat, PresenceRequiredEcho(), PluginChat.Yellow);
         DebugCall($"begin travel → {FormatPendingSummary(_pending)} | {FormatLocalHousingSnapshot()}", throttle: false);
@@ -1325,24 +1440,20 @@ public sealed class CallTravelService : IDisposable
         DebugCall(CallLogRules.Forced($"FAILED: {detail}", _phase, PendingKind(), exceptionType), throttle: false, force: true);
         DebugCall($"FAILED at: {FormatPendingSummary(_pending)} | {FormatPathGateSummary()}", throttle: false);
 
-        AbortCallAutomation();
+        // 07-B2: ours only (the exception path can land here before any travel).
+        AbortOurAutomation();
         _timer.SetCallTravelPathingPassThrough(false);
         _timer.SetCallTravelLifestreamDriving(false);
         _timer.SetCallTravelCastingFlyPass(false);
         PluginChat.Print(_chat, CallErrorEcho, PluginChat.Yellow);
-        ShowPrompt(CallPromptReason.Failed, canAccept: !IsInCombat() && IsTravelReady);
         // 07-A1: out of travel, so the bypass and mute go off (after landing, when in the air): an unwound doll is
         // locked again, and sits, while the failed prompt waits. 07-A3: the failed-prompt limit starts over.
         SetPhase(CallPhase.WaitingAccept);
+        // 07-B1: a failure asks her again (Accept retries, Decline ends it; Hardcore keeps only the retry).
+        _callAccepted = false;
+        ShowWaitingPrompt(CallPromptReason.Failed, _config.HardcoreMode, failed: true);
         _deadlines.MarkFailure();
         Ack(CallAckStatuses.Busy);
-    }
-
-    private void ShowPrompt(CallPromptReason reason, bool canAccept)
-    {
-        _prompt.Reason = reason;
-        _prompt.CanAccept = canAccept;
-        _prompt.IsOpen = true;
     }
 
     private async Task AckAsync(string status)
@@ -1375,13 +1486,16 @@ public sealed class CallTravelService : IDisposable
         {
             if (string.Equals(status, CallResultStatuses.Arrived, StringComparison.Ordinal))
                 PluginChat.Print(_chat, "Debug call recall arrived.", PluginChat.Green);
-            else if (string.Equals(status, CallResultStatuses.Cancelled, StringComparison.Ordinal))
+            else if (string.Equals(status, CallResultStatuses.Cancelled, StringComparison.Ordinal)
+                     || string.Equals(status, CallResultStatuses.Declined, StringComparison.Ordinal))
                 PluginChat.Print(_chat, "Debug call recall cancelled.", PluginChat.Grey);
             else
                 PluginChat.Print(_chat, CallErrorEcho, PluginChat.Yellow);
             return;
         }
 
+        // 07-B1 (D4): her Decline starts this owner's quiet period; a cancel (the safeword) or any other end doesn't.
+        _quiet.Record(pending.OwnerKey, status);
         DebugCall($"result {status}: {message}", throttle: false);
 
         await _sendResult(new CallResultPayload
@@ -1419,12 +1533,15 @@ public sealed class CallTravelService : IDisposable
     /// </summary>
     private void CancelInternal(bool landingGrace = true)
     {
-        AbortCallAutomation();
+        // 07-B2: our own travel only: a Call declined while she travels herself leaves her trip alone.
+        AbortOurAutomation();
         SetPhase(CallPhase.Idle);
         if (!landingGrace)
             _landing.End();
         _prompt.IsOpen = false;
         _acceptRequested = false;
+        _declineRequested = false;
+        _callAccepted = false;
         _timer.SetCallTravelBypass(_landing.IsActive);
         _timer.SetCallTravelPathingPassThrough(false);
         _timer.SetCallTravelLifestreamDriving(false);
@@ -1473,8 +1590,27 @@ public sealed class CallTravelService : IDisposable
                + $"pos ({stored.X:F1}, {stored.Y:F1}, {stored.Z:F1}).";
     }
 
-    /// <summary>Stop vnavmesh and abort Lifestream so a cancelled/failed call cannot block the next one.</summary>
+    /// <summary>
+    /// Stop vnavmesh and abort Lifestream so a cancelled/failed call cannot block the next one. 07-B2: called only for
+    /// our own automation, or for her own trip once she has accepted (or Hardcore starts); the time is kept, so that
+    /// busy travel in the next <see cref="CallAskFirst.OwnDrainMs"/> counts as ours draining.
+    /// </summary>
     private void AbortCallAutomation()
+    {
+        StopAutomationIpc();
+        _weOwnTravel = false;
+        _lastOwnAbortMs = _clock();
+    }
+
+    /// <summary>07-B2: <see cref="AbortCallAutomation"/> only while the Call drives her (a travel phase, or our own travel).</summary>
+    private void AbortOurAutomation()
+    {
+        if (_weOwnTravel || CallLockPolicy.IsTravelPhase(_phase))
+            AbortCallAutomation();
+    }
+
+    /// <summary>The vnav stop and Lifestream abort IPC; failures are ignored.</summary>
+    private void StopAutomationIpc()
     {
         try
         {
@@ -1493,22 +1629,10 @@ public sealed class CallTravelService : IDisposable
         {
             // ignore
         }
-
-        _weOwnTravel = false;
     }
 
-    private string ClassifyGateStatus()
-    {
-        if (IsCrafting())
-            return CallAckStatuses.Crafting;
-        if (IsInInstance())
-            return CallAckStatuses.Instance;
-        if (IsInCombat())
-            return CallAckStatuses.Combat;
-        if (IsExternallyBusy())
-            return CallAckStatuses.Busy;
-        return CallAckStatuses.Traveling;
-    }
+    /// <summary>The first ack: the gate that holds, or busy (07-B1: nothing travels before her answer or the next tick).</summary>
+    private string ClassifyGateStatus() => AckStatusFor(CurrentGate());
 
     private bool IsCrafting() =>
         _condition[ConditionFlag.Crafting] || _condition[ConditionFlag.ExecutingCraftingAction];
@@ -1528,11 +1652,21 @@ public sealed class CallTravelService : IDisposable
         || _condition[ConditionFlag.BoundByDuty95]
         || IsBetweenAreas();
 
-    private bool IsExternallyBusy()
+    /// <summary>
+    /// 07-B2: Lifestream or vnav busy with travel that isn't ours: her own trip (or another plugin's). Busy within
+    /// <see cref="CallAskFirst.OwnDrainMs"/> of our own abort is our automation still draining: it is aborted again
+    /// (without restarting that window) and isn't shown as Busy.
+    /// </summary>
+    private bool IsHerTravelBusy()
     {
-        if (_weOwnTravel)
+        if (_weOwnTravel || !(IsLifestreamBusy() || IsVnavBusy()))
             return false;
-        return IsLifestreamBusy() || IsVnavBusy();
+        if (!CallAskFirst.IsOwnDrain(_lastOwnAbortMs, _clock()))
+            return true;
+
+        DebugCall("busy: our own automation still draining; aborted again", key: "own-drain");
+        StopAutomationIpc();
+        return false;
     }
 
     private void BindIpc()
@@ -2691,17 +2825,143 @@ public sealed class CallTravelService : IDisposable
         }
     }
 
-    private string PresenceRequiredEcho()
-    {
-        if (_pending is null)
-            return "Your presence is required by your owner.";
+    private string PresenceRequiredEcho() =>
+        _pending is null
+            ? "Your presence is required by your owner."
+            : $"Your presence is required by {OwnerLabel(_pending.OwnerKey)}.";
 
-        var pair = _config.FindPairByKey(_pending.OwnerKey);
-        var label = pair?.GetMessageLabel();
+    /// <summary>The owner's local label (nickname, title, Name@World), or "your owner"; never payload text.</summary>
+    private string OwnerLabel(string ownerKey)
+    {
+        var label = _config.FindPairByKey(ownerKey)?.GetMessageLabel();
         if (string.IsNullOrWhiteSpace(label) || string.Equals(label, "DEBUGCALL", StringComparison.Ordinal))
             label = "your owner";
+        return label;
+    }
 
-        return $"Your presence is required by {label}.";
+    /// <summary>
+    /// 07-B4 (D13): where the Call goes, for the prompt: the zone and world, or for housing the district, ward and the
+    /// plot or apartment. Names come from Lumina (by the Call's ids), numbers from the validated Call; no payload text.
+    /// </summary>
+    private string DescribeDestination(PendingCall call)
+    {
+        var world = ResolveWorldName(call.WorldId);
+        string place;
+        if (call.IsHousingCall)
+        {
+            var district = HousingCallLocation.TryGetResidentialTerritoryForCity(call.HousingCity) is { } districtId
+                ? TerritoryName(districtId)
+                : string.Empty;
+            place = $"{(string.IsNullOrEmpty(district) ? "Residential district" : district)}, Ward {call.HousingWard}";
+            if (call.HousingDivision == 2)
+                place += " (Subdivision)";
+            if (call.HousingIsApartment)
+                place += call.HousingApartment > 0 ? $", Apartment {call.HousingApartment}" : ", Apartments";
+            else if (call.HousingPlot > 0)
+                // An outdoor Call's plot is only the nearest one (FindNearestHousingPlot).
+                place += call.HousingIndoor ? $", Plot {call.HousingPlot}" : $", near Plot {call.HousingPlot}";
+        }
+        else
+        {
+            place = TerritoryName(call.TerritoryId);
+            if (string.IsNullOrEmpty(place))
+                place = "Unknown zone";
+        }
+
+        return string.IsNullOrEmpty(world) ? place : $"{place} ({world})";
+    }
+
+    private string TerritoryName(uint territoryId)
+    {
+        try
+        {
+            if (_data.GetExcelSheet<TerritoryType>()?.TryGetRow(territoryId, out var row) == true)
+                return row.PlaceName.ValueNullable?.Name.ExtractText() ?? string.Empty;
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return string.Empty;
+    }
+
+    /// <summary>
+    /// 07-B3: the owner's territory from her party list, or null when they aren't in it. A member's ContentId maps to a
+    /// pairing key through <see cref="PairingKeyUtil.FromContentId"/>; neither is ever logged (04-D10).
+    /// </summary>
+    private CallPlace? OwnerPartyPlace(string ownerKey)
+    {
+        try
+        {
+            foreach (var member in _party)
+            {
+                if (member.ContentId == 0
+                    || !string.Equals(PairingKeyUtil.FromContentId((ulong)member.ContentId), ownerKey, StringComparison.Ordinal))
+                    continue;
+
+                return PlaceOf(member.Territory.RowId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Debug("Call party cross-check failed: {Type}", ex.GetType().Name);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 07-B3: the owner in her object table (so in her territory), or null when she can't see them. As for the party,
+    /// the ContentIds and keys are never logged (04-D10).
+    /// </summary>
+    private unsafe CallOwnerSighting? OwnerSighting(string ownerKey)
+    {
+        try
+        {
+            foreach (var obj in _objects.PlayerObjects)
+            {
+                if (obj.Address == nint.Zero)
+                    continue;
+
+                var contentId = ((FFXIVClientStructs.FFXIV.Client.Game.Character.Character*)obj.Address)->ContentId;
+                if (contentId == 0
+                    || !string.Equals(PairingKeyUtil.FromContentId(contentId), ownerKey, StringComparison.Ordinal))
+                    continue;
+
+                return new CallOwnerSighting(obj.Position, PlaceOf(_clientState.TerritoryType));
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Debug("Call sight cross-check failed: {Type}", ex.GetType().Name);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 07-B3: a territory for <see cref="CallCorroboration"/>: a residential district by its city, a housing interior
+    /// (<c>TerritoryIntendedUse</c> HousingIndoor) by its <c>PlaceNameRegion</c>'s city, anywhere else no city. 07-B6:
+    /// both are marked housing even when the interior's city doesn't resolve (an apartment lobby or interior outside the
+    /// known region set), which the cross-check then treats as nothing to check, not as a mismatch.
+    /// </summary>
+    private CallPlace PlaceOf(uint territoryId)
+    {
+        if (territoryId == 0)
+            return default;
+
+        if (HousingCallLocation.TryGetCityForTerritory(territoryId) is { } district)
+            return new CallPlace(territoryId, district, IsHousing: true);
+
+        if (_data.GetExcelSheet<TerritoryType>()?.TryGetRow(territoryId, out var row) == true
+            && row.TerritoryIntendedUse.RowId == HousingIndoorIntendedUse)
+        {
+            var city = HousingCallLocation.TryGetCityByPlaceNameRegion(row.PlaceNameRegion.RowId) ?? 0;
+            return new CallPlace(territoryId, city, IsHousing: true);
+        }
+
+        return new CallPlace(territoryId, 0);
     }
 
     /// <summary>
