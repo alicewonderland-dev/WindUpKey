@@ -44,4 +44,15 @@ public static class MessageTypes
     public const string DeliveryQueued = "deliveryQueued";
     /// <summary>Relay → sender: previously queued message handed to the target socket.</summary>
     public const string DeliveryDelivered = "deliveryDelivered";
+
+    private static readonly HashSet<string> Known = new(StringComparer.Ordinal)
+    {
+        Register, Wind, WindResult, WindRequest, Unwind, Error, Ping, Pong, PairSubmit, PairCancel, PairEstablished,
+        PairRemove, PresenceQuery, PresenceResult, OwnerGrant, OwnerRevoked, OwnerSettingsQuery, OwnerSettingsResult,
+        OwnerSettingsUpdate, OwnerSettingsAck, Call, CallAck, CallResult, PairSync, DollStatePush, DeliveryQueued,
+        DeliveryDelivered,
+    };
+
+    /// <summary>True when <paramref name="type"/> is one of the constants above.</summary>
+    public static bool IsKnown(string? type) => type is not null && Known.Contains(type);
 }

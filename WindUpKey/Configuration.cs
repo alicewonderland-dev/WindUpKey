@@ -405,7 +405,8 @@ public class Configuration : IPluginConfiguration
             .Select(d => new OwnedDoll
             {
                 DollKey = PairingKeyUtil.Normalize(d.DollKey),
-                Identity = d.Identity?.Trim() ?? string.Empty,
+                // 03-D11: the label came from the doll; one stored oversized by an older build is sanitised on the next save.
+                Identity = RemoteText.Sanitize(d.Identity, WireLimits.ShortField),
             })
             .Where(d => PairingKeyUtil.IsValid(d.DollKey))
             .GroupBy(d => d.DollKey, StringComparer.Ordinal)
@@ -490,19 +491,21 @@ public class Configuration : IPluginConfiguration
         if (!PairingKeyUtil.IsValid(key))
             return;
 
+        // 03-D11: a remote label, sanitised before it is stored.
+        identity = RemoteText.Sanitize(identity, WireLimits.ShortField);
         var existing = FindOwnedDoll(key);
         if (existing is null)
         {
             OwnedDolls.Add(new OwnedDoll
             {
                 DollKey = key,
-                Identity = identity?.Trim() ?? string.Empty,
+                Identity = identity,
             });
             return;
         }
 
         if (!string.IsNullOrWhiteSpace(identity))
-            existing.Identity = identity.Trim();
+            existing.Identity = identity;
     }
 
     public bool RemoveOwnedDoll(string dollKey)

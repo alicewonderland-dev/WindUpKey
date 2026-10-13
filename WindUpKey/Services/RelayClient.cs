@@ -47,6 +47,8 @@ public sealed class RelayClient : IDisposable
     public const string GenericWindFailure = "Unable to wind that player.";
     public const string GenericPairFailure = "Pairing could not be completed.";
     public const string GenericOwnerSettingsFailure = "Unable to update that doll's settings.";
+    /// <summary>03-D6: the relay refused to queue a message for an offline partner (<c>queue_full</c>).</summary>
+    public const string QueueFullFailure = "That partner's message queue is full; try again later.";
     public static readonly TimeSpan WindRequestCooldown = TimeSpan.FromHours(1);
     private static readonly TimeSpan PresenceThrottle = TimeSpan.FromSeconds(10);
 
@@ -91,7 +93,8 @@ public sealed class RelayClient : IDisposable
     private CancellationTokenSource? _loopCts;
     private Task? _loopTask;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
-    private int _reconnectDelayMs = 1000;
+    /// <summary>03-D14: reset when a register is accepted (pairSync), not when the socket opens.</summary>
+    private readonly RelayReconnectBackoff _backoff = new();
     private string? _lastStatus;
     private int _running;
     private int _loopGeneration;
@@ -603,7 +606,7 @@ public sealed class RelayClient : IDisposable
         ClearAuthBlock();
         // A login or Reconnect retries the identity file now, not after its retry delay.
         _identityStore.ResetRetryDelay();
-        _reconnectDelayMs = 1000;
+        _backoff.Reset();
         _loopCts = new CancellationTokenSource();
         var ct = _loopCts.Token;
         var generation = Interlocked.Increment(ref _loopGeneration);
@@ -1330,7 +1333,6 @@ public sealed class RelayClient : IDisposable
                 _log.Information("WindUpKey loop: connecting as {Identity}", identity);
                 var connection = await ConnectAndRegisterAsync(generation, epoch, ct).ConfigureAwait(false);
                 _lastStatus = null;
-                _reconnectDelayMs = 1000;
                 var rejectedCode = await ReceiveLoopAsync(connection.Socket, ct).ConfigureAwait(false);
                 if (rejectedCode is not null)
                 {
@@ -1394,14 +1396,12 @@ public sealed class RelayClient : IDisposable
             CloseSocketForGeneration(generation);
             try
             {
-                await Task.Delay(_reconnectDelayMs, ct).ConfigureAwait(false);
+                await Task.Delay(_backoff.Next(), ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
                 break;
             }
-
-            _reconnectDelayMs = Math.Min(_reconnectDelayMs * 2, 30_000);
         }
 
         _log.Debug("WindUpKey RunLoopAsync end");
@@ -1818,6 +1818,7 @@ public sealed class RelayClient : IDisposable
     private void OnRegisterAccepted()
     {
         _registerAccepted = true;
+        _backoff.RegisterAccepted();
         if (_connectionUrl is { } url)
         {
             _config.RelayUrl = url;
@@ -1908,17 +1909,20 @@ public sealed class RelayClient : IDisposable
     /// </summary>
     private async Task<string?> ReceiveLoopAsync(ClientWebSocket socket, CancellationToken ct)
     {
-        var buffer = new byte[16 * 1024];
+        // 03-D10: messages over the client's limit are discarded and the connection kept, logged once per connection.
+        var pump = new RelayInboundPump(limit => _log.Warning(
+            "WindUpKey discarded a relay message over {Limit} bytes; keeping the connection (logged once per connection)",
+            limit));
         while (socket.State == WebSocketState.Open && !ct.IsCancellationRequested)
         {
-            var result = await socket.ReceiveAsync(buffer, ct).ConfigureAwait(false);
-            if (result.MessageType == WebSocketMessageType.Close)
+            var inbound = await pump.NextAsync(socket, ct).ConfigureAwait(false);
+            if (inbound.Envelope is not { } envelope)
             {
                 // Relay refusals close with PolicyViolation; a secretless refusal sends no error first.
-                switch (RelayConnectPolicy.ClassifyClose(result.CloseStatus, result.CloseStatusDescription))
+                switch (RelayConnectPolicy.ClassifyClose(inbound.CloseStatus, inbound.CloseDescription))
                 {
                     case RelaySessionSignal.Rejected:
-                        return result.CloseStatusDescription;
+                        return inbound.CloseDescription;
                     case RelaySessionSignal.SessionReplaced:
                         await _framework.RunOnTick(ApplySessionReplaced, cancellationToken: ct)
                             .ConfigureAwait(false);
@@ -1928,20 +1932,10 @@ public sealed class RelayClient : IDisposable
                 break;
             }
 
-            if (result.MessageType != WebSocketMessageType.Text)
-                continue;
-
-            var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
-            while (!result.EndOfMessage)
-            {
-                result = await socket.ReceiveAsync(buffer, ct).ConfigureAwait(false);
-                json += Encoding.UTF8.GetString(buffer, 0, result.Count);
-            }
-
-            // Socket IO stays on this worker; all plugin/config/game state is applied on
-            // Dalamud's framework thread so lock hooks cannot change at an unsafe time.
+            // Socket IO and parsing the envelope stay on this worker (03-D10); all plugin/config/game state is applied
+            // on Dalamud's framework thread so lock hooks cannot change at an unsafe time.
             await _framework.RunOnTick(
-                    () => HandleMessageAsync(json, ct),
+                    () => HandleMessageAsync(envelope, ct),
                     cancellationToken: ct)
                 .ConfigureAwait(false);
 
@@ -1952,12 +1946,8 @@ public sealed class RelayClient : IDisposable
         return _registerRejection;
     }
 
-    private async Task HandleMessageAsync(string json, CancellationToken ct)
+    private async Task HandleMessageAsync(Envelope envelope, CancellationToken ct)
     {
-        var envelope = Envelope.TryParse(json);
-        if (envelope is null)
-            return;
-
         switch (envelope.Type)
         {
             case MessageTypes.Wind:
@@ -2193,6 +2183,8 @@ public sealed class RelayClient : IDisposable
                 return;
         }
 
+        // 03-D6: the relay didn't queue it for the offline partner; a fixed line, never the error's own message.
+        var queueFull = payload.Code == ErrorCodes.QueueFull;
         if (!string.IsNullOrEmpty(payload.RequestId))
         {
 #if WINDUP_TESTING
@@ -2204,9 +2196,11 @@ public sealed class RelayClient : IDisposable
             {
                 if (_pendingWindRequestIds.Remove(payload.RequestId))
                 {
-                    var message = payload.Code == ErrorCodes.WindRequestCooldown
-                        ? "You may request winding only once per hour."
-                        : "Unable to send that winding request.";
+                    var message = queueFull
+                        ? QueueFullFailure
+                        : payload.Code == ErrorCodes.WindRequestCooldown
+                            ? "You may request winding only once per hour."
+                            : "Unable to send that winding request.";
                     _notifier.NotifyWinderError(message);
                     return;
                 }
@@ -2214,16 +2208,24 @@ public sealed class RelayClient : IDisposable
             TryTakePendingWind(payload.RequestId, out _);
             if (TryTakePendingOwnerRequest(payload.RequestId, out var dollKey))
             {
-                var message = payload.Code == ErrorCodes.TargetOffline
-                    ? "That doll is offline."
-                    : payload.Code == ErrorCodes.NotAllowed
-                        ? "Not allowed to manage that doll."
-                        : GenericOwnerSettingsFailure;
+                var message = queueFull
+                    ? QueueFullFailure
+                    : payload.Code == ErrorCodes.TargetOffline
+                        ? "That doll is offline."
+                        : payload.Code == ErrorCodes.NotAllowed
+                            ? "Not allowed to manage that doll."
+                            : GenericOwnerSettingsFailure;
                 SetOwnerSettingsError(dollKey, message);
                 _notifier.NotifyWinderError(message);
                 await Task.CompletedTask.ConfigureAwait(false);
                 return;
             }
+        }
+
+        if (queueFull)
+        {
+            _notifier.NotifyWinderError(QueueFullFailure);
+            return;
         }
 
         if (payload.Code == ErrorCodes.PairKeyCollision)
@@ -2753,7 +2755,8 @@ public sealed class RelayClient : IDisposable
         if (!(_config.IsDebugEnabled && fromSelf) && !_consent.IsPairedByKey(dollKey))
             return;
 
-        ApplyLocalOwnerGrant(dollKey, payload.Identity);
+        // 03-D11: a remote label, sanitised before it is stored.
+        ApplyLocalOwnerGrant(dollKey, RemoteText.Sanitize(payload.Identity, WireLimits.ShortField));
     }
 
     private void HandleOwnerRevoked(Envelope envelope)
@@ -2811,7 +2814,8 @@ public sealed class RelayClient : IDisposable
             AutoGroundSit = _config.AutoGroundSit,
             LockEmoteId = _config.EffectiveLockEmoteId,
             SettingsLocked = _config.OwnerSettingsLocked,
-            Emotes = emotes,
+            // 03-D13: at most 512, names within the field limit, so the relay never drops the reply.
+            Emotes = RelayWireRules.OutgoingEmotes(emotes),
             CanCall = _consent.CanReceiveCallFromKey(fromKey),
             TravelReady = TravelPluginsReady(),
         }), ct).ConfigureAwait(false);
@@ -2964,9 +2968,8 @@ public sealed class RelayClient : IDisposable
                 AutoGroundSit = payload.AutoGroundSit,
                 LockEmoteId = payload.LockEmoteId == 0 ? (ushort)52 : payload.LockEmoteId,
                 SettingsLocked = payload.SettingsLocked,
-                Emotes = (payload.Emotes ?? [])
-                    .Select(e => (e.Id, e.Name ?? string.Empty))
-                    .ToList(),
+                // 03-D12: named from this client's own Emote sheet by ID; the doll's names only as a sanitised fallback.
+                Emotes = RelayWireRules.ResolveOwnerEmotes(payload.Emotes, _commands.GetEmoteName),
                 CanCall = payload.CanCall,
                 TravelReady = payload.TravelReady,
                 LastError = null,
@@ -3143,7 +3146,10 @@ public sealed class RelayClient : IDisposable
         }
     }
 
-    /// <summary>True when the frame was sent; false when there is no open socket. A failed send throws.</summary>
+    /// <summary>
+    /// True when the frame was sent; false when there is no open socket, or the message is over the relay's limit (it's
+    /// logged and dropped). A failed send throws.
+    /// </summary>
     private async Task<bool> SendEnvelopeAsync(Envelope envelope, CancellationToken ct)
     {
         ClientWebSocket? socket;
@@ -3153,7 +3159,13 @@ public sealed class RelayClient : IDisposable
         if (socket is not { State: WebSocketState.Open })
             return false;
 
-        var bytes = Encoding.UTF8.GetBytes(envelope.Serialize());
+        // 03-D13: never more than the relay reads, so a new client can't trip its 1009 close.
+        if (!RelayWireRules.TryEncodeForSend(envelope, out var bytes))
+        {
+            _log.Warning("WindUpKey did not send a {Type} of {Bytes} bytes: over the relay's message limit", envelope.Type, bytes.Length);
+            return false;
+        }
+
         await _sendLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {

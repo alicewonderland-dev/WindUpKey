@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.WebSockets;
+using System.Threading;
 using WindUpKey.Protocol;
 
 namespace WindUpKey.Services;
@@ -370,7 +371,8 @@ public sealed class RelayConnectPolicy
     /// <summary>
     /// What the relay closing the socket means for the session (decision 12): relay refusals close with
     /// PolicyViolation and the code as the description (a secretless refusal sends no error first). Any other close
-    /// is <see cref="RelaySessionSignal.None"/>.
+    /// is <see cref="RelaySessionSignal.None"/>, including the 03 limit closes (<see cref="WireCloseReasons"/>), so none
+    /// of them causes an auth block (03-D14).
     /// </summary>
     public static RelaySessionSignal ClassifyClose(WebSocketCloseStatus? status, string? description)
     {
@@ -396,4 +398,39 @@ public sealed class RelayConnectPolicy
             _blockCode = null;
         }
     }
+}
+
+/// <summary>
+/// The connect loop's reconnect delay (03-D14). It doubles after every failed or ended connection up to
+/// <see cref="Max"/>, and goes back to <see cref="Initial"/> only when a register is accepted (the relay's pairSync),
+/// or on <see cref="Reset"/> (login, Reconnect). An open socket alone isn't a reason: a host that keeps closing the
+/// client before accepting it (a limit, a refusal) is retried on the normal backoff, not every second. Thread-safe.
+/// </summary>
+public sealed class RelayReconnectBackoff
+{
+    public static readonly TimeSpan Initial = TimeSpan.FromSeconds(1);
+    public static readonly TimeSpan Max = TimeSpan.FromSeconds(30);
+
+    private long _delayTicks = Initial.Ticks;
+
+    /// <summary>The delay the next <see cref="Next"/> returns.</summary>
+    public TimeSpan Current => TimeSpan.FromTicks(Interlocked.Read(ref _delayTicks));
+
+    /// <summary>The delay to wait before the next attempt; the one after it is twice as long, up to <see cref="Max"/>.</summary>
+    public TimeSpan Next()
+    {
+        while (true)
+        {
+            var current = Interlocked.Read(ref _delayTicks);
+            var doubled = Math.Min(current * 2, Max.Ticks);
+            if (Interlocked.CompareExchange(ref _delayTicks, doubled, current) == current)
+                return TimeSpan.FromTicks(current);
+        }
+    }
+
+    /// <summary>The relay accepted this connection's register.</summary>
+    public void RegisterAccepted() => Reset();
+
+    /// <summary>Back to <see cref="Initial"/>.</summary>
+    public void Reset() => Interlocked.Exchange(ref _delayTicks, Initial.Ticks);
 }

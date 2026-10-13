@@ -388,7 +388,8 @@ public sealed class CallTravelService : IDisposable
             RequestId = payload.RequestId,
             OwnerKey = ownerKey,
             WorldId = payload.WorldId,
-            WorldName = payload.WorldName?.Trim() ?? string.Empty,
+            // 03-D11: an over-long remote world name is ignored (empty), so travel falls back to WorldId → name.
+            WorldName = RemoteText.WholeOrEmpty(payload.WorldName, WireLimits.ShortField),
             TerritoryId = payload.TerritoryId,
             Position = new Vector3(payload.X, payload.Y, payload.Z),
             HousingCity = payload.HousingCity,

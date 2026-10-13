@@ -537,6 +537,11 @@ public static class ErrorCodes
     public const string AuthRequired = "auth_required";
     /// <summary>Relay → client: an authenticated session for the same key took over this one.</summary>
     public const string SessionReplaced = "session_replaced";
+    /// <summary>
+    /// Relay → sender (with <c>requestId</c> and <c>to</c>): the offline partner's message queue is full, so this message
+    /// wasn't queued (03-D6). Not relay-only; old clients show their generic failure for it.
+    /// </summary>
+    public const string QueueFull = "queue_full";
 
     /// <summary>
     /// Session-level codes only the relay may send. The relay drops routed errors with these codes,

@@ -1277,7 +1277,8 @@ public sealed class ConfigWindow : Window, IDisposable
         foreach (var (id, name) in emotes)
         {
             var isSelected = id == selectedId;
-            if (ImGui.Selectable($"{name}##{idPrefix}_{id}", isSelected))
+            // 03-D12: "###" makes the ID only the part after it, so a (remote) name can never change or collide IDs.
+            if (ImGui.Selectable($"{name}###{idPrefix}_{id}", isSelected))
                 onSelected(id);
             if (isSelected)
                 ImGui.SetItemDefaultFocus();
@@ -1285,7 +1286,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
         if (showMissingEntry && missingName is not null)
         {
-            if (ImGui.Selectable($"{missingName}##{idPrefix}_missing", true))
+            if (ImGui.Selectable($"{missingName}###{idPrefix}_missing", true))
                 onSelected(selectedId);
         }
 
