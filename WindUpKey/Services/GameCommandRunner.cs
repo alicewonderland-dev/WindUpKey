@@ -21,9 +21,6 @@ public sealed unsafe class GameCommandRunner(
     /// <summary>Emote sheet row for Sit (`/sit`). Prefer <see cref="ResolveSitEmoteIds"/> at runtime.</summary>
     public const ushort SitEmoteId = 13;
 
-    /// <summary>Emote sheet row for Sit on Ground (`/groundsit`).</summary>
-    public const ushort GroundSitEmoteId = 52;
-
     private const int UnlockedEmotesCacheMs = 5000;
 
     private IReadOnlyList<(ushort Id, string Name)>? _unlockedLoopingEmotesCache;
@@ -71,7 +68,7 @@ public sealed unsafe class GameCommandRunner(
 
         // Absolute fallback if localization/command lookup missed them.
         TryAddForcedSitEmote(sheet, list, seen, SitEmoteId, "Sit");
-        TryAddForcedSitEmote(sheet, list, seen, GroundSitEmoteId, "Sit on Ground");
+        TryAddForcedSitEmote(sheet, list, seen, CharacterProfile.GroundSitEmoteId, "Sit on Ground");
 
         _unlockedLoopingEmotesCache = list
             .OrderBy(e => e.Name, StringComparer.CurrentCultureIgnoreCase)
@@ -169,23 +166,20 @@ public sealed unsafe class GameCommandRunner(
         return TryExecuteEmote(id);
     }
 
-    /// <summary>Play the configured lock emote; ignores readiness (best-effort).</summary>
-    public void ExecuteLockEmote() => TryExecuteLockEmote();
-
     private ushort ResolveLockEmoteId()
     {
         var id = config.EffectiveLockEmoteId;
-        if (id != GroundSitEmoteId && IsEmoteIdUnlockedAndLooping(id))
+        if (id != CharacterProfile.GroundSitEmoteId && IsEmoteIdUnlockedAndLooping(id))
             return id;
 
-        return GroundSitEmoteId;
+        return CharacterProfile.GroundSitEmoteId;
     }
 
     private bool IsEmoteIdUnlockedAndLooping(ushort emoteId)
     {
         var sheet = data.GetExcelSheet<Emote>();
         if (sheet is null || !sheet.TryGetRow(emoteId, out var emote))
-            return emoteId is SitEmoteId or GroundSitEmoteId;
+            return emoteId is SitEmoteId or CharacterProfile.GroundSitEmoteId;
 
         var name = emote.Name.ToString();
         if (IsSitOrGroundSitEmote(emote, name ?? string.Empty))

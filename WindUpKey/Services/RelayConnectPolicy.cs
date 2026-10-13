@@ -349,6 +349,19 @@ public sealed class RelayConnectPolicy
         loggedIn && (localCharacterRead || wasReady);
 
     /// <summary>
+    /// 06-A9: whether an inbound message, queued for the framework thread on the connection opened in
+    /// <paramref name="arrivedEpoch"/> for the profile <paramref name="arrivedProfile"/> (ContentId hex), may still be
+    /// handled. A character switch closes that socket, but a message already queued would otherwise run after it, and
+    /// apply to the new character. It is dropped once the connect cycle moved on (a switch, login, Reconnect, import
+    /// or revert all start a new epoch) or another profile is active. A connection always registers for a profile,
+    /// so an empty one never matches.
+    /// </summary>
+    public static bool InboundStillCurrent(int arrivedEpoch, string? arrivedProfile, int currentEpoch, string? activeProfile) =>
+        arrivedEpoch == currentEpoch
+        && !string.IsNullOrEmpty(arrivedProfile)
+        && string.Equals(arrivedProfile, activeProfile, StringComparison.Ordinal);
+
+    /// <summary>
     /// What an error envelope from the relay connection means for the session (decision 7). The session-level codes
     /// only the relay may send (<see cref="ErrorCodes.IsRelayOnly"/>) count only when the error has no <c>to</c>:
     /// relay-originated errors never set one, and routed (peer-sent) errors always do, so those are ignored. Relay-only
@@ -486,4 +499,31 @@ public sealed class RelayReconnectBackoff
 
     /// <summary>Back to <see cref="Initial"/>.</summary>
     public void Reset() => Interlocked.Exchange(ref _delayTicks, Initial.Ticks);
+}
+
+/// <summary>
+/// 06-A12: <see cref="RelayClient.ProfileActivated"/> fires once per login or plugin load. "Raised for this login" is
+/// tracked on its own, apart from the character-ready state (which a client-state read error clears), and is cleared
+/// only when <c>IsLoggedIn</c> is read as false. No Dalamud dependency; framework thread only (not thread-safe).
+/// </summary>
+public sealed class ProfileActivationLatch
+{
+    /// <summary>Whether the event was raised since the last logout (or the plugin load).</summary>
+    public bool Raised { get; private set; }
+
+    /// <summary><c>IsLoggedIn</c> was read as false: the next activation belongs to a new login.</summary>
+    public void LoggedOut() => Raised = false;
+
+    /// <summary>
+    /// The logged-in character's profile was activated this tick (<paramref name="profileActive"/>): true the first time
+    /// since the last <see cref="LoggedOut"/>, when the caller raises the event; false otherwise.
+    /// </summary>
+    public bool TryRaise(bool profileActive)
+    {
+        if (!profileActive || Raised)
+            return false;
+
+        Raised = true;
+        return true;
+    }
 }

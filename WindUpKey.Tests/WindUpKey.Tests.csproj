@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
-    Dalamud-free tests for the plugin's relay identity, sync, unpair-queue, wire-limit and self-test code. Not part of the plugin build or its packaging:
+    Dalamud-free tests for the plugin's relay identity, sync, unpair-queue, wire-limit and self-test code, and the rules
+    behind issue 06's review fixes. Not part of the plugin build or its packaging:
     nothing references this project, and deploy/Pack-Plugin.ps1 builds only WindUpKey/WindUpKey.csproj.
     Run with: dotnet test WindUpKey.Tests
   -->
@@ -37,6 +38,19 @@
     <Compile Include="..\WindUpKey\RemoteText.cs" Link="Plugin\RemoteText.cs" />
     <Compile Include="..\WindUpKey\LogRedact.cs" Link="Plugin\LogRedact.cs" />
     <Compile Include="..\WindUpKey\Services\RelayWireRules.cs" Link="Plugin\RelayWireRules.cs" />
+    <!-- 06 Part A: the profile, and the Dalamud-free rules of the review fixes. -->
+    <Compile Include="..\WindUpKey\CharacterProfile.cs" Link="Plugin\CharacterProfile.cs" />
+    <Compile Include="..\WindUpKey\PlayerRole.cs" Link="Plugin\PlayerRole.cs" />
+    <Compile Include="..\WindUpKey\ProfileMigration.cs" Link="Plugin\ProfileMigration.cs" />
+    <Compile Include="..\WindUpKey\Ui\LockEmoteDisplay.cs" Link="Plugin\LockEmoteDisplay.cs" />
+    <Compile Include="..\WindUpKey\Ui\CharacterBoundConfirm.cs" Link="Plugin\CharacterBoundConfirm.cs" />
+    <Compile Include="..\WindUpKey\Services\LowWindProfileGuard.cs" Link="Plugin\LowWindProfileGuard.cs" />
+    <Compile Include="..\WindUpKey\Services\MoodlesSyncGate.cs" Link="Plugin\MoodlesSyncGate.cs" />
+    <Compile Include="..\WindUpKey\Services\SafewordText.cs" Link="Plugin\SafewordText.cs" />
+    <Compile Include="..\WindUpKey\Services\ClipLedger.cs" Link="Plugin\ClipLedger.cs" />
+    <Compile Include="..\WindUpKey\Services\WindMath.cs" Link="Plugin\WindMath.cs" />
+    <Compile Include="..\WindUpKey\Services\LoginSitRule.cs" Link="Plugin\LoginSitRule.cs" />
+    <Compile Include="..\WindUpKey\Sources\CommendationTracker.cs" Link="Plugin\CommendationTracker.cs" />
     <!-- The self-test's Dalamud-free units (04 Architecture); its thin adapters (SelfTestHost, SelfTestController) need Dalamud. -->
     <Compile Include="..\WindUpKey\SelfTest\*.cs" LinkBase="Plugin\SelfTest" />
     <ProjectReference Include="..\WindUpKey.Protocol\WindUpKey.Protocol.csproj" />

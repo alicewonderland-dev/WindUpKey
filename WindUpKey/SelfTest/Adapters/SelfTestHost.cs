@@ -218,7 +218,7 @@ internal sealed class SelfTestHost(
         if (emotes is not null)
         {
             rows.Add(new SheetRowFact("P-data-emote", "Emote", GameCommandRunner.SitEmoteId, "Sit", emotes.TryGetRow(GameCommandRunner.SitEmoteId, out _)));
-            rows.Add(new SheetRowFact("P-data-emote", "Emote", GameCommandRunner.GroundSitEmoteId, "Sit on Ground", emotes.TryGetRow(GameCommandRunner.GroundSitEmoteId, out _)));
+            rows.Add(new SheetRowFact("P-data-emote", "Emote", CharacterProfile.GroundSitEmoteId, "Sit on Ground", emotes.TryGetRow(CharacterProfile.GroundSitEmoteId, out _)));
             // The looping-emote query GameCommandRunner uses (EmoteMode and TextCommand set), over the whole sheet.
             loopingEmotes = emotes.Count(e => e.EmoteMode.RowId != 0 && e.TextCommand.RowId != 0);
         }

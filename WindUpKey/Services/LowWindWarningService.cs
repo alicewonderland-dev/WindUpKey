@@ -34,6 +34,7 @@ public sealed class LowWindWarningService
     private readonly LowWindMessagesConfig _messages;
     private readonly SoundEffectService _sounds;
     private readonly Random _rng = new();
+    private readonly LowWindProfileGuard _profileGuard = new();
     private TimeSpan? _lastRemaining;
 
     public LowWindWarningService(
@@ -51,6 +52,7 @@ public sealed class LowWindWarningService
     /// <summary>Call each framework tick. Fires only on a downward cross of a random trigger.</summary>
     public void Tick()
     {
+        ForgetOtherProfile();
         if (!TryGetRemaining(out var remaining))
         {
             // Natural expiry: doll timer hit zero. Leaving Doll (role change) also makes
@@ -102,6 +104,7 @@ public sealed class LowWindWarningService
     /// </summary>
     public void OnLoggedIn()
     {
+        ForgetOtherProfile();
         if (!TryGetRemaining(out var remaining) || remaining > HighMax)
             return;
 
@@ -154,6 +157,7 @@ public sealed class LowWindWarningService
         if (!_config.IsDoll)
             return;
 
+        ForgetOtherProfile();
         if (!TryGetRemaining(out var remaining))
         {
             ClearAll();
@@ -216,6 +220,7 @@ public sealed class LowWindWarningService
     public void OnCleared(string? winderName = null)
     {
         // Clear tracking first so a re-entrant Tick (e.g. from chat/config save) cannot also echo.
+        ForgetOtherProfile();
         var shouldEcho = _config.IsDoll && _lastRemaining is { } prev && prev > TimeSpan.Zero;
         ClearAll();
         if (!shouldEcho)
@@ -359,6 +364,13 @@ public sealed class LowWindWarningService
         fired |= flag;
         return true;
     }
+
+    /// <summary>
+    /// 06-A2: the last remaining time belongs to the profile it was seen on. After a character switch it is dropped
+    /// silently, so the new character's state is a first observation (no false "Expired" message or sound).
+    /// </summary>
+    private void ForgetOtherProfile() =>
+        _lastRemaining = _profileGuard.Filter(_config.ActiveContentId, _lastRemaining);
 
     private bool TryGetRemaining(out TimeSpan remaining)
     {

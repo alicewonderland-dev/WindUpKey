@@ -24,6 +24,7 @@ public sealed class ConfigWindow : Window, IDisposable
 #endif
     private readonly ITargetManager _targets;
     private readonly GameCommandRunner _commands;
+    private readonly MoodlesWindStatusService _moodlesStatus;
     private readonly string _lowWindMessagesPath;
     private readonly ChangelogWindow _changelogWindow;
     private readonly string _pluginVersion;
@@ -35,7 +36,24 @@ public sealed class ConfigWindow : Window, IDisposable
 
     /// <summary>The character the import confirmation was opened for; Confirm is refused if it changed.</summary>
     private string _relaySecretImportContentId = string.Empty;
-    private bool _hardcoreConfirm;
+    /// <summary>06-A7: the open Hardcore confirm, tied to the character it was opened for (null when closed).</summary>
+    private CharacterBoundConfirm? _hardcoreConfirm;
+
+    /// <summary>06-A7: the open ownership confirm, tied to the character and the partner it was opened for.</summary>
+    private CharacterBoundConfirm? _ownerConfirm;
+    private string _ownerConfirmLabel = string.Empty;
+    private bool _ownerConfirmOpenRequested;
+    private string? _ownerConfirmError;
+
+    /// <summary>06-A12: the character <see cref="_ownerConfirmError"/> was shown for; another one dismisses it.</summary>
+    private string _ownerConfirmErrorContentId = string.Empty;
+
+    /// <summary>06-A12: the lock emote whose name is cached in <see cref="_lockEmoteName"/> (null: nothing cached yet).</summary>
+    private ushort? _lockEmoteNameId;
+    private string? _lockEmoteName;
+
+    /// <summary>06-A4: the safeword being typed, until the edit ends (null when not editing).</summary>
+    private string? _safewordDraft;
 #if WINDUP_TESTING
     private QuestDifficulty? _questConfirmDifficulty;
 #endif
@@ -66,6 +84,7 @@ public sealed class ConfigWindow : Window, IDisposable
 #endif
         ITargetManager targets,
         GameCommandRunner commands,
+        MoodlesWindStatusService moodlesStatus,
         string lowWindMessagesPath,
         ChangelogWindow changelogWindow,
         string pluginVersion)
@@ -79,6 +98,7 @@ public sealed class ConfigWindow : Window, IDisposable
 #endif
         _targets = targets;
         _commands = commands;
+        _moodlesStatus = moodlesStatus;
         _lowWindMessagesPath = lowWindMessagesPath;
         _changelogWindow = changelogWindow;
         _pluginVersion = pluginVersion;
@@ -92,6 +112,8 @@ public sealed class ConfigWindow : Window, IDisposable
 
     public override void Draw()
     {
+        DropStaleConfirms();
+
         if (!_config.HasChosenRole)
         {
             DrawRoleSetup();
@@ -110,9 +132,11 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.EndTabItem();
         }
 
+        var pairingDrawn = false;
         if (ImGui.BeginTabItem("Pairing"))
         {
             DrawPairingTab();
+            pairingDrawn = true;
             ImGui.EndTabItem();
         }
 
@@ -144,6 +168,31 @@ public sealed class ConfigWindow : Window, IDisposable
         }
 
         ImGui.EndTabBar();
+
+        // 06-A12: the ownership confirm's refusal belongs to the Pairing tab: another tab dismisses it.
+        if (!pairingDrawn)
+            _ownerConfirmError = null;
+    }
+
+    public override void OnClose()
+    {
+        // 06-A12: closing the window dismisses the ownership confirm's refusal too.
+        _ownerConfirmError = null;
+    }
+
+    /// <summary>
+    /// 06-A12: every frame, whichever tab is drawn. The Hardcore confirm is dropped once it no longer belongs to the
+    /// active character or she is no longer a doll (the Safeword tab, which draws it, is hidden then), and the ownership
+    /// confirm's refusal once another character is active.
+    /// </summary>
+    private void DropStaleConfirms()
+    {
+        if (_hardcoreConfirm is not null && !_hardcoreConfirm.StillValid(_config.ActiveContentId, _config.IsDoll, _ => true))
+            _hardcoreConfirm = null;
+
+        if (_ownerConfirmError is not null
+            && !string.Equals(_ownerConfirmErrorContentId, _config.ActiveContentId, StringComparison.Ordinal))
+            _ownerConfirmError = null;
     }
 
     private void DrawAboutTab()
@@ -233,10 +282,18 @@ public sealed class ConfigWindow : Window, IDisposable
             if (settingsLocked)
                 ImGui.BeginDisabled();
 
+            // 06-A4: saved when committed (Enter, focus leaving, or a +/- step), so a crash can't lose it.
             var maxHours = (int)Math.Round(_config.MaxWindHours);
             ImGui.SetNextItemWidth(80);
             if (ImGui.InputInt("Max wind hours", ref maxHours))
+            {
                 _config.MaxWindHours = Math.Clamp(maxHours, 1, 168);
+                if (!ImGui.IsItemActive())
+                    _config.Save();
+            }
+
+            if (ImGui.IsItemDeactivatedAfterEdit())
+                _config.Save();
 
             var autoSit = _config.AutoGroundSit;
             if (ImGui.Checkbox("Play emote when unwound", ref autoSit))
@@ -256,6 +313,9 @@ public sealed class ConfigWindow : Window, IDisposable
             {
                 _config.MoodlesStatusEnabled = moodlesOn;
                 _config.Save();
+                // 06-A13: turning it off clears a leftover wind moodle once (on the framework thread, next tick).
+                if (!moodlesOn)
+                    _moodlesStatus.OnStatusTurnedOff();
             }
 
             ImGui.Spacing();
@@ -333,29 +393,24 @@ public sealed class ConfigWindow : Window, IDisposable
 
     private void DrawLockEmoteCombo()
     {
+        // 06-A1: show the stored emote as it is, even when this character hasn't unlocked it (Ground Sit is used then);
+        // only picking another one writes.
         var emotes = _commands.GetUnlockedLoopingEmotes();
-        var selectedId = _config.EffectiveLockEmoteId;
-        var selectedInList = TryFindEmoteName(emotes, selectedId, out var selectedName);
-
-        if (!selectedInList)
+        var storedId = _config.EffectiveLockEmoteId;
+        // 06-A12: the sheet lookup runs when the stored emote changes, not every frame.
+        if (_lockEmoteNameId != storedId)
         {
-            selectedName = _commands.GetEmoteName(selectedId) ?? $"Emote #{selectedId}";
-            if (selectedId != GameCommandRunner.GroundSitEmoteId)
-            {
-                _config.LockEmoteId = GameCommandRunner.GroundSitEmoteId;
-                _config.Save();
-                selectedId = GameCommandRunner.GroundSitEmoteId;
-                selectedName = TryFindEmoteName(emotes, selectedId, out var fromList)
-                    ? fromList
-                    : (_commands.GetEmoteName(selectedId) ?? "Sit on Ground");
-            }
+            _lockEmoteNameId = storedId;
+            _lockEmoteName = _commands.GetEmoteName(storedId);
         }
+
+        var view = LockEmoteDisplay.Resolve(storedId, emotes, _lockEmoteName);
 
         DrawEmoteCombo(
             "Unwound emote",
             emotes,
-            selectedId,
-            selectedName ?? "Sit on Ground",
+            view.SelectedId,
+            view.Preview,
             "lock_emote",
             id =>
             {
@@ -363,7 +418,9 @@ public sealed class ConfigWindow : Window, IDisposable
                     return;
                 _config.LockEmoteId = id;
                 _config.Save();
-            });
+            },
+            showMissingEntry: !view.Unlocked,
+            missingName: view.Preview);
     }
 
     private void DrawPairingTab()
@@ -551,6 +608,73 @@ public sealed class ConfigWindow : Window, IDisposable
                 ImGui.Spacing();
             }
         }
+
+        DrawOwnerGrantConfirm();
+    }
+
+    /// <summary>
+    /// 06-A7: granting ownership asks first. The modal belongs to the character and partner it was opened for: it
+    /// closes without granting if another character became active, she is no longer a doll, or that partner was
+    /// unpaired. Cancel (or closing it) changes nothing.
+    /// </summary>
+    private void DrawOwnerGrantConfirm()
+    {
+        const string popupId = "Make owner?###owner_grant_confirm";
+        if (_ownerConfirmOpenRequested)
+        {
+            _ownerConfirmOpenRequested = false;
+            ImGui.OpenPopup(popupId);
+        }
+
+        if (_ownerConfirmError is { } error)
+            ImGui.TextColored(new Vector4(0.9f, 0.35f, 0.35f, 1f), error);
+
+        var popupOpen = true;
+        if (!ImGui.BeginPopupModal(popupId, ref popupOpen, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            // Closed (Cancel, Confirm, its title-bar button, or never drawn since): nothing is pending any more.
+            _ownerConfirm = null;
+            return;
+        }
+
+        var pending = _ownerConfirm;
+        if (pending?.PartnerKey is not { } partnerKey
+            || !pending.StillValid(_config.ActiveContentId, _config.IsDoll, k => _config.FindPairByKey(k) is not null))
+        {
+            _ownerConfirmError = "The character or the pairing changed, so no owner was added.";
+            _ownerConfirmErrorContentId = _config.ActiveContentId;
+            _ownerConfirm = null;
+            ImGui.CloseCurrentPopup();
+            ImGui.EndPopup();
+            return;
+        }
+
+        ImGui.TextUnformatted($"Make {_ownerConfirmLabel} your owner?");
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Owners can always wind and unwind you, and can lock your max hours and unwound emote settings.");
+#if WINDUP_TESTING
+        ImGui.TextUnformatted("In this Testing build owners can also call you to them: always while Hardcore is on,");
+        ImGui.TextUnformatted("otherwise only if you allow it with Can call me.");
+#endif
+        ImGui.TextUnformatted("You can remove this owner by unpairing them, or every owner with /windup unlock.");
+        ImGui.Spacing();
+        if (ImGui.Button("Confirm", new Vector2(100, 0)))
+        {
+            _ = _relay.GrantOwnerAsync(partnerKey);
+            _ownerConfirm = null;
+            _ownerConfirmError = null;
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Cancel", new Vector2(100, 0)))
+        {
+            _ownerConfirm = null;
+            _ownerConfirmError = null;
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.EndPopup();
     }
 
     private void DrawRelayIdentitySection()
@@ -830,13 +954,22 @@ public sealed class ConfigWindow : Window, IDisposable
             var owner = true;
             ImGui.Checkbox("Owner", ref owner);
             ImGui.EndDisabled();
-            ImGui.TextDisabled("Owners always may wind/unwind. Clear with /windup unlock.");
+            // 06-A7: unpairing removes just this owner; /windup unlock is no longer the only way.
+            ImGui.TextDisabled("Owners always may wind/unwind. Remove this owner by unpairing them,");
+            ImGui.TextDisabled("or every owner with /windup unlock.");
         }
         else
         {
+            // 06-A7: ticking it only asks; the owner is granted from the confirm (DrawOwnerGrantConfirm).
             var makeOwner = false;
             if (ImGui.Checkbox("Owner", ref makeOwner) && makeOwner && hasValidPartnerKey)
-                _ = _relay.GrantOwnerAsync(actionPartnerKey);
+            {
+                _ownerConfirm = CharacterBoundConfirm.Open(_config.ActiveContentId, actionPartnerKey);
+                var label = partner.GetMessageLabel();
+                _ownerConfirmLabel = string.IsNullOrWhiteSpace(label) ? actionPartnerKey : label;
+                _ownerConfirmOpenRequested = _ownerConfirm is not null;
+                _ownerConfirmError = null;
+            }
         }
 
         if (partner.IsOwner)
@@ -1494,17 +1627,35 @@ public sealed class ConfigWindow : Window, IDisposable
         }
         else
         {
+            // 06-A4: each setting is saved as it is committed: the checkbox at once, the text and the slider when the
+            // edit ends.
             var safewordOn = _config.SafewordEnabled;
             if (ImGui.Checkbox("Enable safeword", ref safewordOn))
+            {
                 _config.SafewordEnabled = safewordOn;
+                _config.Save();
+            }
 
-            var safeword = _config.Safeword;
+            // Edited in a draft: stored trimmed when the edit ends, and an empty entry keeps the old safeword.
+            var safeword = _safewordDraft ?? _config.Safeword;
             if (ImGui.InputText("Safeword (/windup safeword …)", ref safeword, 64))
-                _config.Safeword = safeword;
+                _safewordDraft = safeword;
+            if (ImGui.IsItemDeactivatedAfterEdit())
+            {
+                _config.Safeword = SafewordText.Store(_safewordDraft, _config.Safeword);
+                _config.Save();
+                _safewordDraft = null;
+            }
+            else if (!ImGui.IsItemActive())
+            {
+                _safewordDraft = null;
+            }
 
             var safewordHours = (int)Math.Round(_config.SafewordHours);
             if (ImGui.SliderInt("Safeword hours", ref safewordHours, 1, 24))
                 _config.SafewordHours = Math.Clamp(safewordHours, 1, 24);
+            if (ImGui.IsItemDeactivatedAfterEdit())
+                _config.Save();
         }
 
         ImGui.Spacing();
@@ -1516,10 +1667,15 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.TextWrapped("Hardcore is on. You are locked as a Doll and cannot switch to Winder.");
             ImGui.TextDisabled("Use /windup unlock to begin clearing Hardcore (also clears all owners).");
         }
-        else if (!_hardcoreConfirm)
+        else if (_hardcoreConfirm is null)
         {
             if (ImGui.Button("Enable Hardcore"))
-                _hardcoreConfirm = true;
+                _hardcoreConfirm = CharacterBoundConfirm.Open(_config.ActiveContentId);
+        }
+        else if (!_hardcoreConfirm.StillValid(_config.ActiveContentId, _config.IsDoll, _ => true))
+        {
+            // 06-A7: opened for another character (or she is no longer a doll): dropped, nothing changes.
+            _hardcoreConfirm = null;
         }
         else
         {
@@ -1530,12 +1686,12 @@ public sealed class ConfigWindow : Window, IDisposable
                 _config.SafewordEnabled = false;
                 _config.Role = PlayerRole.Doll;
                 _config.Save();
-                _hardcoreConfirm = false;
+                _hardcoreConfirm = null;
             }
 
             ImGui.SameLine();
             if (ImGui.Button("Cancel"))
-                _hardcoreConfirm = false;
+                _hardcoreConfirm = null;
         }
 
         ImGui.Spacing();

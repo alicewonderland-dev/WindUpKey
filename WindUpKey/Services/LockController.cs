@@ -73,7 +73,7 @@ public sealed unsafe class LockController : IDisposable
     /// movement before allowing the temporary RMI hook to uninstall.
     /// </summary>
     private int _nudgeForwardTicks;
-    /// <summary>Deferred <c>/sit</c> stand (must run on framework tick — wind arrives off-thread).</summary>
+    /// <summary>Deferred <c>/sit</c> stand, run from <see cref="Tick"/> (06-A10: wind already arrives on the framework thread).</summary>
     private bool _pendingSitStand;
 
     private bool _vnavMuteTweaksApplied;
@@ -236,7 +236,7 @@ public sealed unsafe class LockController : IDisposable
     /// After rewind: stand from sit/groundsit via <c>/sit</c> (get-up anim), or cancel other
     /// looping emotes with one frame of forward walk followed by an explicit neutral frame.
     /// No-op when already idle.
-    /// Sit is queued for the next framework tick — inbound wind runs off-thread.
+    /// The <c>/sit</c> is run from the next <see cref="Tick"/>.
     /// </summary>
     public void RequestCancelPoseNudge()
     {
@@ -249,11 +249,19 @@ public sealed unsafe class LockController : IDisposable
             return;
         }
 
-        if (!_condition[ConditionFlag.InThatPosition] && !_condition[ConditionFlag.Emoting])
+        if (!IsInPoseOrEmoteLoop())
             return;
 
         _nudgeForwardTicks = 2;
     }
+
+    /// <summary>
+    /// True while the local player is in a pose (sit, groundsit, doze) or a looping emote. 06-A2: the login sit is
+    /// skipped then, so it never toggles the doll out of a pose she is already in. Framework thread.
+    /// </summary>
+    public bool IsInPoseOrEmoteLoop() =>
+        _objectTable.LocalPlayer is not null
+        && (_condition[ConditionFlag.InThatPosition] || _condition[ConditionFlag.Emoting]);
 
     /// <summary>
     /// Sit / groundsit (configured lock emote or detected pose) → use <c>/sit</c> for get-up anim.
@@ -264,7 +272,7 @@ public sealed unsafe class LockController : IDisposable
             return false;
 
         var lockId = _config.EffectiveLockEmoteId;
-        if (lockId is GameCommandRunner.SitEmoteId or GameCommandRunner.GroundSitEmoteId)
+        if (lockId is GameCommandRunner.SitEmoteId or CharacterProfile.GroundSitEmoteId)
             return true;
 
         return IsSittingOrGroundSitting();
@@ -283,7 +291,7 @@ public sealed unsafe class LockController : IDisposable
         {
             var character = (Character*)player.Address;
             var emoteId = character->EmoteController.EmoteId;
-            if (emoteId is GameCommandRunner.SitEmoteId or GameCommandRunner.GroundSitEmoteId)
+            if (emoteId is GameCommandRunner.SitEmoteId or CharacterProfile.GroundSitEmoteId)
                 return true;
 
             var pose = character->EmoteController.CurrentPoseType;

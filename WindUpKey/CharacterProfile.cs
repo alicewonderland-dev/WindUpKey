@@ -10,6 +10,12 @@ namespace WindUpKey;
 [Serializable]
 public sealed class CharacterProfile
 {
+    /// <summary>
+    /// Emote sheet row for Sit on Ground (<c>/groundsit</c>): the default and fallback unwound emote. 06-A13: the one
+    /// named constant for it (not serialized).
+    /// </summary>
+    public const ushort GroundSitEmoteId = 52;
+
     public string PairingKey { get; set; } = string.Empty;
 
     /// <summary>Last Name@World for local labels only (not used for pairing-key derivation).</summary>
@@ -40,6 +46,18 @@ public sealed class CharacterProfile
 
     /// <summary>When true, only owners may change max hours / unwound emote settings.</summary>
     public bool OwnerSettingsLocked { get; set; }
+
+    /// <summary>
+    /// 06-A1: this character's "play emote when unwound" (mirrored in <see cref="Configuration.AutoGroundSit"/>).
+    /// Null means not migrated yet: <see cref="ProfileMigration.FillLockEmote"/> gives it the global value.
+    /// </summary>
+    public bool? AutoGroundSit { get; set; }
+
+    /// <summary>
+    /// 06-A1: this character's unwound emote row (mirrored in <see cref="Configuration.LockEmoteId"/>). Null means not
+    /// migrated yet, as for <see cref="AutoGroundSit"/>.
+    /// </summary>
+    public ushort? LockEmoteId { get; set; }
 
     public bool SafewordEnabled { get; set; }
 

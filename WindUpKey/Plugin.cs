@@ -169,6 +169,7 @@ public sealed class Plugin : IDalamudPlugin
 #endif
             TargetManager,
             commands,
+            _moodlesStatus,
             lowWindMessages.FilePath,
             _changelogWindow,
             PluginInterface.Manifest.AssemblyVersion.ToString());
@@ -204,6 +205,10 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenConfigUi += OpenConfig;
         PluginInterface.UiBuilder.OpenMainUi += OpenConfig;
 
+        // 06-A2: login work runs once the logged-in character's profile is active (also after a load while logged in).
+        // 06-A13: subscribed before Framework.Update: this constructor runs off the framework thread, and a tick in
+        // between could raise the one-per-login event with nobody listening (losing the login sit, reminder and Moodles).
+        _relay.ProfileActivated += OnProfileActivated;
         Framework.Update += OnFrameworkUpdate;
         ClientState.Login += OnLogin;
         ClientState.Logout += OnLogout;
@@ -211,12 +216,6 @@ public sealed class Plugin : IDalamudPlugin
         // Always start the loop; it waits until character data is ready.
         // Do not gate on IsLoggedIn — Login may already have fired before load.
         _relay.Start();
-
-        if (ClientState.IsLoggedIn)
-        {
-            _timer.OnLoggedIn();
-            _pendingLoginServices = true;
-        }
 
         if (!Configuration.HasChosenRole)
             OpenConfig();
@@ -229,6 +228,7 @@ public sealed class Plugin : IDalamudPlugin
         Framework.Update -= OnFrameworkUpdate;
         ClientState.Login -= OnLogin;
         ClientState.Logout -= OnLogout;
+        _relay.ProfileActivated -= OnProfileActivated;
         PluginInterface.UiBuilder.Draw -= _windowSystem.Draw;
         PluginInterface.UiBuilder.OpenConfigUi -= OpenConfig;
         PluginInterface.UiBuilder.OpenMainUi -= OpenConfig;
@@ -342,10 +342,20 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnLogin()
     {
-        _pendingLoginServices = true;
+        // 06-A2: the login sit and reminders wait for ProfileActivated: here the previous character's profile is
+        // still the active one (activation waits for the local player).
         _relay.Start();
+    }
+
+    /// <summary>
+    /// 06-A2: from <see cref="RelayClient.Tick"/> (framework thread), once per login or plugin load, after the logged-in
+    /// character's profile became active.
+    /// </summary>
+    private void OnProfileActivated()
+    {
         _timer.OnLoggedIn();
         // LowWind / Moodles OnLoggedIn deferred until !BetweenAreas (see OnFrameworkUpdate).
+        _pendingLoginServices = true;
     }
 
     private void OnLogout(int type, int code)
@@ -494,7 +504,8 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
-            if (!string.Equals(rest, Configuration.Safeword, StringComparison.Ordinal))
+            // 06-A4: compared trimmed, as it is stored.
+            if (!SafewordText.Matches(rest, Configuration.Safeword))
             {
                 PluginChat.PrintError(ChatGui, "Incorrect safeword.");
                 return;

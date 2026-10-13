@@ -13,7 +13,8 @@ namespace WindUpKey;
 [Serializable]
 public class Configuration : IPluginConfiguration
 {
-    public const int CurrentVersion = 11;
+    /// <summary>12: per-character lock emote (06-A1).</summary>
+    public const int CurrentVersion = 12;
 
     /// <summary>Orphan profile from pre-v6 flat config until the first logged-in ContentId claims it.</summary>
     public const string PendingProfileKey = "pending";
@@ -102,17 +103,24 @@ public class Configuration : IPluginConfiguration
     /// <summary>Unpairs not yet sent to the relay (made offline, or the send failed); sent on the next connect.</summary>
     public List<PendingPairRemoval> PendingPairRemovals { get; set; } = [];
 
-    /// <summary>When true, play <see cref="LockEmoteId"/> on unwind / login / re-enforce.</summary>
+    /// <summary>
+    /// When true, play <see cref="LockEmoteId"/> on unwind / login / re-enforce.
+    /// 06-A1: per character since config version 12 (<see cref="CharacterProfile.AutoGroundSit"/>); this flat value is
+    /// the active character's mirror, like the other per-character fields, so an older build that only knows the flat
+    /// value still reads the last active character's choice. Downgrading loses the other characters' own choices:
+    /// the older build saves profiles without them, and coming back fills them from this value.
+    /// </summary>
     public bool AutoGroundSit { get; set; } = true;
 
     /// <summary>
     /// Emote sheet row played while unwound when <see cref="AutoGroundSit"/> is on.
     /// Default 52 = Ground Sit. 0 is treated as Ground Sit for old configs.
+    /// 06-A1: per character, mirrored like <see cref="AutoGroundSit"/>.
     /// </summary>
     public ushort LockEmoteId { get; set; } = 52;
 
     /// <summary>Resolved lock emote id (0 → Ground Sit).</summary>
-    public ushort EffectiveLockEmoteId => LockEmoteId == 0 ? (ushort)52 : LockEmoteId;
+    public ushort EffectiveLockEmoteId => LockEmoteId == 0 ? CharacterProfile.GroundSitEmoteId : LockEmoteId;
 
     /// <summary>When true, play bundled wind-up / wind-down sound effects.</summary>
     public bool SoundEffectsEnabled { get; set; } = true;
@@ -192,6 +200,9 @@ public class Configuration : IPluginConfiguration
     public void Migrate()
     {
         Profiles ??= new Dictionary<string, CharacterProfile>(StringComparer.Ordinal);
+        // 06-A1: before any profile is activated, every profile (pending too) without its own lock emote settings
+        // gets the global values. Gated on the nulls, never on Version, so a set value is never overwritten.
+        ProfileMigration.FillLockEmote(Profiles.Values, AutoGroundSit, LockEmoteId);
         PairedPartners ??= [];
         PendingPartnerKeys ??= [];
         PendingPairRemovals ??= [];
@@ -267,7 +278,12 @@ public class Configuration : IPluginConfiguration
 
         if (!Profiles.TryGetValue(id, out var profile))
         {
-            profile = new CharacterProfile();
+            // 06-A1: a new character starts with its own default lock emote, not the previous character's.
+            profile = new CharacterProfile
+            {
+                AutoGroundSit = ProfileMigration.NewProfileAutoGroundSit,
+                LockEmoteId = ProfileMigration.NewProfileLockEmoteId,
+            };
             Profiles[id] = profile;
         }
 
@@ -310,6 +326,8 @@ public class Configuration : IPluginConfiguration
             DebugMode = DebugMode,
             MaxWindHours = MaxWindHours,
             OwnerSettingsLocked = OwnerSettingsLocked,
+            AutoGroundSit = AutoGroundSit,
+            LockEmoteId = LockEmoteId,
             SafewordEnabled = SafewordEnabled,
             Safeword = Safeword,
             SafewordHours = SafewordHours,
@@ -347,6 +365,9 @@ public class Configuration : IPluginConfiguration
         DebugMode = profile.DebugMode;
         MaxWindHours = profile.MaxWindHours > 0 ? profile.MaxWindHours : 72;
         OwnerSettingsLocked = profile.OwnerSettingsLocked;
+        // 06-A1: Migrate fills both before any activation; a null here (a migrate that failed) is a new profile's default.
+        AutoGroundSit = profile.AutoGroundSit ?? ProfileMigration.NewProfileAutoGroundSit;
+        LockEmoteId = profile.LockEmoteId ?? ProfileMigration.NewProfileLockEmoteId;
         SafewordEnabled = profile.SafewordEnabled;
         Safeword = string.IsNullOrEmpty(profile.Safeword) ? "safeword" : profile.Safeword;
         SafewordHours = Math.Clamp(Math.Round(profile.SafewordHours <= 0 ? 1 : profile.SafewordHours), 1, 24);

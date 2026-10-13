@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
@@ -38,12 +39,6 @@ public sealed class MoodlesWindStatusService : IDisposable
     private static readonly TimeSpan WoundMin = TimeSpan.FromHours(12);
     private static readonly TimeSpan LowMin = TimeSpan.FromHours(2);
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        IncludeFields = true,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    };
-
     private static readonly IReadOnlyList<Guid> AllLevelGuids =
     [
         FullyWoundGuid,
@@ -68,6 +63,20 @@ public sealed class MoodlesWindStatusService : IDisposable
     private bool _loggedUnavailable;
     private WindChargeLevel? _appliedLevel;
     private bool _disposed;
+
+    /// <summary>06-A3: when to probe Moodles and retry a failed apply.</summary>
+    private readonly MoodlesSyncGate _gate = new();
+
+    /// <summary>06-A3: set by the IPC handlers (any thread), handled in <see cref="Tick"/> on the framework thread.</summary>
+    private volatile bool _readyPending;
+    private volatile bool _unloadPending;
+
+    /// <summary>06-A12: Moodles' Ready asked for the status to be applied again; the next <see cref="SyncDesiredState"/> does.</summary>
+    private bool _forceApplyPending;
+
+    /// <summary>06-A3: Moodles assemblies that have unloaded, held weakly so they can be collected; rebinding skips them.</summary>
+    private readonly List<WeakReference<Assembly>> _unloadedAssemblies = [];
+
     private Assembly? _moodlesAsm;
     private Type? _myStatusType;
     private Type? _updateSourceType;
@@ -78,6 +87,12 @@ public sealed class MoodlesWindStatusService : IDisposable
     private MethodInfo? _containsGuid;
     private FieldInfo? _moodlesPlugin;
     private MethodInfo? _applyAutomation;
+
+    /// <summary>
+    /// 06-A13: used with Moodles' status type, so it caches that type's metadata. Created per bind and dropped in
+    /// <see cref="ForgetReflection"/> (no longer static), so an unloaded Moodles assembly can be collected.
+    /// </summary>
+    private JsonSerializerOptions? _jsonOptions;
 
     public MoodlesWindStatusService(
         IDalamudPluginInterface pi,
@@ -101,8 +116,7 @@ public sealed class MoodlesWindStatusService : IDisposable
 
         _ready.Subscribe(OnMoodlesReady);
         _unloading.Subscribe(OnMoodlesUnloading);
-        TryProbeMoodles();
-        TryBindMoodlesReflection();
+        // 06-A3: no probe or reflection here: Tick probes only once the status is wanted (settings checked first).
     }
 
     public void Tick()
@@ -112,6 +126,7 @@ public sealed class MoodlesWindStatusService : IDisposable
 
         try
         {
+            // 06-A12: handles the pending IPC signals first, before anything calls into Moodles.
             SyncDesiredState();
         }
         catch (Exception ex)
@@ -138,7 +153,10 @@ public sealed class MoodlesWindStatusService : IDisposable
 
         try
         {
-            ClearApplied(force: true);
+            // 06-A12: a pending unload drops the old handles first, so nothing is cancelled through them.
+            HandleIpcSignals();
+            // 06-A3: forced only if Moodles was found, so an unload without Moodles (or with the status off) touches nothing.
+            ClearApplied(force: _moodlesAvailable);
         }
         catch (Exception ex)
         {
@@ -157,6 +175,10 @@ public sealed class MoodlesWindStatusService : IDisposable
 
         try
         {
+            // 06-A12: an unload seen since the last tick drops the old handles before anything calls into Moodles.
+            HandleIpcSignals();
+            // 06-A3: a login tries again at once, whatever the backoff.
+            _gate.ResetBackoff();
             SyncDesiredState(forceApply: true, skipIfPresent: true);
         }
         catch (Exception ex)
@@ -174,12 +196,15 @@ public sealed class MoodlesWindStatusService : IDisposable
         if (_disposed)
             return;
 
-        // Before the wind status, so a ReplaceAll automation preset cannot drop it.
-        if (_config.ReapplyMoodlesAutomationOnAreaChange)
-            TryReapplyAutomation();
-
         try
         {
+            // 06-A12: an unload seen since the last tick drops the old handles before anything calls into Moodles.
+            HandleIpcSignals();
+
+            // Before the wind status, so a ReplaceAll automation preset cannot drop it.
+            if (_config.ReapplyMoodlesAutomationOnAreaChange)
+                TryReapplyAutomation();
+
             SyncDesiredState(forceApply: true);
         }
         catch (Exception ex)
@@ -188,22 +213,76 @@ public sealed class MoodlesWindStatusService : IDisposable
         }
     }
 
-    private void OnMoodlesReady()
+    /// <summary>06-A3: IPC handler, on whichever thread Moodles raises it: only sets a flag for <see cref="Tick"/>.</summary>
+    private void OnMoodlesReady() => _readyPending = true;
+
+    /// <summary>06-A3: IPC handler, on whichever thread Moodles raises it: only sets a flag for <see cref="Tick"/>.</summary>
+    private void OnMoodlesUnloading() => _unloadPending = true;
+
+    /// <summary>
+    /// 06-A13: the doll turned the status off in the UI. Only asks for the one probe and clear, which the next
+    /// <see cref="Tick"/> does on the framework thread.
+    /// </summary>
+    public void OnStatusTurnedOff() => _gate.RequestClear();
+
+    /// <summary>
+    /// 06-A3: framework thread. Applies Moodles' Unloading, then Ready (a reload raises both). Unloading forgets every
+    /// reflection handle and keeps only a weak reference to the old assembly; Ready re-probes, rebinds lazily, resets
+    /// the backoff, and asks for the status to be applied again (<see cref="_forceApplyPending"/>).
+    /// 06-A12: called first by every entry point that may call into Moodles (<see cref="OnLoggedIn"/>,
+    /// <see cref="OnAreaTransition"/>, <see cref="TryReapplyAutomation"/>, <see cref="SyncDesiredState"/>,
+    /// <see cref="Dispose"/>), so no call goes through handles from before an unload. Nothing pending: no-op.
+    /// </summary>
+    private void HandleIpcSignals()
     {
+        if (_unloadPending)
+        {
+            _unloadPending = false;
+            if (_moodlesAsm is not null)
+                _unloadedAssemblies.Add(new WeakReference<Assembly>(_moodlesAsm));
+            _unloadedAssemblies.RemoveAll(w => !w.TryGetTarget(out _));
+            ForgetReflection();
+            _moodlesAvailable = false;
+            _appliedLevel = null;
+        }
+
+        if (!_readyPending)
+            return;
+
+        _readyPending = false;
         _loggedUnavailable = false;
-        TryProbeMoodles();
-        TryBindMoodlesReflection();
-        SyncDesiredState(forceApply: true);
+        // Probe again (the version may have changed) and bind to the assembly that is loaded now.
+        ForgetReflection();
+        _moodlesAvailable = false;
+        _gate.OnMoodlesReady();
+        _forceApplyPending = true;
     }
 
-    private void OnMoodlesUnloading()
+    /// <summary>06-A3: drops every cached reflection handle, including the assembly itself.</summary>
+    private void ForgetReflection()
     {
-        _moodlesAvailable = false;
-        _appliedLevel = null;
+        _moodlesAsm = null;
+        _myStatusType = null;
+        _updateSourceType = null;
+        _getMyStatusManager = null;
+        _prepareToApply = null;
         _addOrUpdate = null;
+        _cancelGuid = null;
         _containsGuid = null;
         _moodlesPlugin = null;
         _applyAutomation = null;
+        _jsonOptions = null;
+    }
+
+    private bool IsUnloadedAssembly(Assembly assembly)
+    {
+        foreach (var weak in _unloadedAssemblies)
+        {
+            if (weak.TryGetTarget(out var old) && ReferenceEquals(old, assembly))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -214,10 +293,13 @@ public sealed class MoodlesWindStatusService : IDisposable
     {
         try
         {
+            // 06-A12: an unload seen since the last tick drops the old handles before anything calls into Moodles.
+            HandleIpcSignals();
             if (!_clientState.IsLoggedIn || _objects.LocalPlayer is null)
                 return;
 
-            if (!_moodlesAvailable)
+            // 06-A3: its own setting was checked by the caller; the probe still runs at most every 10 s.
+            if (!_moodlesAvailable && _gate.TryStartProbe(DateTime.UtcNow))
                 TryProbeMoodles();
             if (!_moodlesAvailable)
                 return;
@@ -270,10 +352,33 @@ public sealed class MoodlesWindStatusService : IDisposable
 
     private void SyncDesiredState(bool forceApply = false, bool skipIfPresent = false)
     {
-        if (!_moodlesAvailable)
+        // 06-A12: an unload seen since the last tick drops the old handles before anything calls into Moodles; a Ready
+        // asks for the status again.
+        HandleIpcSignals();
+        if (_forceApplyPending)
+        {
+            _forceApplyPending = false;
+            forceApply = true;
+        }
+
+        // 06-A13: turned off in the UI: one probe and clear, even of a status we don't remember applying.
+        if (_gate.TakeClearRequest(_config.MoodlesStatusEnabled, _config.IsDoll, _clientState.IsLoggedIn))
+            ClearAfterTurnedOff();
+
+        // 06-A3: the settings, the role and the login are checked before any IPC probe, and a probe runs at most
+        // every 10 s while Moodles is unavailable.
+        var now = DateTime.UtcNow;
+        var step = _gate.Next(_config.MoodlesStatusEnabled, _config.IsDoll, _clientState.IsLoggedIn, _moodlesAvailable, now);
+        if (step == MoodlesStep.Off)
+        {
+            ClearApplied();
+            return;
+        }
+
+        if (step == MoodlesStep.Probe)
             TryProbeMoodles();
 
-        if (!_moodlesAvailable || !_config.MoodlesStatusEnabled || !_config.IsDoll || !_clientState.IsLoggedIn)
+        if (!_moodlesAvailable)
         {
             ClearApplied();
             return;
@@ -287,16 +392,46 @@ public sealed class MoodlesWindStatusService : IDisposable
         }
 
         var level = ResolveLevel(_timer.RemainingForWinder());
-        if (skipIfPresent && TryContainsStatus(player, LevelMeta(level).Guid))
-        {
-            _appliedLevel = level;
-            return;
-        }
-
         if (!forceApply && _appliedLevel == level)
             return;
 
+        // 06-A3: after a failed apply or rebind, wait (5 s doubling to 5 min) instead of rebinding every frame. A new
+        // level, a login and Moodles' Ready try again at once.
+        if (!_gate.MayApply(level, now))
+            return;
+
+        if (skipIfPresent && TryContainsStatus(player, LevelMeta(level).Guid))
+        {
+            _appliedLevel = level;
+            _gate.ApplySucceeded();
+            return;
+        }
+
         ApplyLevel(level, player);
+        if (_appliedLevel == level)
+            _gate.ApplySucceeded();
+        else
+            _gate.ApplyFailed(now);
+    }
+
+    /// <summary>
+    /// 06-A13: once per turn-off, on the framework thread. Probes Moodles if it isn't known to be available (whatever
+    /// the probe interval) and, if it is, cancels our wind statuses even when <see cref="_appliedLevel"/> is null (a
+    /// permanent one left from an earlier session or load). Never repeated while the status stays off. 06-A15: with no
+    /// local player yet, asks again for the next tick instead of spending the request without clearing.
+    /// </summary>
+    private void ClearAfterTurnedOff()
+    {
+        if (_objects.LocalPlayer is not IPlayerCharacter)
+        {
+            _gate.RequestClear();
+            return;
+        }
+
+        if (!_moodlesAvailable)
+            TryProbeMoodles();
+        if (_moodlesAvailable)
+            ClearApplied(force: true);
     }
 
     private void ClearApplied(bool force = false)
@@ -314,8 +449,10 @@ public sealed class MoodlesWindStatusService : IDisposable
     {
         try
         {
+            // 06-A3: never an assembly that has unloaded (it can stay listed until collected); the newest one otherwise.
             _moodlesAsm = AppDomain.CurrentDomain.GetAssemblies()
-                .FirstOrDefault(a => string.Equals(a.GetName().Name, "Moodles", StringComparison.Ordinal));
+                .LastOrDefault(a => string.Equals(a.GetName().Name, "Moodles", StringComparison.Ordinal)
+                                    && !IsUnloadedAssembly(a));
             if (_moodlesAsm is null)
             {
                 _addOrUpdate = null;
@@ -348,6 +485,16 @@ public sealed class MoodlesWindStatusService : IDisposable
                 _containsGuid = null;
                 return;
             }
+
+            // 06-A13: new options per bind, so no metadata of an earlier Moodles assembly's types is kept. 06-A15: with
+            // their own resolver, so System.Text.Json's cache shared by equal options can't keep the old assembly alive
+            // after a quick reload.
+            _jsonOptions = new JsonSerializerOptions
+            {
+                IncludeFields = true,
+                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+                TypeInfoResolver = new DefaultJsonTypeInfoResolver(),
+            };
 
             _getMyStatusManager = utilsType.GetMethods(BindingFlags.Public | BindingFlags.Static)
                 .FirstOrDefault(m =>
@@ -431,14 +578,14 @@ public sealed class MoodlesWindStatusService : IDisposable
             if (_addOrUpdate is null)
                 TryBindMoodlesReflection();
             if (_addOrUpdate is null || _getMyStatusManager is null || _prepareToApply is null
-                || _myStatusType is null || _updateSourceType is null)
+                || _myStatusType is null || _updateSourceType is null || _jsonOptions is null)
             {
                 _appliedLevel = null;
                 return;
             }
 
-            var jsonBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload, JsonOptions));
-            var statusObj = JsonSerializer.Deserialize(jsonBytes, _myStatusType, JsonOptions);
+            var jsonBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload, _jsonOptions));
+            var statusObj = JsonSerializer.Deserialize(jsonBytes, _myStatusType, _jsonOptions);
             if (statusObj is null)
             {
                 _appliedLevel = null;
@@ -616,13 +763,4 @@ public sealed class MoodlesWindStatusService : IDisposable
         public bool NoExpire;
         public bool AsPermanent;
     }
-}
-
-public enum WindChargeLevel
-{
-    FullyWound,
-    Wound,
-    Low,
-    NearlySpent,
-    Unwound,
 }

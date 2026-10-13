@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using Dalamud.Plugin.Services;
@@ -30,7 +32,10 @@ public sealed class SoundEffectService : IDisposable
     private bool _windDownLoadAttempted;
     private bool _windUpWarned;
     private bool _windDownWarned;
-    private GCHandle _pinnedPlaying;
+    /// <summary>06-A6: the buffers PlaySound may still be reading, each kept until its clip's expected end.</summary>
+    private readonly ClipLedger<GCHandle> _pins = new();
+    /// <summary>06-A12: the ledger's clock. Monotonic: a wall-clock jump can't free a buffer PlaySound may still read.</summary>
+    private readonly Stopwatch _clock = Stopwatch.StartNew();
     private bool _disposed;
 
     public SoundEffectService(Configuration config, IPluginLog log, string soundsDirectory)
@@ -72,8 +77,11 @@ public sealed class SoundEffectService : IDisposable
         _disposed = true;
         lock (_gate)
         {
-            StopLocked();
-            FreePinLocked();
+            // 06-A6: stop only if one of our clips might still be playing (its buffer is about to be freed); otherwise
+            // leave whatever else in the game is using PlaySound alone.
+            if (_pins.MightBePlaying(_clock.Elapsed))
+                StopLocked();
+            Free(_pins.TakeAll());
         }
     }
 
@@ -123,19 +131,23 @@ public sealed class SoundEffectService : IDisposable
                 return;
             }
 
-            StopLocked();
-            FreePinLocked();
-
-            _pinnedPlaying = GCHandle.Alloc(toPlay, GCHandleType.Pinned);
-            if (!PlaySound(_pinnedPlaying.AddrOfPinnedObject(), IntPtr.Zero, SndAsync | SndMemory | SndNoDefault))
+            // 06-A6: no SND_PURGE first (it stopped every PlaySound sound in the game, other plugins' too). A new
+            // PlaySound replaces our previous clip by itself; the old buffer stays pinned until that clip's expected end.
+            var pin = GCHandle.Alloc(toPlay, GCHandleType.Pinned);
+            if (!PlaySound(pin.AddrOfPinnedObject(), IntPtr.Zero, SndAsync | SndMemory | SndNoDefault))
             {
-                FreePinLocked();
+                pin.Free();
+                Free(_pins.Expire(_clock.Elapsed));
                 if (!warned)
                 {
                     warned = true;
                     _log.Warning("WindUpKey PlaySound failed for {File}", fileName);
                 }
+
+                return;
             }
+
+            Free(_pins.Add(pin, WavHeader.Duration(toPlay), _clock.Elapsed));
         }
     }
 
@@ -169,13 +181,17 @@ public sealed class SoundEffectService : IDisposable
         }
     }
 
-    private void StopLocked() =>
+    /// <summary>Stops the process's PlaySound audio. 06-A6: only from <see cref="Dispose"/>, while our clip might be playing.</summary>
+    private static void StopLocked() =>
         PlaySound(IntPtr.Zero, IntPtr.Zero, SndPurge);
 
-    private void FreePinLocked()
+    private static void Free(IReadOnlyList<GCHandle> pins)
     {
-        if (_pinnedPlaying.IsAllocated)
-            _pinnedPlaying.Free();
+        foreach (var pin in pins)
+        {
+            if (pin.IsAllocated)
+                pin.Free();
+        }
     }
 
     /// <summary>Build a new PCM WAV containing at most <paramref name="maxSeconds"/> of audio.</summary>
@@ -184,48 +200,18 @@ public sealed class SoundEffectService : IDisposable
         if (maxSeconds <= 0)
             return wav;
 
-        if (wav.Length < 44 || wav[0] != (byte)'R' || wav[1] != (byte)'I' || wav[2] != (byte)'F' || wav[3] != (byte)'F')
-            throw new InvalidDataException("Not a RIFF file.");
+        // 06-A13: the chunks are read by the same parser as the clip length (WavHeader).
+        if (!WavHeader.TryRead(wav, out var layout))
+            throw new InvalidDataException("Invalid WAV.");
 
-        var offset = 12;
-        ushort channels = 0;
-        uint sampleRate = 0;
-        ushort bitsPerSample = 0;
-        var dataOffset = -1;
-        var dataLength = 0;
-
-        while (offset + 8 <= wav.Length)
-        {
-            var chunkId = BitConverter.ToUInt32(wav, offset);
-            var chunkSize = BitConverter.ToInt32(wav, offset + 4);
-            var chunkData = offset + 8;
-            if (chunkSize < 0 || chunkData + chunkSize > wav.Length)
-                throw new InvalidDataException("Invalid WAV chunk.");
-
-            // "fmt "
-            if (chunkId == 0x20746D66)
-            {
-                if (chunkSize < 16)
-                    throw new InvalidDataException("Invalid fmt chunk.");
-                channels = BitConverter.ToUInt16(wav, chunkData + 2);
-                sampleRate = BitConverter.ToUInt32(wav, chunkData + 4);
-                bitsPerSample = BitConverter.ToUInt16(wav, chunkData + 14);
-            }
-            // "data"
-            else if (chunkId == 0x61746164)
-            {
-                dataOffset = chunkData;
-                dataLength = chunkSize;
-                break;
-            }
-
-            offset = chunkData + chunkSize + (chunkSize & 1);
-        }
-
-        if (dataOffset < 0 || channels == 0 || sampleRate == 0 || bitsPerSample == 0)
+        var channels = layout.Channels;
+        var bitsPerSample = layout.BitsPerSample;
+        var dataOffset = layout.DataOffset;
+        var dataLength = layout.DataLength;
+        if (channels == 0 || layout.SampleRate == 0 || bitsPerSample == 0)
             throw new InvalidDataException("WAV missing fmt/data.");
 
-        var bytesPerSecond = sampleRate * channels * (bitsPerSample / 8u);
+        var bytesPerSecond = layout.SampleRate * channels * (bitsPerSample / 8u);
         if (bytesPerSecond == 0)
             throw new InvalidDataException("Invalid WAV format.");
 
@@ -239,22 +225,8 @@ public sealed class SoundEffectService : IDisposable
             return wav;
 
         // Minimal PCM WAV: RIFF + fmt + data (copy fmt from source).
-        var fmtChunkOffset = 12;
-        int fmtSize;
-        while (true)
-        {
-            var id = BitConverter.ToUInt32(wav, fmtChunkOffset);
-            var size = BitConverter.ToInt32(wav, fmtChunkOffset + 4);
-            if (id == 0x20746D66)
-            {
-                fmtSize = size;
-                break;
-            }
-
-            fmtChunkOffset += 8 + size + (size & 1);
-        }
-
-        var fmtPayload = fmtSize;
+        var fmtChunkOffset = layout.FmtChunkOffset;
+        var fmtPayload = layout.FmtSize;
         var outLen = 12 + 8 + fmtPayload + 8 + maxBytes;
         var result = new byte[outLen];
         // RIFF header

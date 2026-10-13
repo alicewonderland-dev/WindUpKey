@@ -125,7 +125,10 @@ public sealed class WindTimerService
     public void SetCallTravelCastingFlyPass(bool allow) =>
         _lock.SetInputMuteCastingFlyPass(allow);
 
-    /// <summary>Call on login (or plugin load while already logged in). Sits if currently unwound.</summary>
+    /// <summary>
+    /// Call once the logged-in character's profile is active (06-A2: from <see cref="RelayClient.ProfileActivated"/>,
+    /// after each login or plugin load). Sits if currently unwound.
+    /// </summary>
     public void OnLoggedIn()
     {
         if (!IsLocked || !_config.AutoGroundSit)
@@ -154,8 +157,8 @@ public sealed class WindTimerService
     }
 
     /// <summary>
-    /// Adds a commendation bonus using the normal timer cap, but emits only the dedicated
-    /// vague commendation RP echo. Returns the time actually added after applying the cap.
+    /// Adds a commendation bonus using the normal timer cap (never shortening the timer, 06-A8), but emits only the
+    /// dedicated vague commendation RP echo. Returns the time actually added after applying the cap.
     /// </summary>
     public TimeSpan AddCommendationWind(TimeSpan bonus, int commendationsReceived)
     {
@@ -202,17 +205,12 @@ public sealed class WindTimerService
         if (!_config.IsDoll || amount <= TimeSpan.Zero)
             return TimeSpan.Zero;
 
-        var now = DateTimeOffset.UtcNow;
-        var currentExpiry = _config.ExpiryUtc is { } exp && exp > now ? exp : now;
-        var proposed = currentExpiry.Add(amount);
-        if (!ignoreMaxCap)
-        {
-            var maxExpiry = now.AddHours(Math.Max(0.01, _config.MaxWindHours));
-            if (proposed > maxExpiry)
-                proposed = maxExpiry;
-        }
-
-        var actualAdded = proposed - currentExpiry;
+        // 06-A8: capped at MaxWindHours from now, but never shorter than the current expiry.
+        var (proposed, actualAdded) = WindMath.Add(
+            DateTimeOffset.UtcNow,
+            _config.ExpiryUtc,
+            amount,
+            ignoreMaxCap ? null : _config.MaxWindHours);
         _config.ExpiryUtc = proposed;
         _config.WindUpdatedUtc = DateTimeOffset.UtcNow;
         _config.Save();
@@ -267,23 +265,24 @@ public sealed class WindTimerService
         if (!_pendingLoginSit)
             return;
 
-        if (!IsLocked)
-        {
-            _pendingLoginSit = false;
-            return;
-        }
+        var locked = IsLocked;
+        if (locked)
+            _loginSitAttempts++;
 
-        _loginSitAttempts++;
-        if (!CanEmoteNow())
+        // 06-A2 / 06-A12 (LoginSitRule): already in a pose or emote loop (her own, or the lock emote played on a
+        // switch): leave her in it.
+        var canEmote = locked && CanEmoteNow();
+        var alreadyPosed = canEmote && _lock.IsInPoseOrEmoteLoop();
+        switch (LoginSitRule.Next(locked, canEmote, alreadyPosed, _loginSitAttempts))
         {
-            if (_loginSitAttempts >= 1800)
+            case LoginSitStep.Done:
                 _pendingLoginSit = false;
-            return;
+                return;
+            case LoginSitStep.Wait:
+                return;
         }
 
-        if (_commands.TryExecuteLockEmote())
-            _pendingLoginSit = false;
-        else if (_loginSitAttempts >= 1800)
+        if (LoginSitRule.FinishedAfterSit(_commands.TryExecuteLockEmote(), _loginSitAttempts))
             _pendingLoginSit = false;
     }
 
@@ -353,7 +352,11 @@ public sealed class WindTimerService
         _lock.SetLocked(locked);
 
         if (becameLocked && _config.AutoGroundSit && _objects.LocalPlayer is not null)
-            _commands.ExecuteLockEmote();
+        {
+            // 06-A2: once it has played, a pending login sit would only toggle it off again.
+            if (_commands.TryExecuteLockEmote())
+                _pendingLoginSit = false;
+        }
         else if (becameUnlocked && _objects.LocalPlayer is not null)
             _lock.RequestCancelPoseNudge();
     }

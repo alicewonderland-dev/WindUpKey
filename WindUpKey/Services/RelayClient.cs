@@ -15,6 +15,8 @@ using WindUpKey.Protocol;
 #if WINDUP_TESTING
 using WindUpKey.SelfTest;
 #endif
+// 06-A12: Lumina.Excel.Sheets also has an Action (the sheet row); this file means the delegate.
+using Action = System.Action;
 
 namespace WindUpKey.Services;
 
@@ -175,6 +177,20 @@ public sealed class RelayClient : IDisposable
     /// </summary>
     private volatile bool _characterReady;
     private volatile string? _cachedIdentity;
+
+    /// <summary>
+    /// 06-A2: raised from <see cref="Tick"/> (framework thread) on the first successful profile activation after each
+    /// login or plugin load, once the logged-in character's profile is the active one. Login work that reads the
+    /// profile (the login sit, the low-wind reminder, Moodles) runs from here, not from the Login event, which fires
+    /// before the character can be activated.
+    /// </summary>
+    public event Action? ProfileActivated;
+
+    /// <summary>06-A12: whether <see cref="ProfileActivated"/> was raised for this login. Framework thread only.</summary>
+    private readonly ProfileActivationLatch _profileActivation = new();
+
+    /// <summary>06-A9: 1 once a message dropped from a superseded connection was logged (once per connection, at Debug).</summary>
+    private int _staleInboundLogged;
     private int _tickLogCounter;
 
     /// <summary>Set by <see cref="Dispose"/>: <see cref="Start"/> is a no-op from then on (04-D10).</summary>
@@ -502,6 +518,9 @@ public sealed class RelayClient : IDisposable
         try
         {
             _loggedIn = _clientState.IsLoggedIn;
+            // 06-A12: only a logout read here re-arms the profile-activated event (a read error below doesn't).
+            if (!_loggedIn)
+                _profileActivation.LoggedOut();
             _cachedIdentity = _loggedIn ? TryReadIdentity() : null;
         }
         catch (Exception ex)
@@ -564,6 +583,9 @@ public sealed class RelayClient : IDisposable
         _characterReady = RelayConnectPolicy.IdentityCharacterReady(_loggedIn, characterReady, _characterReady);
         SyncPairingKeyFromContentId();
         UpdateUnreachableTracking();
+        // 06-A12: once per login or plugin load, on the first tick that activated the logged-in character's profile.
+        if (_profileActivation.TryRaise(characterReady))
+            RaiseProfileActivated();
 
         if (Interlocked.Increment(ref _tickLogCounter) % 300 == 1)
         {
@@ -575,6 +597,19 @@ public sealed class RelayClient : IDisposable
                 LogRedact.Identity(_cachedIdentity),
                 IsConnected,
                 _lastStatus ?? "(null)");
+        }
+    }
+
+    /// <summary>06-A2: framework thread, from <see cref="Tick"/>. A failing handler is logged, never thrown into the tick.</summary>
+    private void RaiseProfileActivated()
+    {
+        try
+        {
+            ProfileActivated?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "WindUpKey profile-activated handler failed");
         }
     }
 
@@ -1385,7 +1420,7 @@ public sealed class RelayClient : IDisposable
                 _log.Information("WindUpKey loop: connecting as {Identity}", LogRedact.Identity(identity));
                 var connection = await ConnectAndRegisterAsync(generation, epoch, ct).ConfigureAwait(false);
                 _lastStatus = null;
-                var rejectedCode = await ReceiveLoopAsync(connection.Socket, epoch, ct).ConfigureAwait(false);
+                var rejectedCode = await ReceiveLoopAsync(connection.Socket, epoch, connection.Profile, ct).ConfigureAwait(false);
                 if (rejectedCode is not null)
                 {
                     // auth_failed/auth_required is per host (each has its own accounts): try the next one now,
@@ -1463,8 +1498,11 @@ public sealed class RelayClient : IDisposable
         _log.Debug("WindUpKey RunLoopAsync end");
     }
 
-    /// <summary>An open, registered relay connection and the hosts that were candidates for it.</summary>
-    private sealed record RelayConnection(ClientWebSocket Socket, string Url, IReadOnlyList<string> Candidates);
+    /// <summary>
+    /// An open, registered relay connection, the hosts that were candidates for it, and the profile (ContentId hex) it
+    /// registered for, read in the same tick as its key and secret.
+    /// </summary>
+    private sealed record RelayConnection(ClientWebSocket Socket, string Url, IReadOnlyList<string> Candidates, string Profile);
 
     /// <summary>No candidate host (other than ones that rejected the identity this cycle) could be opened.</summary>
     private sealed class NoRelayHostReachableException(Exception? inner)
@@ -1492,6 +1530,7 @@ public sealed class RelayClient : IDisposable
 
         string? relaySecret = null;
         var pairingKey = string.Empty;
+        var profile = string.Empty;
         var stale = false;
         var step = RelayConnectStep.WaitForCharacter;
         // What the post-register sends need, read in the same tick as the key and secret (config is framework-thread only).
@@ -1534,6 +1573,7 @@ public sealed class RelayClient : IDisposable
             // The key registered is the one derived in the same tick as the secret, so they always belong to the
             // same character even if the player switches while the socket opens.
             pairingKey = derived;
+            profile = _config.ActiveContentId;
             pendingKeys = _config.PendingPartnerKeys.ToArray();
             removals = PairRemovalQueue.ToSend(_config.PendingPairRemovals, derived);
             _unpairedThisConnection.Clear();
@@ -1705,7 +1745,7 @@ public sealed class RelayClient : IDisposable
             }
         }
 
-        return new RelayConnection(socket, connectedUrl, candidates);
+        return new RelayConnection(socket, connectedUrl, candidates, profile);
     }
 
     /// <summary>The connect cycle was reset since <paramref name="epoch"/> (character switch, login, import, revert).</summary>
@@ -1978,8 +2018,9 @@ public sealed class RelayClient : IDisposable
     /// Runs one connection until it ends. Returns auth_failed/auth_required when this host rejected the
     /// register (the caller then tries the next host), otherwise null.
     /// </summary>
-    private async Task<string?> ReceiveLoopAsync(ClientWebSocket socket, int epoch, CancellationToken ct)
+    private async Task<string?> ReceiveLoopAsync(ClientWebSocket socket, int epoch, string profile, CancellationToken ct)
     {
+        Volatile.Write(ref _staleInboundLogged, 0);
         // 03-D10: messages over the client's limit are discarded and the connection kept, logged once per connection.
         var pump = new RelayInboundPump(limit => _log.Warning(
             "WindUpKey discarded a relay message over {Limit} bytes; keeping the connection (logged once per connection)",
@@ -2019,8 +2060,13 @@ public sealed class RelayClient : IDisposable
 
             // Socket IO and parsing the envelope stay on this worker (03-D10); all plugin/config/game state is applied
             // on Dalamud's framework thread so lock hooks cannot change at an unsafe time.
+            // 06-A9: a message is for the connection (epoch) and character it arrived on. A switch closes this socket,
+            // but a message already queued here would still run in the next tick, so it is checked again when handled
+            // and dropped once the active character or the connect cycle has changed: it never applies to another one.
             await _framework.RunOnTick(
-                    () => HandleMessageAsync(envelope, ct),
+                    () => RelayConnectPolicy.InboundStillCurrent(epoch, profile, _connectPolicy.Epoch, _config.ActiveContentId)
+                        ? HandleMessageAsync(envelope, ct)
+                        : DropStaleInbound(),
                     cancellationToken: ct)
                 .ConfigureAwait(false);
 
@@ -2029,6 +2075,18 @@ public sealed class RelayClient : IDisposable
         }
 
         return _registerRejection;
+    }
+
+    /// <summary>
+    /// 06-A9: framework thread. A message from a superseded connection is dropped unhandled, logged once per connection
+    /// with nothing from the message itself.
+    /// </summary>
+    private Task DropStaleInbound()
+    {
+        if (Interlocked.Exchange(ref _staleInboundLogged, 1) == 0)
+            _log.Debug("WindUpKey dropped a relay message from a superseded connection (character switch or reconnect)");
+
+        return Task.CompletedTask;
     }
 
     private async Task HandleMessageAsync(Envelope envelope, CancellationToken ct)
@@ -2220,7 +2278,7 @@ public sealed class RelayClient : IDisposable
         var label = GetPairMessageLabel(fromKey);
         PluginChat.Print(
             _chat,
-            $"An needy doll requests your attention. {label} is at {percent}% winding remaining and is requesting additional winding.",
+            $"A needy doll requests your attention. {label} is at {percent}% winding remaining and is requesting additional winding.",
             PluginChat.Blue);
     }
 
@@ -3009,6 +3067,8 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
+        // 06-A1: these are the active character's own settings (Save writes them to its profile only), and 06-A9 makes
+        // sure this message arrived for the active character.
         if (payload.MaxWindHours is { } hours)
             _config.MaxWindHours = Math.Clamp(Math.Round(hours), 1, 168);
 
