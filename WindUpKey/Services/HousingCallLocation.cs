@@ -28,6 +28,11 @@ public readonly struct HousingCallLocation
         979, // Empyreum
     ];
 
+#if WINDUP_TESTING
+    /// <summary>The residential districts, for the self-test's post-patch sheet check (04-D10: the same ids as here).</summary>
+    internal static IReadOnlyCollection<uint> ResidentialTerritoryIds => ResidentialTerritories;
+
+#endif
     public int City { get; init; }
     public int Ward { get; init; }
     public int Division { get; init; }

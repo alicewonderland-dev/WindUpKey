@@ -26,6 +26,10 @@ public sealed class InputDiagnosticLog : IDisposable
     private readonly Dictionary<string, int> _counters = new(StringComparer.Ordinal);
     private string? _path;
     private DateTimeOffset _nextFlushUtc;
+#if WINDUP_TESTING
+    /// <summary>04-D8: each lock hook's last install result this session, for the self-test (INFO). Values-free.</summary>
+    private readonly Dictionary<string, (bool Installed, DateTimeOffset AtUtc)> _lastHookResults = new(StringComparer.Ordinal);
+#endif
     private bool _disposed;
 
     public InputDiagnosticLog(
@@ -96,6 +100,10 @@ public sealed class InputDiagnosticLog : IDisposable
 
     public void RecordHook(string hook, bool installed, Exception? exception = null)
     {
+#if WINDUP_TESTING
+        lock (_sync)
+            _lastHookResults[hook] = (installed, DateTimeOffset.UtcNow);
+#endif
         if (!Enabled)
             return;
 
@@ -105,6 +113,20 @@ public sealed class InputDiagnosticLog : IDisposable
             : $" exception={Sanitize(exception.GetType().Name)} message={Sanitize(exception.Message)}";
         WriteLine($"hook name={Sanitize(hook)} result={result}{detail}");
     }
+
+#if WINDUP_TESTING
+    /// <summary>04-D8: the last install result of each lock hook this session (name, installed, when).</summary>
+    public IReadOnlyList<(string Name, bool Installed, DateTimeOffset AtUtc)> SnapshotHookResults()
+    {
+        lock (_sync)
+        {
+            var list = new List<(string, bool, DateTimeOffset)>(_lastHookResults.Count);
+            foreach (var (name, result) in _lastHookResults)
+                list.Add((name, result.Installed, result.AtUtc));
+            return list;
+        }
+    }
+#endif
 
     public void Count(string name, int amount = 1)
     {

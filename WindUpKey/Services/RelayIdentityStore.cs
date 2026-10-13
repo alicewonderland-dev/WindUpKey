@@ -65,6 +65,44 @@ public enum RelayIdentityStoreStatus
     NotWritable,
 }
 
+#if WINDUP_TESTING || WINDUP_SELFTEST_UNITS
+/// <summary>Which version the identity file is at, as the store last read it (04-D4 self-test).</summary>
+public enum RelayIdentityFileVersion
+{
+    Missing,
+    Current,
+
+    /// <summary>Written by a newer build: read-only (01-D19).</summary>
+    Newer,
+}
+
+/// <summary>Whether the character's entry records its pairing key (01-D30), and whether it matches.</summary>
+public enum RelayIdentityKeyRecord
+{
+    /// <summary>Not recorded yet (an older entry; written on the next write for this character).</summary>
+    Absent,
+    Matches,
+    Differs,
+}
+
+/// <summary>
+/// What the store knows about one character's identity, without any value (04-D4 self-test): the file's name (it sits
+/// in pluginConfigs), whether it is outside the plugin's own config folder (as Dalamud names it, 04-D10), its version
+/// and status, the entry's validity, the recorded pairing key's match, and how many <c>.corrupt-*</c> copies there are.
+/// </summary>
+public sealed record RelayIdentityDiagnosis(
+    string FileName,
+    bool OutsidePluginFolder,
+    bool FileExists,
+    RelayIdentityFileVersion Version,
+    RelayIdentityStoreStatus Status,
+    bool HasEntry,
+    bool SecretValid,
+    bool PreviousValid,
+    RelayIdentityKeyRecord PairingKey,
+    int BackupCount);
+#endif
+
 /// <summary>
 /// Per-character relay secrets (current and previous), keyed by ContentId hex, in
 /// <c>pluginConfigs/&lt;InternalName&gt;.relay-identity.json</c>: next to the plugin config folder, not inside it,
@@ -357,6 +395,100 @@ public sealed class RelayIdentityStore
                 : null);
         return outcome == UpdateOutcome.Saved;
     }
+
+#if WINDUP_TESTING || WINDUP_SELFTEST_UNITS
+    /// <summary>
+    /// 04-D4 self-test: what the store knows about this character's identity, without any value (no secret, hash,
+    /// ContentId or key). Uses the current view and never reads under the lock or writes, so it can't move a damaged file
+    /// aside or rewrite one. <paramref name="expectedPairingKey"/> is the key derived from the ContentId; only whether
+    /// the entry's recorded key matches it is returned. <paramref name="pluginConfigDirectory"/> is the folder Dalamud's
+    /// reset deletes, asked of Dalamud by the caller rather than taken from this store's own path (04-D10): the file must
+    /// not be in it or under it.
+    /// </summary>
+    public RelayIdentityDiagnosis Diagnose(string contentId, string expectedPairingKey, string pluginConfigDirectory)
+    {
+        var entry = ViewEntry(contentId);
+        var outside = IsOutside(Path.GetDirectoryName(_path) ?? _path, pluginConfigDirectory);
+        bool exists;
+        try
+        {
+            exists = File.Exists(_path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            exists = false;
+        }
+
+        var keyRecord = string.IsNullOrEmpty(entry?.PairingKey) ? RelayIdentityKeyRecord.Absent
+            : string.Equals(entry.PairingKey, expectedPairingKey, StringComparison.Ordinal) ? RelayIdentityKeyRecord.Matches
+            : RelayIdentityKeyRecord.Differs;
+        return new RelayIdentityDiagnosis(
+            _fileName,
+            outside,
+            exists,
+            !exists ? RelayIdentityFileVersion.Missing : _readOnly ? RelayIdentityFileVersion.Newer : RelayIdentityFileVersion.Current,
+            Status,
+            entry is not null,
+            RelaySecret.IsValid(entry?.Secret),
+            RelaySecret.IsValid(entry?.Previous),
+            keyRecord,
+            BackupFiles().Count);
+    }
+
+    /// <summary>
+    /// 04-D5 self-test: whether <paramref name="candidate"/> is this character's current or previous secret, so a probe's
+    /// fresh random secret can be checked against both without the secrets leaving the store. Current view only.
+    /// </summary>
+    public bool IsKnownSecret(string contentId, string candidate) =>
+        ViewEntry(contentId) is { } entry
+        && (string.Equals(entry.Secret, candidate, StringComparison.Ordinal)
+            || string.Equals(entry.Previous, candidate, StringComparison.Ordinal));
+
+    /// <summary>
+    /// 04-D3 self-test: the values the report's final scrubber must replace for this character: its current and previous
+    /// secret and their hashes. For the scrubber only; never log them.
+    /// </summary>
+    public IReadOnlyList<string> SensitiveValues(string contentId)
+    {
+        var values = new List<string>();
+        if (ViewEntry(contentId) is not { } entry)
+            return values;
+        foreach (var secret in new[] { entry.Secret, entry.Previous })
+        {
+            if (string.IsNullOrEmpty(secret))
+                continue;
+            values.Add(secret);
+            if (RelaySecret.HashHex(secret) is { } hash)
+                values.Add(hash);
+        }
+
+        return values;
+    }
+
+    /// <summary>True when <paramref name="directory"/> is neither <paramref name="folder"/> nor inside it.</summary>
+    private static bool IsOutside(string directory, string folder)
+    {
+        string dir, root;
+        try
+        {
+            dir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
+            root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder));
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException)
+        {
+            return false;
+        }
+
+        return !string.Equals(dir, root, StringComparison.OrdinalIgnoreCase)
+               && !dir.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The character's entry in the current view, without loading or refreshing it (self-test reads only).</summary>
+    private Entry? ViewEntry(string contentId) =>
+        !string.IsNullOrEmpty(contentId) && _characters is not null && _characters.TryGetValue(NormalizeId(contentId), out var entry)
+            ? entry
+            : null;
+#endif
 
     private Entry? TryGetEntry(string contentId)
     {

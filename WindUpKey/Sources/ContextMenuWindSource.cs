@@ -138,7 +138,7 @@ public sealed class ContextMenuWindSource : IWindUpSource
         }
         catch (Exception ex)
         {
-            _log.Warning(ex, "Failed to send wind to {Identity}", identity);
+            _log.Warning(ex, "Failed to send wind to {Identity}", LogRedact.Identity(identity));
         }
     }
 
@@ -150,7 +150,7 @@ public sealed class ContextMenuWindSource : IWindUpSource
         }
         catch (Exception ex)
         {
-            _log.Warning(ex, "Failed to send unwind to {Identity}", identity);
+            _log.Warning(ex, "Failed to send unwind to {Identity}", LogRedact.Identity(identity));
         }
     }
 

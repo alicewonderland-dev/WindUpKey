@@ -12,6 +12,9 @@ using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
 using Lumina.Excel.Sheets;
 using WindUpKey.Protocol;
+#if WINDUP_TESTING
+using WindUpKey.SelfTest;
+#endif
 
 namespace WindUpKey.Services;
 
@@ -173,6 +176,36 @@ public sealed class RelayClient : IDisposable
     private volatile bool _characterReady;
     private volatile string? _cachedIdentity;
     private int _tickLogCounter;
+
+    /// <summary>Set by <see cref="Dispose"/>: <see cref="Start"/> is a no-op from then on (04-D10).</summary>
+    private volatile bool _disposed;
+
+#if WINDUP_TESTING
+    // ---------- 04 self-test hooks (Testing builds only, 04-D1) ----------
+
+    /// <summary>04-D6: consulted by the receive loop before the framework thread; null when no run is active.</summary>
+    private volatile SelfTestTap? _selfTestTap;
+
+    /// <summary>04-D7 outage: the connect loop doesn't connect while set. Memory only, never persisted.</summary>
+    private volatile bool _selfTestOutageHold;
+
+    /// <summary>04-D6: bumped on every accepted register (pairSync), so the self-test can tell the session changed.</summary>
+    private int _acceptedConnections;
+
+    /// <summary>04-D6: every session_replaced seen, whether or not it blocked.</summary>
+    private int _sessionReplacedSeen;
+
+    /// <summary>04-D7: the relay's last close of the live connection (code and description) and how many there were.</summary>
+    private int _closeCount;
+    private int _lastCloseStatus = -1;
+    private volatile string? _lastCloseDescription;
+
+    /// <summary>04 self-test: the <c>peerKeys</c> of this connection's pairSync (null until one arrives).</summary>
+    private volatile IReadOnlyList<string>? _lastPeerKeys;
+
+    /// <summary>04-D11: the pairing key this connection's register carried, recorded when it was sent.</summary>
+    private volatile string? _selfTestRegisteredKey;
+#endif
 
     public RelayClient(
         Configuration config,
@@ -511,7 +544,7 @@ public sealed class RelayClient : IDisposable
                             ClearAllPresence();
                             ClearAllOwnerSettings();
                             _config.Save();
-                            _log.Information("WindUpKey active character profile={ContentId}", _config.ActiveContentId);
+                            _log.Information("WindUpKey active character profile key={Key}", LogRedact.Key(PairingKeyUtil.FromContentIdHex(_config.ActiveContentId)));
                             if (IsConnected)
                                 CloseSocket();
                         }
@@ -539,7 +572,7 @@ public sealed class RelayClient : IDisposable
                 "WindUpKey Tick: running={Running} loggedIn={LoggedIn} identity={Identity} connected={Connected} status={Status}",
                 Volatile.Read(ref _running) == 1,
                 _loggedIn,
-                _cachedIdentity ?? "(none)",
+                LogRedact.Identity(_cachedIdentity),
                 IsConnected,
                 _lastStatus ?? "(null)");
         }
@@ -599,6 +632,14 @@ public sealed class RelayClient : IDisposable
 
     public void Start()
     {
+        // 04-D10: nothing queued on the framework before an unload (a self-test restore, say) may start a connect loop
+        // inside the unloaded plugin.
+        if (_disposed)
+        {
+            _log.Debug("WindUpKey relay Start() ignored: disposed");
+            return;
+        }
+
         _log.Information("WindUpKey relay Start()");
         Stop();
 
@@ -884,7 +925,7 @@ public sealed class RelayClient : IDisposable
                         CanWindMe = false,
                     });
                     _config.Save();
-                    _log.Information("WindUpKey paired with key={Key}", theirKey);
+                    _log.Information("WindUpKey paired with key={Key}", LogRedact.Key(theirKey));
                 }
 
                 return;
@@ -1316,6 +1357,17 @@ public sealed class RelayClient : IDisposable
                 continue;
             }
 
+#if WINDUP_TESTING
+            if (_selfTestOutageHold)
+            {
+                // 04-D7: the self-test's outage, in memory only. Not connecting counts as unreachable, so the 60 s safety
+                // rule suspends the locks as for a real outage.
+                _lastStatus = "Self-test outage: not connecting…";
+                await Task.Delay(1000, ct).ConfigureAwait(false);
+                continue;
+            }
+#endif
+
             if (_connectPolicy.Block == RelayAuthBlock.Full)
             {
                 // Every host rejected this identity, or the session was replaced: wait for Start(), a character
@@ -1330,7 +1382,7 @@ public sealed class RelayClient : IDisposable
             try
             {
                 _lastStatus = _authBlockStatus ?? "Connecting…";
-                _log.Information("WindUpKey loop: connecting as {Identity}", identity);
+                _log.Information("WindUpKey loop: connecting as {Identity}", LogRedact.Identity(identity));
                 var connection = await ConnectAndRegisterAsync(generation, epoch, ct).ConfigureAwait(false);
                 _lastStatus = null;
                 var rejectedCode = await ReceiveLoopAsync(connection.Socket, ct).ConfigureAwait(false);
@@ -1445,6 +1497,10 @@ public sealed class RelayClient : IDisposable
         var isDoll = false;
         string? ownerIdentity = null;
         _registerAccepted = false;
+#if WINDUP_TESTING
+        _lastPeerKeys = null;
+        _selfTestRegisteredKey = null;
+#endif
         Volatile.Write(ref _removalsAwaitingSync, null);
 
         // Keep even the connection-preparation config writes on the framework thread.
@@ -1540,11 +1596,19 @@ public sealed class RelayClient : IDisposable
         // The character changed while the socket opened: don't register the old one; start over with the new one.
         if (_connectPolicy.Epoch != epoch)
             throw new StaleConnectAttemptException();
+#if WINDUP_TESTING
+        // 04-D7: the self-test's outage began while this socket opened: don't register; the loop waits out the hold.
+        if (_selfTestOutageHold)
+            throw new StaleConnectAttemptException();
+#endif
 
         // The sticky host is saved only once this host accepts the register (OnRegisterAccepted).
         _connectionUrl = connectedUrl;
         Volatile.Write(ref _connectionEpoch, epoch);
         _registeredSecret = relaySecret;
+#if WINDUP_TESTING
+        _selfTestRegisteredKey = pairingKey;
+#endif
 
         var register = new RegisterPayload
         {
@@ -1554,7 +1618,7 @@ public sealed class RelayClient : IDisposable
         };
         _registerRejection = null;
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.Register, register), ct).ConfigureAwait(false);
-        _log.Information("WindUpKey registered on relay as key={Key}", pairingKey);
+        _log.Information("WindUpKey registered on relay as key={Key}", LogRedact.Key(pairingKey));
 
         // The sends below use what was read with the key and secret, and stop if the character changed (or a login,
         // import or revert reset the cycle) meanwhile: the loop then reconnects for the current one.
@@ -1781,6 +1845,9 @@ public sealed class RelayClient : IDisposable
     /// <summary>Framework thread. The relay replaced this connection's session (session_replaced): block until the user acts.</summary>
     private void ApplySessionReplaced()
     {
+#if WINDUP_TESTING
+        Interlocked.Increment(ref _sessionReplacedSeen);
+#endif
         if (_connectPolicy.SessionReplaced(Volatile.Read(ref _connectionEpoch)))
             ShowAuthBlock(ErrorCodes.SessionReplaced, RelayAuthBlock.Full);
     }
@@ -1818,6 +1885,9 @@ public sealed class RelayClient : IDisposable
     private void OnRegisterAccepted()
     {
         _registerAccepted = true;
+#if WINDUP_TESTING
+        Interlocked.Increment(ref _acceptedConnections);
+#endif
         _backoff.RegisterAccepted();
         if (_connectionUrl is { } url)
         {
@@ -1847,9 +1917,8 @@ public sealed class RelayClient : IDisposable
     {
         var uri = BuildUri(baseUrl);
         var socket = new ClientWebSocket();
-        // Shared token goes in a header, not the URL (the relay accepts both).
-        if (!string.IsNullOrEmpty(_config.RelayToken))
-            socket.Options.SetRequestHeader("Authorization", $"Bearer {_config.RelayToken}");
+        // Shared token goes in a header, not the URL (the relay accepts both). Same setup as the self-test's probes.
+        RelaySocketSetup.Configure(socket.Options, _config.RelayToken);
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         // Keep per-host attempts bounded so failover to the other Funnel stays responsive.
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(8));
@@ -1918,6 +1987,9 @@ public sealed class RelayClient : IDisposable
             var inbound = await pump.NextAsync(socket, ct).ConfigureAwait(false);
             if (inbound.Envelope is not { } envelope)
             {
+#if WINDUP_TESTING
+                RecordSelfTestClose(inbound.CloseStatus, inbound.CloseDescription);
+#endif
                 // Relay refusals close with PolicyViolation; a secretless refusal sends no error first.
                 switch (RelayConnectPolicy.ClassifyClose(inbound.CloseStatus, inbound.CloseDescription))
                 {
@@ -1931,6 +2003,13 @@ public sealed class RelayClient : IDisposable
 
                 break;
             }
+
+#if WINDUP_TESTING
+            // 04-D6: the self-test's replies never reach normal handling, so no chat line can appear; a partner's presence
+            // answer to a self-test query is only observed, and still handled below.
+            if (SelfTestTap.Inspect(_selfTestTap, envelope) == TapVerdict.Consume)
+                continue;
+#endif
 
             // Socket IO and parsing the envelope stay on this worker (03-D10); all plugin/config/game state is applied
             // on Dalamud's framework thread so lock hooks cannot change at an unsafe time.
@@ -2365,6 +2444,9 @@ public sealed class RelayClient : IDisposable
         var payload = envelope.GetPayload<PairSyncPayload>();
         if (payload is null)
             return;
+#if WINDUP_TESTING
+        _lastPeerKeys = (payload.PeerKeys ?? []).Select(PairingKeyUtil.Normalize).ToList();
+#endif
 
         // Remote stamps dated well past this PC's clock would win last-write-wins until then: treated as absent.
         var now = DateTimeOffset.UtcNow;
@@ -2496,7 +2578,7 @@ public sealed class RelayClient : IDisposable
                 PartnerKey = peerKey,
                 CanWindMe = false,
             });
-            _log.Information("WindUpKey paired with key={Key}", peerKey);
+            _log.Information("WindUpKey paired with key={Key}", LogRedact.Key(peerKey));
         }
 
         var pendingCleared = _config.PendingPartnerKeys.RemoveAll(k =>
@@ -2661,7 +2743,7 @@ public sealed class RelayClient : IDisposable
             "WindUpKey delivery queued type={Type} requestId={RequestId} to={To}",
             payload.Type,
             payload.RequestId,
-            payload.To);
+            LogRedact.Key(payload.To));
     }
 
     private void HandleDeliveryDelivered(Envelope envelope)
@@ -2674,7 +2756,7 @@ public sealed class RelayClient : IDisposable
             "WindUpKey delivery delivered type={Type} requestId={RequestId} to={To}",
             payload.Type,
             payload.RequestId,
-            payload.To);
+            LogRedact.Key(payload.To));
     }
 
     private void HandlePairRemove(Envelope envelope)
@@ -3221,8 +3303,121 @@ public sealed class RelayClient : IDisposable
         }
     }
 
+#if WINDUP_TESTING
+    // ---------- 04 self-test accessors (Testing builds only, 04-D1) ----------
+
+    /// <summary>04-D6: installs the self-test's tap, or removes it with null.</summary>
+    internal void SetSelfTestTap(SelfTestTap? tap) => _selfTestTap = tap;
+
+    /// <summary>
+    /// 04-D7 outage: holds the connect loop (memory only, never persisted) and closes the socket, or lifts the hold.
+    /// Once lifted, a running connect loop connects again on its next pass, so the outage lifts it in the same framework
+    /// tick as the Reconnect path's <see cref="Start"/> (04-D12).
+    /// </summary>
+    internal void SetSelfTestOutageHold(bool hold)
+    {
+        _selfTestOutageHold = hold;
+        if (hold)
+            CloseSocket();
+    }
+
+    internal int AcceptedConnections => Volatile.Read(ref _acceptedConnections);
+
+    internal int SessionReplacedSeen => Volatile.Read(ref _sessionReplacedSeen);
+
+    internal int CloseCount => Volatile.Read(ref _closeCount);
+
+    internal WebSocketCloseStatus? LastCloseStatus =>
+        Volatile.Read(ref _lastCloseStatus) is var status and >= 0 ? (WebSocketCloseStatus)status : null;
+
+    internal string? LastCloseDescription => _lastCloseDescription;
+
+    /// <summary>The live connection's host URL while connected (read-only), else null.</summary>
+    internal string? ConnectedRelayUrl => IsConnected ? _connectionUrl : null;
+
+    /// <summary>True while connected and this connection's register was accepted.</summary>
+    internal bool RegisterAccepted => _registerAccepted && IsConnected;
+
+    /// <summary>The connect-policy epoch: login, Reconnect, character switch, import and revert change it.</summary>
+    internal int ConnectEpoch => _connectPolicy.Epoch;
+
+    /// <summary>The auth block's code while blocked, else null.</summary>
+    internal string? AuthBlockCode => _authBlockStatus is null ? null : _connectPolicy.BlockCode;
+
+    /// <summary>This connection's pairSync <c>peerKeys</c>, or null before it arrived.</summary>
+    internal IReadOnlyList<string>? LastPeerKeys => _lastPeerKeys;
+
+    /// <summary>
+    /// 04-D11: the key the live session registered with (recorded when the register was sent), while that register is
+    /// accepted; else null. The own-key probes address this key, never the current <c>config.PairingKey</c>.
+    /// </summary>
+    internal string? RegisteredKey => RegisterAccepted ? _selfTestRegisteredKey : null;
+
+    private void RecordSelfTestClose(WebSocketCloseStatus? status, string? description)
+    {
+        _lastCloseDescription = description;
+        Volatile.Write(ref _lastCloseStatus, status is { } s ? (int)s : -1);
+        Interlocked.Increment(ref _closeCount);
+    }
+
+    /// <summary>
+    /// 04-D6: the self-test's send. The same socket and send lock as every send, within the 64 KiB cap, and it never
+    /// enters the pending wind, wind-request, owner or call bookkeeping. Throws as a send does.
+    /// </summary>
+    internal Task<bool> SendSelfTestAsync(Envelope envelope, CancellationToken ct) => SendEnvelopeAsync(envelope, ct);
+
+    /// <summary>04-D7 oversize only: sends these bytes as one text message, skipping the 03-D13 send cap. Throws as a send does.</summary>
+    internal async Task<bool> SendSelfTestRawAsync(byte[] utf8, CancellationToken ct)
+    {
+        ClientWebSocket? socket;
+        lock (_socketGate)
+            socket = _socket;
+        if (socket is not { State: WebSocketState.Open })
+            return false;
+
+        await _sendLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await socket.SendAsync(utf8, WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+            return true;
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// 04-D4: the identity store's values-free view of this character, compared against Dalamud's
+    /// <paramref name="pluginConfigDirectory"/> (04-D10). Never takes the identity-file lock. Framework thread.
+    /// </summary>
+    internal RelayIdentityDiagnosis? DiagnoseRelayIdentity(string pluginConfigDirectory) =>
+        string.IsNullOrEmpty(_config.ActiveContentId)
+            ? null
+            : _identityStore.Diagnose(_config.ActiveContentId, PairingKeyUtil.FromContentIdHex(_config.ActiveContentId), pluginConfigDirectory);
+
+    /// <summary>04-D5: whether a probe's candidate secret is this character's current or previous one. Framework thread.</summary>
+    internal bool IsKnownRelaySecret(string candidate) =>
+        !string.IsNullOrEmpty(_config.ActiveContentId) && _identityStore.IsKnownSecret(_config.ActiveContentId, candidate);
+
+    /// <summary>04-D3: this character's secrets and their hashes, for the report's scrubber only. Framework thread. Never log.</summary>
+    internal IReadOnlyList<string> SelfTestSensitiveValues() =>
+        string.IsNullOrEmpty(_config.ActiveContentId) ? [] : _identityStore.SensitiveValues(_config.ActiveContentId);
+
+    /// <summary>
+    /// 01-4: what importing the current value would do (expected Unchanged), without changing anything. The real
+    /// <see cref="CheckRelaySecretImport"/> path, which re-reads the file under its lock: once per run (04-D9). Framework thread.
+    /// </summary>
+    internal RelayIdentityImport? CheckCurrentRelayIdentityImport()
+    {
+        var current = ActiveRelaySecret;
+        return string.IsNullOrEmpty(current) ? null : CheckRelaySecretImport(current);
+    }
+#endif
+
     public void Dispose()
     {
+        _disposed = true;
         _timer.DollWindChanged = null;
         Stop();
         _sendLock.Dispose();

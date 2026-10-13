@@ -27,10 +27,14 @@ namespace WindUpKey.Services;
 /// </summary>
 public sealed unsafe class LockController : IDisposable
 {
-    // GeneralAction row IDs (Lumina GeneralAction).
-    private const uint GeneralActionJump = 2;
-    private const uint GeneralActionReturn = 6;
-    private const uint GeneralActionTeleport = 7;
+    // GeneralAction row IDs (Lumina GeneralAction). Internal so the self-test's post-patch check reads the same rows (04-D8).
+    internal const uint GeneralActionJump = 2;
+    internal const uint GeneralActionReturn = 6;
+    internal const uint GeneralActionTeleport = 7;
+
+    // The RMI walk/fly hook signatures. Internal so the self-test resolves the same ones without hooking (04-D8).
+    internal const string RmiWalkSignature = "E8 ?? ?? ?? ?? 80 7B 3E 00 48 8D 3D";
+    internal const string RmiFlySignature = "E8 ?? ?? ?? ?? 0F B6 0D ?? ?? ?? ?? B8";
 
     private readonly IPluginLog _log;
     private readonly IGameInteropProvider _interop;
@@ -456,7 +460,7 @@ public sealed unsafe class LockController : IDisposable
         try
         {
             _rmiWalkHook = _interop.HookFromSignature<RMIWalkDelegate>(
-                "E8 ?? ?? ?? ?? 80 7B 3E 00 48 8D 3D",
+                RmiWalkSignature,
                 RMIWalkDetour);
             _rmiWalkHook.Enable();
             _diagnostics.RecordHook("rmi-walk", installed: true);
@@ -470,7 +474,7 @@ public sealed unsafe class LockController : IDisposable
         try
         {
             _rmiFlyHook = _interop.HookFromSignature<RMIFlyDelegate>(
-                "E8 ?? ?? ?? ?? 0F B6 0D ?? ?? ?? ?? B8",
+                RmiFlySignature,
                 RMIFlyDetour);
             _rmiFlyHook.Enable();
             _diagnostics.RecordHook("rmi-fly", installed: true);

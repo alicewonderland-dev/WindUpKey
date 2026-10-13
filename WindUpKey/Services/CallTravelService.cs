@@ -37,8 +37,8 @@ public sealed class CallTravelService : IDisposable
     private const float HouseEntranceInteractYalms = 3.5f;
     /// <summary>How far we will vnav toward a visible Entrance / plot door before giving up.</summary>
     private const float HouseEntranceApproachMaxYalms = 200f;
-    /// <summary>GeneralAction row: Mount Roulette.</summary>
-    private const uint GeneralActionMountRoulette = 9;
+    /// <summary>GeneralAction row: Mount Roulette. Internal so the self-test's post-patch check reads the same row (04-D8).</summary>
+    internal const uint GeneralActionMountRoulette = 9;
     private static readonly TimeSpan TravelStepTimeout = TimeSpan.FromMinutes(3);
     /// <summary>How long to wait for Lifestream TaskManager / cast to show progress after we request travel.</summary>
     private static readonly TimeSpan LifestreamStartGrace = TimeSpan.FromSeconds(3);

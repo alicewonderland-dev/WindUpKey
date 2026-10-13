@@ -67,6 +67,21 @@ public static class RelayWireRules
     }
 }
 
+/// <summary>
+/// The relay socket's request setup, shared by the client's connection and the self-test's probes (04 Architecture): the
+/// shared token in an <c>Authorization: Bearer</c> header, never the URL (01-D8). Probes also keep the HTTP response
+/// details, so a refused upgrade's status (401) can be read. No Dalamud dependency.
+/// </summary>
+public static class RelaySocketSetup
+{
+    public static void Configure(ClientWebSocketOptions options, string? token, bool collectHttpResponseDetails = false)
+    {
+        if (!string.IsNullOrEmpty(token))
+            options.SetRequestHeader("Authorization", $"Bearer {token}");
+        options.CollectHttpResponseDetails = collectHttpResponseDetails;
+    }
+}
+
 /// <summary>What <see cref="RelayInboundPump.NextAsync"/> got: a parsed envelope, or the relay's close.</summary>
 public readonly record struct RelayInbound(Envelope? Envelope, WebSocketCloseStatus? CloseStatus, string? CloseDescription);
 

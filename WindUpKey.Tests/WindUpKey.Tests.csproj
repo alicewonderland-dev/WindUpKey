@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
-    Dalamud-free tests for the plugin's relay identity, sync, unpair-queue and wire-limit code. Not part of the plugin build or its packaging:
+    Dalamud-free tests for the plugin's relay identity, sync, unpair-queue, wire-limit and self-test code. Not part of the plugin build or its packaging:
     nothing references this project, and deploy/Pack-Plugin.ps1 builds only WindUpKey/WindUpKey.csproj.
     Run with: dotnet test WindUpKey.Tests
   -->
@@ -14,6 +14,8 @@
     <!-- Program.cs is also the second process for the cross-process lock test, so the test SDK's empty one is off. -->
     <OutputType>Exe</OutputType>
     <GenerateProgramFile>false</GenerateProgramFile>
+    <!-- 04-D1: the self-test units are compiled into the plugin only under WINDUP_TESTING; here they always are. -->
+    <DefineConstants>$(DefineConstants);WINDUP_SELFTEST_UNITS</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -33,7 +35,10 @@
     <Compile Include="..\WindUpKey\OwnedDoll.cs" Link="Plugin\OwnedDoll.cs" />
     <Compile Include="..\WindUpKey\PairingKeyUtil.cs" Link="Plugin\PairingKeyUtil.cs" />
     <Compile Include="..\WindUpKey\RemoteText.cs" Link="Plugin\RemoteText.cs" />
+    <Compile Include="..\WindUpKey\LogRedact.cs" Link="Plugin\LogRedact.cs" />
     <Compile Include="..\WindUpKey\Services\RelayWireRules.cs" Link="Plugin\RelayWireRules.cs" />
+    <!-- The self-test's Dalamud-free units (04 Architecture); its thin adapters (SelfTestHost, SelfTestController) need Dalamud. -->
+    <Compile Include="..\WindUpKey\SelfTest\*.cs" LinkBase="Plugin\SelfTest" />
     <ProjectReference Include="..\WindUpKey.Protocol\WindUpKey.Protocol.csproj" />
   </ItemGroup>
 

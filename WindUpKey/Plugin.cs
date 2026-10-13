@@ -7,6 +7,9 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using System.Diagnostics;
 using WindUpKey.Services;
+#if WINDUP_TESTING
+using WindUpKey.SelfTest;
+#endif
 using WindUpKey.Sources;
 using WindUpKey.Ui;
 
@@ -36,6 +39,10 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IUnlockState UnlockState { get; private set; } = null!;
     [PluginService] internal static IDutyState DutyState { get; private set; } = null!;
     [PluginService] internal static IPlayerState PlayerState { get; private set; } = null!;
+#if WINDUP_TESTING
+    /// <summary>04-D8: the self-test resolves hook signatures with it, without installing a hook.</summary>
+    [PluginService] internal static ISigScanner SigScanner { get; private set; } = null!;
+#endif
 
     public Configuration Configuration { get; }
     private readonly WindowSystem _windowSystem = new("WindUpKey");
@@ -53,6 +60,7 @@ public sealed class Plugin : IDalamudPlugin
 #if WINDUP_TESTING
     private readonly CallPromptWindow _callPrompt;
     private readonly CallTravelService _callTravel;
+    private readonly SelfTestController _selfTest;
 #endif
     private readonly List<IWindUpSource> _sources = [];
     private long _lastFrameworkUpdateTimestamp;
@@ -126,6 +134,29 @@ public sealed class Plugin : IDalamudPlugin
             ack => _relay.SendCallAckAsync(ack),
             result => _relay.SendCallResultAsync(result));
         _relay.AttachCallTravel(_callTravel);
+
+        // 04: /windup selftest (Testing builds only, debug mode). The run's own Reconnect sets the epoch it expects.
+        SelfTestController? selfTest = null;
+        _selfTest = selfTest = new SelfTestController(
+            new SelfTestHost(
+                _relay,
+                Configuration,
+                Framework,
+                ObjectTable,
+                DataManager,
+                SigScanner,
+                PluginInterface,
+                _inputDiagnostics,
+                () => _callTravel.IsTravelReady,
+                epoch => selfTest?.ExpectEpoch(epoch),
+                () => selfTest?.ReconnectAllowed == true),
+            _relay,
+            Framework,
+            ChatGui,
+            Log,
+            PluginInterface.GetPluginConfigDirectory(),
+            PluginInterface.Manifest.AssemblyVersion.ToString(),
+            RelayDefaults.RelayToken);
 #endif
 
         _changelogWindow = new ChangelogWindow();
@@ -164,6 +195,7 @@ public sealed class Plugin : IDalamudPlugin
                 "Open Wind-Up Key config.\n/windup safeword <word> uses your safeword.\n/windup unlock clears Hardcore and all owners (confirmation required)."
 #if WINDUP_TESTING
                 + "\n/windup stopcall cancels an active owner call."
+                + "\n/windup selftest runs the relay self-test (debug mode)."
 #endif
                 ,
         });
@@ -206,6 +238,10 @@ public sealed class Plugin : IDalamudPlugin
             source.Dispose();
         _sources.Clear();
 
+#if WINDUP_TESTING
+        // Before the relay: cancels a run and lifts its outage hold (04-D2).
+        _selfTest.Dispose();
+#endif
         _relay.Dispose();
 #if WINDUP_TESTING
         _callTravel.Dispose();
@@ -248,6 +284,7 @@ public sealed class Plugin : IDalamudPlugin
         phaseStart = Stopwatch.GetTimestamp();
         _relay.TickCallTravel();
         RecordSlowestPhase("call-travel", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
+        _selfTest.Tick();
 #endif
         phaseStart = Stopwatch.GetTimestamp();
         _lowWind.Tick();
@@ -315,6 +352,8 @@ public sealed class Plugin : IDalamudPlugin
     {
 #if WINDUP_TESTING
         _relay.CancelActiveCall();
+        // Its restore then only lifts the hold, never reconnecting a logged-out client (04-D10).
+        _selfTest.OnLogout();
 #endif
         _lockController.UninstallHooks();
         _relay.Stop();
@@ -334,6 +373,19 @@ public sealed class Plugin : IDalamudPlugin
         var rest = space < 0 ? string.Empty : trimmed[(space + 1)..].Trim();
 
 #if WINDUP_TESTING
+        if (string.Equals(verb, "selftest", StringComparison.OrdinalIgnoreCase))
+        {
+            // Like check and debug: debug mode only (04-D1).
+            if (!Configuration.IsDebugEnabled)
+            {
+                PluginChat.PrintError(ChatGui, "Enable debug mode in config to use /windup selftest.");
+                return;
+            }
+
+            _selfTest.OnCommand(rest);
+            return;
+        }
+
         if (string.Equals(verb, "stopcall", StringComparison.OrdinalIgnoreCase))
         {
             _relay.CancelActiveCall();
