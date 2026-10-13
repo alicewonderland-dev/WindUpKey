@@ -39,6 +39,34 @@ public sealed class NotAsRootFactAttribute : FactAttribute
     }
 }
 
+/// <summary>
+/// A fact that runs a child process under the time zone <paramref name="zone"/> (an IANA id, set through <c>TZ</c>).
+/// Skipped on Windows, where .NET doesn't read <c>TZ</c>, and when the zone isn't available on this host.
+/// </summary>
+public sealed class TimeZoneFactAttribute : FactAttribute
+{
+    public TimeZoneFactAttribute(string zone)
+    {
+        Skip = TimeZoneFacts.SkipReason(OperatingSystem.IsWindows(), zone, TimeZoneFacts.IsAvailable);
+    }
+}
+
+internal static class TimeZoneFacts
+{
+    /// <summary>Why a test under <paramref name="zone"/> is skipped, or null to run it.</summary>
+    public static string? SkipReason(bool isWindows, string zone, Func<string, bool> isAvailable)
+    {
+        if (isWindows)
+            return "Sets the time zone through TZ, which .NET reads only on Unix.";
+        if (!isAvailable(zone))
+            return $"The time zone {zone} isn't available on this host.";
+        return null;
+    }
+
+    /// <summary>Whether this host's time zone data has <paramref name="zone"/>.</summary>
+    public static bool IsAvailable(string zone) => TimeZoneInfo.TryFindSystemTimeZoneById(zone, out _);
+}
+
 internal static class PermissionFacts
 {
     /// <summary>

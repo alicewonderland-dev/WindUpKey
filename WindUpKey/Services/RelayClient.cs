@@ -56,6 +56,13 @@ public sealed class RelayClient : IDisposable
     /// </summary>
     public static readonly TimeSpan MovementLockSafetyGrace = TimeSpan.FromSeconds(60);
 
+    /// <summary>Whether this build has the Call feature (Testing builds): sync changes to call rights are told only then.</summary>
+#if WINDUP_TESTING
+    private const bool CallFeature = true;
+#else
+    private const bool CallFeature = false;
+#endif
+
     private readonly Configuration _config;
     private readonly IClientState _clientState;
     private readonly IObjectTable _objectTable;
@@ -116,6 +123,27 @@ public sealed class RelayClient : IDisposable
     /// Read by the receive loop, which ends the connection so the connect loop can try the next host.
     /// </summary>
     private volatile string? _registerRejection;
+
+    /// <summary>True once the relay accepted this connection's register (its pairSync arrived). Set on the framework thread.</summary>
+    private volatile bool _registerAccepted;
+
+    /// <summary>
+    /// The queued unpairs this connection sent right after its register. They leave the profile's queue only once the
+    /// register is accepted (pairSync): a host that refuses it ignores them. Written by the connect, taken on the
+    /// framework thread.
+    /// </summary>
+    private SentPairRemovals? _removalsAwaitingSync;
+
+    /// <summary>
+    /// Partners whose queued unpair was sent on this connection. This connection's pairSync and queued pairEstablished
+    /// were made before the relay had it, so they must not bring them back. Framework thread.
+    /// </summary>
+    private readonly HashSet<string> _unpairedThisConnection = new(StringComparer.Ordinal);
+
+    private sealed record SentPairRemovals(int Epoch, string PairingKey, IReadOnlyList<PendingPairRemoval> Removals);
+
+    /// <summary>The profile (ContentId) whose local sync stamps were last checked for future dates. Framework thread.</summary>
+    private string? _stampsCheckedProfile;
 
     private readonly object _presenceLock = new();
     private readonly Dictionary<string, PartnerPresence> _presenceByKey = new(StringComparer.Ordinal);
@@ -464,6 +492,14 @@ public sealed class RelayClient : IDisposable
                     {
                         var switched = _config.ActivateCharacter(contentId);
                         characterReady = true;
+
+                        // Once per profile load or activation, before this profile connects or pushes anything.
+                        if (!string.Equals(_stampsCheckedProfile, _config.ActiveContentId, StringComparison.Ordinal))
+                        {
+                            _stampsCheckedProfile = _config.ActiveContentId;
+                            ResetFutureLocalSyncStamps();
+                        }
+
                         // Orphan lock: settings locked with no owners (e.g. owner unpaired offline).
                         var unlocked = _config.UnlockOwnerSettingsIfNoOwners();
                         if (switched)
@@ -861,11 +897,17 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
+        // Pairing again cancels an unpair still waiting to be sent.
+        var changed = PairRemovalQueue.Cancel(_config.PendingPairRemovals, theirKey);
+        _unpairedThisConnection.Remove(theirKey);
         if (!_config.PendingPartnerKeys.Contains(theirKey, StringComparer.Ordinal))
         {
             _config.PendingPartnerKeys.Add(theirKey);
-            _config.Save();
+            changed = true;
         }
+
+        if (changed)
+            _config.Save();
 
         var payload = new PairSubmitPayload
         {
@@ -918,25 +960,50 @@ public sealed class RelayClient : IDisposable
         if (!PairingKeyUtil.IsValid(peerKey))
             return;
 
-        var wasOwner = _config.FindPairByKey(peerKey) is { IsOwner: true };
-
-        _config.PairedPartners.RemoveAll(p =>
-            string.Equals(PairingKeyUtil.Normalize(p.PartnerKey), peerKey, StringComparison.Ordinal));
+        // Framework thread (the config window). 02-D30: an owner unpairing its doll also stops owning it here, live or
+        // queued, because the relay drops the doll's reply ownerRevoked once the pair is gone.
+        var local = RelaySyncRules.RemovePartnerLocally(_config.PairedPartners, _config.OwnedDolls, peerKey);
         _config.UnlockOwnerSettingsIfNoOwners();
+
+        // Kept for this character until the relay has it: sent now when connected, otherwise on the next connect.
+        // Self-pair is local only — nothing to notify on the relay (not queued).
+        var removal = PairRemovalQueue.Queue(_config.PendingPairRemovals, peerKey, _config.PairingKey, local.WasOwner);
         _config.Save();
         ClearPresence(peerKey);
+        ClearOwnerSettings(peerKey);
 
-        // Self-pair is local only — nothing to notify on the relay.
-        if (!IsConnected || string.Equals(peerKey, _config.PairingKey, StringComparison.Ordinal))
+        if (removal is null || !IsConnected)
             return;
 
-        if (wasOwner)
-            await SendOwnerRevokedAsync(peerKey).ConfigureAwait(false);
-
-        await SendEnvelopeAsync(Envelope.Create(MessageTypes.PairRemove, new PairRemovePayload
+        // Sent before this connection's register was accepted, a refusing host would ignore it: then it stays queued.
+        var accepted = _registerAccepted;
+        var contentId = _config.ActiveContentId;
+        try
         {
-            PeerKey = peerKey,
-        }), CancellationToken.None);
+            if (removal.RevokeOwner && !await SendOwnerRevokedAsync(peerKey).ConfigureAwait(false))
+                return;
+
+            var sent = await SendEnvelopeAsync(Envelope.Create(MessageTypes.PairRemove, new PairRemovePayload
+            {
+                PeerKey = peerKey,
+            }), CancellationToken.None).ConfigureAwait(false);
+            if (!sent || !accepted)
+                return;
+
+            await _framework.RunOnTick(() =>
+            {
+                // After a character switch it stays queued on that character, and is sent again on its next connect.
+                if (string.Equals(_config.ActiveContentId, contentId, StringComparison.Ordinal)
+                    && PairRemovalQueue.Complete(_config.PendingPairRemovals, [removal]))
+                {
+                    _config.Save();
+                }
+            }).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "WindUpKey failed to send an unpair; it is sent again on the next connect");
+        }
     }
 
     /// <summary>Doll designates a paired partner as an owner (idempotent).</summary>
@@ -1187,14 +1254,12 @@ public sealed class RelayClient : IDisposable
         }
     }
 
-    private async Task SendOwnerRevokedAsync(string ownerKey)
-    {
-        await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerRevoked, new OwnerRevokedPayload
+    private Task<bool> SendOwnerRevokedAsync(string ownerKey) =>
+        SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerRevoked, new OwnerRevokedPayload
         {
             From = _config.PairingKey,
             To = ownerKey,
-        }), CancellationToken.None).ConfigureAwait(false);
-    }
+        }), CancellationToken.None);
 
     private string? TryReadIdentity()
     {
@@ -1375,9 +1440,13 @@ public sealed class RelayClient : IDisposable
         var step = RelayConnectStep.WaitForCharacter;
         // What the post-register sends need, read in the same tick as the key and secret (config is framework-thread only).
         string[] pendingKeys = [];
+        PendingPairRemoval[] removals = [];
         (string Key, bool IsOwner)[] partners = [];
         var isDoll = false;
         string? ownerIdentity = null;
+        _registerAccepted = false;
+        Volatile.Write(ref _removalsAwaitingSync, null);
+
         // Keep even the connection-preparation config writes on the framework thread.
         await _framework.RunOnTick(() =>
         {
@@ -1406,6 +1475,8 @@ public sealed class RelayClient : IDisposable
             // same character even if the player switches while the socket opens.
             pairingKey = derived;
             pendingKeys = _config.PendingPartnerKeys.ToArray();
+            removals = PairRemovalQueue.ToSend(_config.PendingPairRemovals, derived);
+            _unpairedThisConnection.Clear();
             partners = _config.PairedPartners.Where(p => p is not null).Select(p => (p.PartnerKey, p.IsOwner)).ToArray();
             isDoll = _config.IsDoll;
             ownerIdentity = LocalOwnerIdentityLabel();
@@ -1487,6 +1558,34 @@ public sealed class RelayClient : IDisposable
 
         // The sends below use what was read with the key and secret, and stop if the character changed (or a login,
         // import or revert reset the cycle) meanwhile: the loop then reconnects for the current one.
+        // Unpairs made while offline (or whose send failed) go first, so the relay drops those pairs before partners
+        // are re-asserted. They leave the queue when the register is accepted (pairSync); until then, a resend is
+        // harmless.
+        var sentRemovals = new List<PendingPairRemoval>();
+        foreach (var removal in removals)
+        {
+            ThrowIfStale(epoch);
+            var revoked = !removal.RevokeOwner
+                          || await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerRevoked, new OwnerRevokedPayload
+                          {
+                              From = pairingKey,
+                              To = removal.PeerKey,
+                          }), ct).ConfigureAwait(false);
+            if (!revoked)
+                break;
+
+            var removed = await SendEnvelopeAsync(Envelope.Create(MessageTypes.PairRemove, new PairRemovePayload
+            {
+                PeerKey = removal.PeerKey,
+            }), ct).ConfigureAwait(false);
+            if (!removed)
+                break;
+
+            sentRemovals.Add(removal);
+        }
+
+        Volatile.Write(ref _removalsAwaitingSync, new SentPairRemovals(epoch, pairingKey, sentRemovals));
+
         // Re-submit pending pair keys after reconnect.
         foreach (var key in pendingKeys)
         {
@@ -1718,6 +1817,7 @@ public sealed class RelayClient : IDisposable
     /// </summary>
     private void OnRegisterAccepted()
     {
+        _registerAccepted = true;
         if (_connectionUrl is { } url)
         {
             _config.RelayUrl = url;
@@ -1881,6 +1981,7 @@ public sealed class RelayClient : IDisposable
             case MessageTypes.PairSync:
                 // Relay-originated only (never routed), and sent once the register is accepted.
                 OnRegisterAccepted();
+                CompleteSentPairRemovals();
                 HandlePairSync(envelope);
                 break;
             case MessageTypes.PairRemove:
@@ -2203,8 +2304,59 @@ public sealed class RelayClient : IDisposable
         if (payload is null)
             return;
 
-        EnsurePeerPair(PairingKeyUtil.Normalize(payload.PeerKey));
+        var peerKey = PairingKeyUtil.Normalize(payload.PeerKey);
+        if (IsUnpairedHere(peerKey))
+            return;
+
+        var announce = RelaySyncRules.AnnouncesSyncChanges(_config.HasCompletedInitialSetup);
+        var newHere = IsNewToThisPc(peerKey);
+        var added = EnsurePeerPair(peerKey);
+        var pair = _config.FindPairByKey(peerKey);
+        if (added && announce && newHere && pair is not null)
+            PrintSyncChange(PairSyncChange.PartnerAdded, pair);
+
+        // 02-D29: the relay just made or restored this pair, so its consent row is missing or stale.
+        if (RelaySyncRules.PushesAfterPairing(_config.IsDoll, pair is not null))
+            QueueDollStatePush();
     }
+
+    /// <summary>
+    /// The register was accepted (pairSync), so the relay has the unpairs this connection sent before it: they leave
+    /// the queue, and this connection's sync can't bring those partners back. Framework thread.
+    /// </summary>
+    private void CompleteSentPairRemovals()
+    {
+        var sent = Interlocked.Exchange(ref _removalsAwaitingSync, null);
+        if (sent is null
+            || sent.Removals.Count == 0
+            || sent.Epoch != _connectPolicy.Epoch
+            || !string.Equals(sent.PairingKey, _config.PairingKey, StringComparison.Ordinal))
+            return;
+
+        foreach (var removal in sent.Removals)
+            _unpairedThisConnection.Add(removal.PeerKey);
+
+        if (PairRemovalQueue.Complete(_config.PendingPairRemovals, sent.Removals))
+        {
+            _config.Save();
+            _log.Information("WindUpKey sent {Count} unpair(s) made while offline", sent.Removals.Count);
+        }
+    }
+
+    /// <summary>
+    /// This character unpaired the key and the relay may not have it yet (queued, or sent on this connection), so
+    /// relay sync must not bring the partner back. Framework thread.
+    /// </summary>
+    private bool IsUnpairedHere(string peerKey) =>
+        _unpairedThisConnection.Contains(peerKey) || PairRemovalQueue.Contains(_config.PendingPairRemovals, peerKey);
+
+    /// <summary>Neither a partner nor a pending request made on this PC (a pairing done on another PC).</summary>
+    private bool IsNewToThisPc(string peerKey) =>
+        _config.FindPairByKey(peerKey) is null
+        && !_config.PendingPartnerKeys.Contains(peerKey, StringComparer.Ordinal);
+
+    private void PrintSyncChange(PairSyncChange change, PairedPartner pair) =>
+        PluginChat.Print(_chat, RelaySyncRules.Describe(change, pair.GetChosenName()), PluginChat.Yellow);
 
     private void HandlePairSync(Envelope envelope)
     {
@@ -2212,51 +2364,53 @@ public sealed class RelayClient : IDisposable
         if (payload is null)
             return;
 
-        var consentByPeer = new Dictionary<string, PairConsentSyncEntry>(StringComparer.Ordinal);
+        // Remote stamps dated well past this PC's clock would win last-write-wins until then: treated as absent.
+        var now = DateTimeOffset.UtcNow;
+        var consentByPeer = new Dictionary<string, (PairConsentSyncEntry Entry, DateTimeOffset Updated)>(StringComparer.Ordinal);
         if (payload.Peers is not null)
         {
             foreach (var entry in payload.Peers)
             {
                 var key = PairingKeyUtil.Normalize(entry.PeerKey);
-                if (PairingKeyUtil.IsValid(key))
-                    consentByPeer[key] = entry;
+                if (PairingKeyUtil.IsValid(key) && RelaySyncRules.TryReadRemoteStamp(entry.UpdatedUtc, now, out var updated))
+                    consentByPeer[key] = (entry, updated);
             }
         }
 
-        var peerKeys = new HashSet<string>(StringComparer.Ordinal);
-        if (payload.PeerKeys is not null)
-        {
-            foreach (var raw in payload.PeerKeys)
-            {
-                var key = PairingKeyUtil.Normalize(raw);
-                if (PairingKeyUtil.IsValid(key))
-                    peerKeys.Add(key);
-            }
-        }
-
-        foreach (var key in consentByPeer.Keys)
-            peerKeys.Add(key);
+        // Partners come only from peerKeys (the relay's established pairs). A consent row updates a partner this PC
+        // already knows, or one added from peerKeys in this sync, and never adds one.
+        var targets = RelaySyncRules.PairSyncTargets(payload.PeerKeys, consentByPeer.Keys, _config.PairingKey);
 
         var changed = false;
         var needPush = false;
 
-        foreach (var peerKey in peerKeys)
+        // Partners added or consent turned on by another PC are told in chat, except before the profile has completed its initial setup.
+        var announce = RelaySyncRules.AnnouncesSyncChanges(_config.HasCompletedInitialSetup);
+        var announcements = new List<(PairSyncChange Change, PairedPartner Pair)>();
+
+        foreach (var (peerKey, mayAdd) in targets)
         {
-            if (string.Equals(peerKey, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
+            if (IsUnpairedHere(peerKey))
                 continue;
 
-            if (EnsurePeerPair(peerKey, save: false))
+            var newHere = IsNewToThisPc(peerKey);
+            if (mayAdd && EnsurePeerPair(peerKey, save: false))
+            {
                 changed = true;
+
+                // 02-D29: a pair made or restored here: the relay's consent row and the doll's other PCs catch up.
+                needPush |= RelaySyncRules.PushesAfterPairing(_config.IsDoll, pairedHere: true);
+            }
 
             var pair = _config.FindPairByKey(peerKey);
             if (pair is null)
                 continue;
 
-            if (consentByPeer.TryGetValue(peerKey, out var remote))
+            var wasOwner = pair.IsOwner;
+            var couldCall = pair.CanCallMe;
+            if (consentByPeer.TryGetValue(peerKey, out var row))
             {
-                if (!DateTimeOffset.TryParse(remote.UpdatedUtc, out var remoteUpdated))
-                    continue;
-
+                var (remote, remoteUpdated) = row;
                 if (pair.ConsentUpdatedUtc is not { } localUpdated || remoteUpdated > localUpdated)
                 {
                     pair.CanWindMe = remote.CanWindMe;
@@ -2276,18 +2430,22 @@ public sealed class RelayClient : IDisposable
             {
                 needPush = true;
             }
+
+            if (announce)
+            {
+                foreach (var change in RelaySyncRules.Changes(newHere, wasOwner, couldCall, pair.IsOwner, pair.CanCallMe, CallFeature))
+                    announcements.Add((change, pair));
+            }
         }
 
         if (_config.IsDoll)
         {
-            if (!string.IsNullOrEmpty(payload.WindUpdatedUtc)
-                && DateTimeOffset.TryParse(payload.WindUpdatedUtc, out var remoteWindUpdated))
+            if (RelaySyncRules.TryReadRemoteStamp(payload.WindUpdatedUtc, now, out var remoteWindUpdated))
             {
                 if (_config.WindUpdatedUtc is not { } localWindUpdated || remoteWindUpdated > localWindUpdated)
                 {
                     DateTimeOffset? expiry = null;
-                    if (!string.IsNullOrEmpty(payload.ExpiryUtc)
-                        && DateTimeOffset.TryParse(payload.ExpiryUtc, out var parsedExpiry))
+                    if (SyncStamp.TryParse(payload.ExpiryUtc, out var parsedExpiry))
                     {
                         expiry = parsedExpiry;
                     }
@@ -2307,6 +2465,9 @@ public sealed class RelayClient : IDisposable
 
         if (changed)
             _config.Save();
+
+        foreach (var (change, pair) in announcements)
+            PrintSyncChange(change, pair);
 
         if (needPush)
             QueueDollStatePush();
@@ -2373,8 +2534,14 @@ public sealed class RelayClient : IDisposable
             if (!_config.IsDoll || !IsConnected)
                 return;
 
-            EnsureLocalSyncStamps();
-            var payload = BuildDollStatePushPayload();
+            // Config and chat belong to the framework thread.
+            var payload = await _framework.RunOnTick(() =>
+                {
+                    var windStampReset = ResetFutureLocalSyncStamps();
+                    EnsureLocalSyncStamps(stampWind: !windStampReset);
+                    return BuildDollStatePushPayload();
+                })
+                .ConfigureAwait(false);
             if (payload is null)
                 return;
 
@@ -2389,12 +2556,43 @@ public sealed class RelayClient : IDisposable
         }
     }
 
-    private void EnsureLocalSyncStamps()
+    /// <summary>
+    /// 02-D22: resets local consent stamps dated more than <see cref="SyncStamp.MaxFutureSkew"/> after this PC's
+    /// clock (flags off, stamp cleared) and clears such a wind stamp (keeping the expiry, so the relay's value wins if
+    /// it has one), then saves and tells the player once per partner. Returns whether the wind stamp was cleared.
+    /// The next sync restores the permissions from a valid relay copy, and no <c>ownerRevoked</c> is sent (02-D27).
+    /// Framework thread. Logs counts only.
+    /// </summary>
+    private bool ResetFutureLocalSyncStamps()
+    {
+        var reset = RelaySyncRules.ResetFutureLocalStamps(_config.PairedPartners, _config.WindUpdatedUtc, DateTimeOffset.UtcNow);
+        if (!reset.Any)
+            return false;
+
+        if (reset.WindStampCleared)
+            _config.WindUpdatedUtc = null;
+        _config.Save();
+        _log.Warning(
+            "WindUpKey reset {Partners} partner permission stamp(s) dated in the future (wind stamp cleared: {Wind})",
+            reset.Partners.Count,
+            reset.WindStampCleared);
+
+        foreach (var partner in reset.Partners)
+            PluginChat.Print(_chat, RelaySyncRules.DescribeStampReset(partner.GetChosenName()), PluginChat.Yellow);
+
+        return reset.WindStampCleared;
+    }
+
+    /// <param name="stampWind">
+    /// False right after a future wind stamp was cleared: that push leaves the wind out instead of re-stamping the
+    /// local expiry as new and overwriting the relay's value with it.
+    /// </param>
+    private void EnsureLocalSyncStamps(bool stampWind = true)
     {
         var now = DateTimeOffset.UtcNow;
         var touched = false;
 
-        if (_config.ExpiryUtc is not null && _config.WindUpdatedUtc is null)
+        if (stampWind && _config.ExpiryUtc is not null && _config.WindUpdatedUtc is null)
         {
             _config.WindUpdatedUtc = now;
             touched = true;
@@ -2497,7 +2695,10 @@ public sealed class RelayClient : IDisposable
             return;
 
         var fromKey = PairingKeyUtil.Normalize(payload.From);
-        if (!PairingKeyUtil.IsValid(fromKey) || !PairingKeyUtil.IsValid(_config.PairingKey))
+        var paired = _consent.IsPairedByKey(fromKey);
+
+        // Unpaired senders get stillPaired:false and nothing else, so a half-unpair heals on their side.
+        if (!RelaySyncRules.TryAnswerPresence(fromKey, _config.PairingKey, _config.IsDebugEnabled, paired, out var stillPaired))
             return;
 
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.PresenceResult, new PresenceResultPayload
@@ -2506,7 +2707,7 @@ public sealed class RelayClient : IDisposable
             From = _config.PairingKey,
             To = fromKey,
             Online = true,
-            StillPaired = _consent.IsPairedByKey(fromKey),
+            StillPaired = stillPaired,
         }), ct).ConfigureAwait(false);
     }
 
@@ -2528,11 +2729,9 @@ public sealed class RelayClient : IDisposable
 
     private void SilentRemovePartner(string peerKey)
     {
-        var removed = _config.PairedPartners.RemoveAll(p =>
-            string.Equals(PairingKeyUtil.Normalize(p.PartnerKey), peerKey, StringComparison.Ordinal));
-        var ownedRemoved = _config.RemoveOwnedDoll(peerKey);
+        var local = RelaySyncRules.RemovePartnerLocally(_config.PairedPartners, _config.OwnedDolls, peerKey);
         var unlocked = _config.UnlockOwnerSettingsIfNoOwners();
-        if (removed > 0 || ownedRemoved || unlocked)
+        if (local.Any || unlocked)
             _config.Save();
 
         ClearPresence(peerKey);
@@ -2944,20 +3143,22 @@ public sealed class RelayClient : IDisposable
         }
     }
 
-    private async Task SendEnvelopeAsync(Envelope envelope, CancellationToken ct)
+    /// <summary>True when the frame was sent; false when there is no open socket. A failed send throws.</summary>
+    private async Task<bool> SendEnvelopeAsync(Envelope envelope, CancellationToken ct)
     {
         ClientWebSocket? socket;
         lock (_socketGate)
             socket = _socket;
 
         if (socket is not { State: WebSocketState.Open })
-            return;
+            return false;
 
         var bytes = Encoding.UTF8.GetBytes(envelope.Serialize());
         await _sendLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             await socket.SendAsync(bytes, WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+            return true;
         }
         finally
         {

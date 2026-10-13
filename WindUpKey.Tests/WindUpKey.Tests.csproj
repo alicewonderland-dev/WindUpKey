@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
-    Dalamud-free tests for the plugin's relay identity code. Not part of the plugin build or its packaging:
+    Dalamud-free tests for the plugin's relay identity, sync and unpair-queue code. Not part of the plugin build or its packaging:
     nothing references this project, and deploy/Pack-Plugin.ps1 builds only WindUpKey/WindUpKey.csproj.
     Run with: dotnet test WindUpKey.Tests
   -->
@@ -26,6 +26,11 @@
     <!-- The plugin's Dalamud-free sources, compiled in directly: the plugin project itself needs Dalamud. -->
     <Compile Include="..\WindUpKey\Services\RelayIdentityStore.cs" Link="Plugin\RelayIdentityStore.cs" />
     <Compile Include="..\WindUpKey\Services\RelayConnectPolicy.cs" Link="Plugin\RelayConnectPolicy.cs" />
+    <Compile Include="..\WindUpKey\Services\RelaySyncRules.cs" Link="Plugin\RelaySyncRules.cs" />
+    <Compile Include="..\WindUpKey\Services\PairRemovalQueue.cs" Link="Plugin\PairRemovalQueue.cs" />
+    <Compile Include="..\WindUpKey\PendingPairRemoval.cs" Link="Plugin\PendingPairRemoval.cs" />
+    <Compile Include="..\WindUpKey\PairedPartner.cs" Link="Plugin\PairedPartner.cs" />
+    <Compile Include="..\WindUpKey\OwnedDoll.cs" Link="Plugin\OwnedDoll.cs" />
     <Compile Include="..\WindUpKey\PairingKeyUtil.cs" Link="Plugin\PairingKeyUtil.cs" />
     <ProjectReference Include="..\WindUpKey.Protocol\WindUpKey.Protocol.csproj" />
   </ItemGroup>

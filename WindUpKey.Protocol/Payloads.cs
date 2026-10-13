@@ -499,6 +499,13 @@ public sealed class ErrorPayload
     [JsonPropertyName("requestId")]
     public string? RequestId { get; set; }
 
+    /// <summary>
+    /// Sender pairing key of a routed error (set/overwritten by relay). Omitted on relay-originated errors;
+    /// older relays never set it and older clients ignore it.
+    /// </summary>
+    [JsonPropertyName("from")]
+    public string? From { get; set; }
+
     /// <summary>When set, relay routes this error to the given pairing key.</summary>
     [JsonPropertyName("to")]
     public string? To { get; set; }

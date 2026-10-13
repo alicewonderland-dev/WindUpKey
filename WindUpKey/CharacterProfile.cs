@@ -19,6 +19,9 @@ public sealed class CharacterProfile
 
     public List<string> PendingPartnerKeys { get; set; } = [];
 
+    /// <summary>Unpairs not yet sent to the relay (made offline, or the send failed); sent on the next connect.</summary>
+    public List<PendingPairRemoval> PendingPairRemovals { get; set; } = [];
+
     /// <summary>Dolls this character owns (from remote ownerGrant).</summary>
     public List<OwnedDoll> OwnedDolls { get; set; } = [];
 

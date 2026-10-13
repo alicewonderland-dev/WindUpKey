@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Dalamud.Configuration;
 using WindUpKey.Protocol;
+using WindUpKey.Services;
 #if WINDUP_TESTING
 using WindUpKey.Quest;
 #endif
@@ -98,6 +99,9 @@ public class Configuration : IPluginConfiguration
     /// <summary>Partner keys submitted locally that are not yet mutual.</summary>
     public List<string> PendingPartnerKeys { get; set; } = [];
 
+    /// <summary>Unpairs not yet sent to the relay (made offline, or the send failed); sent on the next connect.</summary>
+    public List<PendingPairRemoval> PendingPairRemovals { get; set; } = [];
+
     /// <summary>When true, play <see cref="LockEmoteId"/> on unwind / login / re-enforce.</summary>
     public bool AutoGroundSit { get; set; } = true;
 
@@ -190,6 +194,7 @@ public class Configuration : IPluginConfiguration
         Profiles ??= new Dictionary<string, CharacterProfile>(StringComparer.Ordinal);
         PairedPartners ??= [];
         PendingPartnerKeys ??= [];
+        PendingPairRemovals ??= [];
         OwnedDolls ??= [];
 
         NormalizePartnerLabels(PairedPartners);
@@ -290,6 +295,7 @@ public class Configuration : IPluginConfiguration
             LastKnownIdentity = LastKnownIdentity ?? string.Empty,
             PairedPartners = PairedPartners.ToList(),
             PendingPartnerKeys = PendingPartnerKeys.ToList(),
+            PendingPairRemovals = PairRemovalQueue.Normalize(PendingPairRemovals),
             OwnedDolls = OwnedDolls
                 .Select(d => new OwnedDoll
                 {
@@ -332,6 +338,7 @@ public class Configuration : IPluginConfiguration
         LastKnownIdentity = profile.LastKnownIdentity ?? string.Empty;
         PairedPartners = profile.PairedPartners ?? [];
         PendingPartnerKeys = profile.PendingPartnerKeys ?? [];
+        PendingPairRemovals = profile.PendingPairRemovals ?? [];
         OwnedDolls = profile.OwnedDolls ?? [];
         Role = profile.Role;
         HasCompletedInitialSetup = profile.HasCompletedInitialSetup;
@@ -389,6 +396,7 @@ public class Configuration : IPluginConfiguration
             .Where(PairingKeyUtil.IsValid)
             .Distinct(StringComparer.Ordinal)
             .ToList();
+        PendingPairRemovals = PairRemovalQueue.Normalize(PendingPairRemovals);
     }
 
     private void NormalizeOwnedDolls()

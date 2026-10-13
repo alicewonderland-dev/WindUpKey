@@ -1,14 +1,18 @@
+using System.Globalization;
+using WindUpKey.Protocol;
 using WindUpKey.Services;
 
 namespace WindUpKey.Tests;
 
 /// <summary>
 /// Not a test runner: the test host never calls this. <see cref="RelayIdentityStoreTests"/> starts this assembly
-/// as a separate process (<c>dotnet WindUpKey.Tests.dll store-worker …</c>) to act as a second game client.
+/// as a separate process (<c>dotnet WindUpKey.Tests.dll store-worker …</c>) to act as a second game client, and
+/// <see cref="RelaySyncRulesTests"/> to parse a stamp under another time zone (<c>stamp-parse …</c>).
 /// </summary>
 public static class Program
 {
     public const string StoreWorkerCommand = "store-worker";
+    public const string StampParseCommand = "stamp-parse";
 
     /// <summary>
     /// <c>store-worker &lt;pluginConfigDir&gt; &lt;idPrefix&gt; &lt;count&gt; &lt;barrierDir&gt;</c>: generates a secret for
@@ -17,9 +21,13 @@ public static class Program
     /// </summary>
     public static int Main(string[] args)
     {
+        if (args.Length == 2 && args[0] == StampParseCommand)
+            return StampParse(args[1]);
+
         if (args.Length != 5 || args[0] != StoreWorkerCommand)
         {
             Console.Error.WriteLine($"usage: {StoreWorkerCommand} <pluginConfigDir> <idPrefix> <count> <barrierDir>");
+            Console.Error.WriteLine($"       {StampParseCommand} <stamp>");
             return 64;
         }
 
@@ -52,5 +60,21 @@ public static class Program
 
         Console.WriteLine($"failures={failures}");
         return failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// <c>stamp-parse &lt;stamp&gt;</c>: prints this process's local UTC offset, then whether
+    /// <see cref="SyncStamp.TryParse"/> read the stamp, its offset and its UTC instant (ticks, invariant).
+    /// </summary>
+    private static int StampParse(string raw)
+    {
+        var local = TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow);
+        var ok = SyncStamp.TryParse(raw, out var value);
+        Console.WriteLine(string.Join(' ',
+            local.Ticks.ToString(CultureInfo.InvariantCulture),
+            ok ? "ok" : "fail",
+            value.Offset.Ticks.ToString(CultureInfo.InvariantCulture),
+            value.UtcTicks.ToString(CultureInfo.InvariantCulture)));
+        return 0;
     }
 }
