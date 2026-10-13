@@ -1318,8 +1318,9 @@ public sealed class RelayClient : IDisposable
         if (autoGroundSit is { } autoSit)
             _config.AutoGroundSit = autoSit;
 
+        // 06-C6: an excluded emote is applied as Ground Sit, as from a remote owner.
         if (lockEmoteId is { } emoteId)
-            _config.LockEmoteId = emoteId == 0 ? (ushort)52 : emoteId;
+            _config.LockEmoteId = LockEmoteRule.FromRemote(emoteId, _commands.IsAllowedLockEmote(emoteId));
 
         if (settingsLocked is { } locked)
             _config.OwnerSettingsLocked = locked;
@@ -3137,8 +3138,9 @@ public sealed class RelayClient : IDisposable
         if (payload.AutoGroundSit is { } autoSit)
             _config.AutoGroundSit = autoSit;
 
+        // 06-C6: an old owner client may still name an excluded emote (Doze): it is applied as Ground Sit, not refused.
         if (payload.LockEmoteId is { } emoteId)
-            _config.LockEmoteId = emoteId == 0 ? (ushort)52 : emoteId;
+            _config.LockEmoteId = LockEmoteRule.FromRemote(emoteId, _commands.IsAllowedLockEmote(emoteId));
 
         if (payload.SettingsLocked is { } locked)
             _config.OwnerSettingsLocked = locked;

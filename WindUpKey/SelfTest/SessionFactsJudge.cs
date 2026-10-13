@@ -72,6 +72,15 @@ public sealed record SessionSnapshot
     /// <summary>When the snapshot was taken (UTC), to judge <see cref="SafewordPausedUntilUtc"/>.</summary>
     public DateTimeOffset TakenAtUtc { get; init; }
 
+    /// <summary>06-C2: the active character's stored unwound emote (0 read as Ground Sit).</summary>
+    public ushort LockEmoteId { get; init; }
+
+    /// <summary>
+    /// 06-C2: whether that emote is unlocked on this character (Ground Sit always is); null when it isn't used (not a
+    /// doll, or the unwound emote is off) or no character is logged in (06-C3).
+    /// </summary>
+    public bool? LockEmoteUnlocked { get; init; }
+
     public RelayIdentityDiagnosis? Identity { get; init; }
 
     /// <summary>The Copy button has a valid identity to give.</summary>
@@ -153,6 +162,13 @@ public static class SessionFactsJudge
             : CheckResult.Fail("X-suspend", "locks are suspended although the relay is connected"));
 
         results.Add(SafewordPauseState(s));
+
+        results.Add(s.LockEmoteUnlocked switch
+        {
+            null => CheckResult.Skip("X-lock-emote", "the unwound emote isn't used (not a doll, or it is off), or no character is logged in"),
+            true => CheckResult.Pass("X-lock-emote", $"emote #{s.LockEmoteId} is unlocked on this character"),
+            false => CheckResult.Warn("X-lock-emote", $"emote #{s.LockEmoteId} isn't available on this character (not unlocked, or can't be the unwound emote): Ground Sit is used instead"),
+        });
 
         results.Add(CheckResult.Info("X-pending", $"{s.PartnerKeys.Count} partner(s), {s.PendingKeys.Count} pending pair request(s), {s.PendingRemovalKeys.Count} queued unpair(s), {s.OwnedDollKeys.Count} owned doll(s)"));
 

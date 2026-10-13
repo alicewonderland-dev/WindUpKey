@@ -603,7 +603,7 @@ public sealed class SelfTestUnitTests
             Sheets = [new SheetFact("P-data-emote", "Emote", true), new SheetFact("P-data-action", "Action", false), new SheetFact("P-data-territory", "TerritoryType", true)],
             Rows =
             [
-                new SheetRowFact("P-data-emote", "Emote", 13, "Sit", true),
+                new SheetRowFact("P-data-emote", "Emote", 50, "Sit", true),
                 new SheetRowFact("P-data-emote", "Emote", 52, "Sit on Ground", false),
                 new SheetRowFact("P-data-territory", "TerritoryType", 339, "district", true, "region", false),
                 new SheetRowFact("P-data-general-action", "GeneralAction", 2, "Jump", true),
@@ -631,7 +631,7 @@ public sealed class SelfTestUnitTests
         var noLooping = PostPatchJudge.Judge(new PostPatchFacts
         {
             Sheets = [new SheetFact("P-data-emote", "Emote", true)],
-            Rows = [new SheetRowFact("P-data-emote", "Emote", 13, "Sit", true)],
+            Rows = [new SheetRowFact("P-data-emote", "Emote", 50, "Sit", true)],
             LoopingEmoteRows = 0,
         });
         Assert.Equal(CheckStatus.Fail, noLooping.Single(r => r.Id == "P-data-emote").Status);

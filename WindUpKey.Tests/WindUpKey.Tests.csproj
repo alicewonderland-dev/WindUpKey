@@ -52,6 +52,9 @@
     <Compile Include="..\WindUpKey\Services\ClipLedger.cs" Link="Plugin\ClipLedger.cs" />
     <Compile Include="..\WindUpKey\Services\WindMath.cs" Link="Plugin\WindMath.cs" />
     <Compile Include="..\WindUpKey\Services\LoginSitRule.cs" Link="Plugin\LoginSitRule.cs" />
+    <!-- 06 Part C: cancelling the looping emote. -->
+    <Compile Include="..\WindUpKey\Services\EmoteCancelPlan.cs" Link="Plugin\EmoteCancelPlan.cs" />
+    <Compile Include="..\WindUpKey\Services\LockEmoteRule.cs" Link="Plugin\LockEmoteRule.cs" />
     <Compile Include="..\WindUpKey\Sources\CommendationTracker.cs" Link="Plugin\CommendationTracker.cs" />
     <!-- The self-test's Dalamud-free units (04 Architecture); its thin adapters (SelfTestHost, SelfTestController) need Dalamud. -->
     <Compile Include="..\WindUpKey\SelfTest\*.cs" LinkBase="Plugin\SelfTest" />

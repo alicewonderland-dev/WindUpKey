@@ -21,9 +21,9 @@ namespace WindUpKey.Services;
 /// Call-travel input mute suppresses raw player movement controls without freezing facing or blocking
 /// teleport/return/shared walk/fly output, so Lifestream housing travel and vnavmesh can still drive
 /// the character.
-/// Hooks install only while the doll is locked, input-muted, or briefly nudging; they are removed
-/// when idle unlocked and on logout. After login/zone/`BetweenAreas`, wait a short settle before
-/// install; mid-world unlock nudge / mute installs immediately.
+/// Hooks install only while the doll is locked or input-muted (06-C1: cancelling a pose no longer needs
+/// them); they are removed when idle unlocked and on logout. After login/zone/`BetweenAreas`, wait a
+/// short settle before install; a mid-world mute installs immediately.
 /// </summary>
 public sealed unsafe class LockController : IDisposable
 {
@@ -69,12 +69,12 @@ public sealed unsafe class LockController : IDisposable
     private bool _applyingFrozenRotation;
     private int _resitCooldownFrames;
     /// <summary>
-    /// Remaining rewind nudge phases: inject one forward pulse, then explicitly write neutral
-    /// movement before allowing the temporary RMI hook to uninstall.
+    /// 06-C1: standing a wound doll up out of her pose (<c>/sit</c> or the interrupt-emote command), stepped from
+    /// <see cref="Tick"/> (06-A10: wind already arrives on the framework thread).
     /// </summary>
-    private int _nudgeForwardTicks;
-    /// <summary>Deferred <c>/sit</c> stand, run from <see cref="Tick"/> (06-A10: wind already arrives on the framework thread).</summary>
-    private bool _pendingSitStand;
+    private readonly EmoteCancelPlan _emoteCancel = new();
+    private bool _loggedEmoteCancelUnavailable;
+    private bool _loggedEmoteCancelGaveUp;
 
     private bool _vnavMuteTweaksApplied;
     private bool? _savedVnavIgnoreUserInput;
@@ -233,26 +233,16 @@ public sealed unsafe class LockController : IDisposable
     public void SetInputMuteDestination(Vector3 destination) => _muteDestination = destination;
 
     /// <summary>
-    /// After rewind: stand from sit/groundsit via <c>/sit</c> (get-up anim), or cancel other
-    /// looping emotes with one frame of forward walk followed by an explicit neutral frame.
-    /// No-op when already idle.
-    /// The <c>/sit</c> is run from the next <see cref="Tick"/>.
+    /// After rewind: stand from sit/groundsit via <c>/sit</c> (get-up anim), or end any other looping emote with the
+    /// game's interrupt-emote command (06-C1, <see cref="EmoteCancelPlan"/>). Nothing moves the doll, and no hook is
+    /// needed. No-op when already idle. Deferred to the next <see cref="Tick"/>; framework thread.
     /// </summary>
-    public void RequestCancelPoseNudge()
+    public void RequestPoseCancel()
     {
         if (_objectTable.LocalPlayer is null)
             return;
 
-        if (ShouldStandWithSitCommand())
-        {
-            _pendingSitStand = true;
-            return;
-        }
-
-        if (!IsInPoseOrEmoteLoop())
-            return;
-
-        _nudgeForwardTicks = 2;
+        _emoteCancel.Request();
     }
 
     /// <summary>
@@ -264,18 +254,97 @@ public sealed unsafe class LockController : IDisposable
         && (_condition[ConditionFlag.InThatPosition] || _condition[ConditionFlag.Emoting]);
 
     /// <summary>
-    /// Sit / groundsit (configured lock emote or detected pose) → use <c>/sit</c> for get-up anim.
+    /// 06-C1: a detected sit or groundsit pose → <c>/sit</c> for the get-up anim. The pose decides, not the configured
+    /// lock emote: a doll dozing with Ground Sit configured gets the interrupt command (503), not a <c>/sit</c>.
     /// </summary>
-    private unsafe bool ShouldStandWithSitCommand()
+    private bool IsInSitPose() =>
+        _condition[ConditionFlag.InThatPosition] && IsSittingOrGroundSitting();
+
+    /// <summary>06-C1: <c>GameMain.ExecuteCommand</c>'s address; zero after a patch ClientStructs doesn't know.</summary>
+    private static bool ExecuteCommandAvailable => (nint)GameMain.MemberFunctionPointers.ExecuteCommand != 0;
+
+    /// <summary>06-C1: <c>EmoteController.IsInEmoteLoop</c>'s address; zero after a patch ClientStructs doesn't know.</summary>
+    private static bool EmoteLoopCheckAvailable => (nint)EmoteController.MemberFunctionPointers.IsInEmoteLoop != 0;
+
+    /// <summary>
+    /// 06-C1: what <see cref="EmoteCancelPlan"/> needs this tick. The loop check calls <c>IsInEmoteLoop</c> only when its
+    /// address is non-null, and otherwise uses the old <c>InThatPosition || Emoting</c> conditions. 06-C3: with the
+    /// address, an InPositionLoop mode counts as in the loop too, as nothing confirms <c>IsInEmoteLoop</c> reports a doze;
+    /// a false positive only sends the trigger the game itself sends. Framework thread.
+    /// </summary>
+    private EmoteCancelFacts ReadEmoteCancelFacts()
     {
-        if (!_condition[ConditionFlag.InThatPosition])
-            return false;
+        var player = _objectTable.LocalPlayer;
+        var ready = player is not null
+                    && _clientState.IsLoggedIn
+                    && !_condition[ConditionFlag.BetweenAreas]
+                    && !_condition[ConditionFlag.BetweenAreas51];
+        if (!ready || _locked)
+            return new EmoteCancelFacts(ready, _locked, SitPose: false, InLoop: false, PositionLoop: false, ExecuteCommandAvailable);
 
-        var lockId = _config.EffectiveLockEmoteId;
-        if (lockId is GameCommandRunner.SitEmoteId or CharacterProfile.GroundSitEmoteId)
-            return true;
+        var conditionLoop = _condition[ConditionFlag.InThatPosition] || _condition[ConditionFlag.Emoting];
+        var inLoop = conditionLoop;
+        var positionLoop = false;
+        try
+        {
+            var character = (Character*)player!.Address;
+            if (character != null)
+            {
+                positionLoop = character->Mode == CharacterModes.InPositionLoop;
+                if (EmoteLoopCheckAvailable)
+                    inLoop = character->EmoteController.IsInEmoteLoop() || positionLoop;
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "WindUpKey: failed to read the emote loop state");
+            inLoop = conditionLoop;
+        }
 
-        return IsSittingOrGroundSitting();
+        return new EmoteCancelFacts(ready, Locked: false, IsInSitPose(), inLoop, positionLoop, ExecuteCommandAvailable);
+    }
+
+    /// <summary>06-C1: one step of <see cref="EmoteCancelPlan"/>. Framework thread, from <see cref="Tick"/>.</summary>
+    private void StepPoseCancel()
+    {
+        if (!_emoteCancel.Pending)
+            return;
+
+        var step = _emoteCancel.Next(ReadEmoteCancelFacts(), Environment.TickCount64);
+        switch (step.Action)
+        {
+            case EmoteCancelAction.Sit:
+                _diagnostics.Count("emote-cancel.sit");
+                _commands.Execute("/sit");
+                break;
+            case EmoteCancelAction.Interrupt:
+                // Never call through a null address (an access violation no catch can stop): the plan only asks for
+                // an interrupt when the address was non-null this tick, and it is checked again right here.
+                if (!ExecuteCommandAvailable)
+                    break;
+                _diagnostics.Count($"emote-cancel.{step.Command}");
+                try
+                {
+                    GameMain.ExecuteCommand(step.Command, 0, 0, 0, 0);
+                }
+                catch (Exception ex)
+                {
+                    _log.Warning(ex, "WindUpKey: failed to send the interrupt-emote command {Command}", step.Command);
+                    _emoteCancel.Cancel();
+                }
+                break;
+        }
+
+        if (step.Note == EmoteCancelNote.Unavailable && !_loggedEmoteCancelUnavailable)
+        {
+            _loggedEmoteCancelUnavailable = true;
+            _log.Information("WindUpKey: the interrupt-emote command isn't available this patch; the doll stays posed until she moves");
+        }
+        else if (step.Note == EmoteCancelNote.GaveUp && !_loggedEmoteCancelGaveUp)
+        {
+            _loggedEmoteCancelGaveUp = true;
+            _log.Information("WindUpKey: the looping emote didn't end after both interrupt commands; leaving the doll posed");
+        }
     }
 
     /// <summary>
@@ -314,12 +383,7 @@ public sealed unsafe class LockController : IDisposable
     /// <summary>Call each framework tick to keep facing frozen and groundsit enforced while restricted.</summary>
     public void Tick()
     {
-        if (_pendingSitStand)
-        {
-            _pendingSitStand = false;
-            if (_objectTable.LocalPlayer is not null)
-                _commands.Execute("/sit");
-        }
+        StepPoseCancel();
 
         EnsureHooksInstalled();
         RecordDiagnosticState();
@@ -331,9 +395,12 @@ public sealed unsafe class LockController : IDisposable
                 DisarmMouseMovementButtons(input);
         }
 
-        // Hooks are only needed while locked, input-muted, or briefly for an unlock pose nudge.
-        if (_hooksInstalled && !_locked && !_inputMute && _nudgeForwardTicks <= 0)
-            UninstallHooks();
+        // Hooks are only needed while locked or input-muted (06-C1: never for cancelling a pose).
+        if (_hooksInstalled && !MovementHookRule.Needed(_locked, _inputMute))
+        {
+            RemoveHooks();
+            _diagnostics.RecordState("hooks-removed");
+        }
 
         if (!RestrictionsActive)
         {
@@ -389,10 +456,9 @@ public sealed unsafe class LockController : IDisposable
     }
 
     /// <summary>
-    /// Install movement hooks only when the doll is locked and fully in-world
-    /// (or briefly while a cancel-pose forward nudge is pending).
+    /// Install movement hooks only when the doll is locked or input-muted and fully in-world.
     /// Settle (~3s) only after first becoming eligible post-login/zone; mid-world unwind
-    /// and unlock nudge install immediately. Passthrough hooks around login still crash.
+    /// and mute install immediately. Passthrough hooks around login still crash.
     /// </summary>
     private void EnsureHooksInstalled()
     {
@@ -409,8 +475,7 @@ public sealed unsafe class LockController : IDisposable
             return;
         }
 
-        var needHooks = _locked || _inputMute || _nudgeForwardTicks > 0;
-        if (!needHooks)
+        if (!MovementHookRule.Needed(_locked, _inputMute))
         {
             // Still in-world while wound — keep eligibility so the next lock skips settle.
             _hookSettleFrames = 0;
@@ -418,8 +483,8 @@ public sealed unsafe class LockController : IDisposable
             return;
         }
 
-        // Already in-world (or unlock nudge / mute): install immediately.
-        if (_hooksWereEligible || ((_nudgeForwardTicks > 0 || _inputMute) && !_locked))
+        // Already in-world (or mute): install immediately.
+        if (_hooksWereEligible || (_inputMute && !_locked))
         {
             _hooksWereEligible = true;
             InstallHooksNow();
@@ -446,10 +511,19 @@ public sealed unsafe class LockController : IDisposable
     }
 
     /// <summary>
-    /// Drop hooks when no longer needed (unlocked) or on logout.
+    /// On logout and unload: drop the hooks and any pending pose cancel, so it can't act on the next character.
     /// Does not clear <see cref="_hooksWereEligible"/> — mid-world unlock must not re-settle on the next lock.
     /// </summary>
     public void UninstallHooks()
+    {
+        RemoveHooks();
+        _emoteCancel.Cancel();
+    }
+
+    /// <summary>
+    /// Drop hooks when no longer needed (unlocked). A pose cancel in progress keeps running (06-C1: it needs no hook).
+    /// </summary>
+    private void RemoveHooks()
     {
         RestoreVnavMuteTweaks();
         DisposeHooks();
@@ -457,8 +531,6 @@ public sealed unsafe class LockController : IDisposable
         _hookSettleFrames = 0;
         _hasFrozenRotation = false;
         _resitCooldownFrames = 0;
-        _nudgeForwardTicks = 0;
-        _pendingSitStand = false;
         _inputData = null;
     }
 
@@ -639,35 +711,6 @@ public sealed unsafe class LockController : IDisposable
             *sumForward = 0;
             if (haveBackwardOrStrafe != null)
                 *haveBackwardOrStrafe = 0;
-            return;
-        }
-
-        // Cancel a looping pose with one forward pulse, then explicitly clear every movement
-        // output on the following RMI pass. The neutral phase keeps the temporary hook alive
-        // long enough to prevent the game's forward accumulator from remaining latched.
-        if (_nudgeForwardTicks == 2)
-        {
-            *sumForward = 1f;
-            *sumLeft = 0;
-            *sumTurnLeft = 0;
-            if (haveBackwardOrStrafe != null)
-                *haveBackwardOrStrafe = 0;
-            if (a6 != null)
-                *a6 = 0;
-            _diagnostics.Count("nudge.forward");
-            _nudgeForwardTicks--;
-        }
-        else if (_nudgeForwardTicks == 1)
-        {
-            *sumForward = 0;
-            *sumLeft = 0;
-            *sumTurnLeft = 0;
-            if (haveBackwardOrStrafe != null)
-                *haveBackwardOrStrafe = 0;
-            if (a6 != null)
-                *a6 = 0;
-            _diagnostics.Count("nudge.neutral");
-            _nudgeForwardTicks--;
         }
     }
 

@@ -148,7 +148,7 @@ public sealed class RelayWireRulesTests
 
     // ---------- 03-D12: emote names on the owner's side ----------
 
-    private static readonly Dictionary<ushort, string> Sheet = new() { [13] = "Sitzen", [52] = "Am Boden sitzen", [88] = "Tanzen" };
+    private static readonly Dictionary<ushort, string> Sheet = new() { [50] = "Sitzen", [52] = "Am Boden sitzen", [88] = "Tanzen" };
 
     private static string? SheetName(ushort id) => Sheet.GetValueOrDefault(id);
 

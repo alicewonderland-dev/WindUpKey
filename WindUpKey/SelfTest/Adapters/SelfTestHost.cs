@@ -12,6 +12,8 @@ using FFXIVClientStructs.FFXIV.Client.System.Input;
 using Lumina.Excel.Sheets;
 using WindUpKey.Protocol;
 using WindUpKey.Services;
+using WindUpKey.Ui;
+using CSEmoteController = FFXIVClientStructs.FFXIV.Client.Game.Control.EmoteController;
 using CSGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 using LuminaAction = Lumina.Excel.Sheets.Action;
 
@@ -34,6 +36,7 @@ internal sealed class SelfTestHost(
     ISigScanner sigScanner,
     IDalamudPluginInterface pluginInterface,
     InputDiagnosticLog diagnostics,
+    GameCommandRunner commands,
     Func<bool?> travelReady,
     Action<int> expectEpoch,
     Func<bool> reconnectAllowed) : ISelfTestHost, ISelfTestLink
@@ -80,6 +83,13 @@ internal sealed class SelfTestHost(
             SafewordPausedUntilUtc = config.SafewordPausedUntilUtc,
             HardcoreMode = config.HardcoreMode,
             TakenAtUtc = now,
+            LockEmoteId = config.EffectiveLockEmoteId,
+            // 06-C2: the combo's own rule over this character's unlocked looping emotes (cached ~5 s); only a doll
+            // with the unwound emote on uses it. 06-C3: Skip without a character (the title screen), where every emote
+            // reads as not unlocked and the read would fill the shared cache with an empty list.
+            LockEmoteUnlocked = config.IsDoll && config.AutoGroundSit && objectTable.LocalPlayer is not null
+                ? LockEmoteDisplay.Resolve(config.EffectiveLockEmoteId, commands.GetUnlockedLoopingEmotes(), null).Unlocked
+                : null,
             // The store's current view only: no lock, no read, no write (04-D10). 01-4's copy and import parts come from
             // IdentityCopyCheckAsync, once per run.
             Identity = relay.DiagnoseRelayIdentity(_pluginConfigDirectory),
@@ -289,6 +299,11 @@ internal sealed class SelfTestHost(
                 new AddressFact("P-addr-input-pressed", "InputData.IsInputIdPressed", (nint)InputData.MemberFunctionPointers.IsInputIdPressed != 0),
                 new AddressFact("P-addr-input-down", "InputData.IsInputIdDown", (nint)InputData.MemberFunctionPointers.IsInputIdDown != 0),
                 new AddressFact("P-addr-input-held", "InputData.IsInputIdHeld", (nint)InputData.MemberFunctionPointers.IsInputIdHeld != 0),
+                // 06-C2: read only. The self-test never calls either, so it never sends the interrupt-emote command.
+                new AddressFact("P-addr-execute-command", "GameMain.ExecuteCommand", (nint)GameMain.MemberFunctionPointers.ExecuteCommand != 0,
+                    "emote cancel falls back to /sit, or stays posed"),
+                new AddressFact("P-addr-emote-loop", "EmoteController.IsInEmoteLoop", (nint)CSEmoteController.MemberFunctionPointers.IsInEmoteLoop != 0,
+                    "emote cancel falls back to the InThatPosition/Emoting check"),
             ],
             LastHookResults = diagnostics.SnapshotHookResults().Select(h => new HookResultFact(h.Name, h.Installed, h.AtUtc)).ToList(),
             Sheets = sheets,

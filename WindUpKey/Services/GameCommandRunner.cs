@@ -18,8 +18,11 @@ public sealed unsafe class GameCommandRunner(
     IUnlockState unlockState,
     Configuration config)
 {
-    /// <summary>Emote sheet row for Sit (`/sit`). Prefer <see cref="ResolveSitEmoteIds"/> at runtime.</summary>
-    public const ushort SitEmoteId = 13;
+    /// <summary>
+    /// Emote sheet row for Sit (<c>/sit</c>, EmoteMode 2). 06-C6: it was 13, which is Doze (<c>/doze</c>,
+    /// <see cref="LockEmoteRule.DozeEmoteId"/>): that put Doze in the lock emote list and read a doze as a sit.
+    /// </summary>
+    public const ushort SitEmoteId = 50;
 
     private const int UnlockedEmotesCacheMs = 5000;
 
@@ -28,7 +31,8 @@ public sealed unsafe class GameCommandRunner(
 
     /// <summary>
     /// Unlocked looping emotes the player can use (EmoteMode set, has text command, unlocked).
-    /// Sit and Ground Sit are always included (they loop via sit state, not EmoteMode).
+    /// Sit and Ground Sit are always included (they loop via sit state, not EmoteMode). 06-C6: emotes that can't be
+    /// the lock emote (<see cref="LockEmoteRule"/>: Doze and other position loops) are left out.
     /// Sorted by display name. Cached briefly (~5s) to avoid rescanning the Emote sheet every UI draw.
     /// </summary>
     public IReadOnlyList<(ushort Id, string Name)> GetUnlockedLoopingEmotes()
@@ -51,6 +55,9 @@ public sealed unsafe class GameCommandRunner(
                 continue;
 
             var forceSit = IsSitOrGroundSitEmote(emote, name);
+            if (!LockEmoteRule.IsAllowed((ushort)emote.RowId, ConditionMode(emote), forceSit))
+                continue;
+
             if (!forceSit)
             {
                 if (!IsLoopingUsableEmote(emote))
@@ -175,6 +182,10 @@ public sealed unsafe class GameCommandRunner(
         return CharacterProfile.GroundSitEmoteId;
     }
 
+    /// <summary>
+    /// 06-C6: an excluded emote (<see cref="LockEmoteRule"/>) falls back to Ground Sit here like one that isn't unlocked;
+    /// the stored value isn't touched.
+    /// </summary>
     private bool IsEmoteIdUnlockedAndLooping(ushort emoteId)
     {
         var sheet = data.GetExcelSheet<Emote>();
@@ -182,11 +193,31 @@ public sealed unsafe class GameCommandRunner(
             return emoteId is SitEmoteId or CharacterProfile.GroundSitEmoteId;
 
         var name = emote.Name.ToString();
-        if (IsSitOrGroundSitEmote(emote, name ?? string.Empty))
+        var sit = IsSitOrGroundSitEmote(emote, name ?? string.Empty);
+        if (!LockEmoteRule.IsAllowed(emoteId, ConditionMode(emote), sit))
+            return false;
+        if (sit)
             return true;
 
         return IsLoopingUsableEmote(emote) && IsEmoteUnlocked(emote);
     }
+
+    /// <summary>
+    /// 06-C6: whether <paramref name="emoteId"/> can be the lock emote (<see cref="LockEmoteRule.IsAllowed"/>), from the
+    /// Emote sheet; a row the sheet doesn't have is left to the runtime fallback. Sheet reads only.
+    /// </summary>
+    public bool IsAllowedLockEmote(ushort emoteId)
+    {
+        var sheet = data.GetExcelSheet<Emote>();
+        if (sheet is null || !sheet.TryGetRow(emoteId, out var emote))
+            return LockEmoteRule.IsAllowed(emoteId, 0, emoteId is SitEmoteId or CharacterProfile.GroundSitEmoteId);
+
+        return LockEmoteRule.IsAllowed(emoteId, ConditionMode(emote), IsSitOrGroundSitEmote(emote, emote.Name.ToString()));
+    }
+
+    /// <summary>The emote's EmoteMode.ConditionMode (11 for a position loop); 0 without an EmoteMode.</summary>
+    private static byte ConditionMode(Emote emote) =>
+        emote.EmoteMode.RowId == 0 ? (byte)0 : emote.EmoteMode.ValueNullable?.ConditionMode ?? 0;
 
     private static bool IsLoopingUsableEmote(Emote emote) =>
         emote.EmoteMode.RowId != 0 && emote.TextCommand.RowId != 0;

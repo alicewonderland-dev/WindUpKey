@@ -8,8 +8,11 @@ namespace WindUpKey.SelfTest;
 /// <summary>A hook signature resolved with the signature scanner, without installing a hook (04-D8).</summary>
 public sealed record SignatureFact(string Id, string Name, bool Resolved);
 
-/// <summary>A ClientStructs member-function address the lock hooks use (04-D8).</summary>
-public sealed record AddressFact(string Id, string Name, bool NonZero);
+/// <summary>
+/// A ClientStructs member-function address the plugin uses (04-D8): the lock hooks', and 06-C2 the emote cancel's.
+/// <paramref name="WhenZero"/> says what happens without it, for the FAIL text (null: the generic text).
+/// </summary>
+public sealed record AddressFact(string Id, string Name, bool NonZero, string? WhenZero = null);
 
 /// <summary>The last install result of one lock hook this session, from the diagnostic log (INFO).</summary>
 public sealed record HookResultFact(string Name, bool Installed, DateTimeOffset AtUtc);
@@ -71,7 +74,7 @@ public static class PostPatchJudge
         {
             results.Add(address.NonZero
                 ? CheckResult.Pass(address.Id, $"{address.Name} address is set")
-                : CheckResult.Fail(address.Id, $"{address.Name} address is zero: ClientStructs doesn't know it this patch"));
+                : CheckResult.Fail(address.Id, $"{address.Name} address is zero: {address.WhenZero ?? "ClientStructs doesn't know it this patch"}"));
         }
 
         results.Add(facts.LastHookResults.Count == 0

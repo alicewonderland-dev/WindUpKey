@@ -147,6 +147,7 @@ public sealed class Plugin : IDalamudPlugin
                 SigScanner,
                 PluginInterface,
                 _inputDiagnostics,
+                commands,
                 () => _callTravel.IsTravelReady,
                 epoch => selfTest?.ExpectEpoch(epoch),
                 () => selfTest?.ReconnectAllowed == true),
@@ -524,7 +525,7 @@ public sealed class Plugin : IDalamudPlugin
 
             // 06-B1: pauses remote control, adds the safeword hours ignoring the owner's cap (never shortening the timer),
             // and stops an owner's Call. The safeword itself is never logged.
-            // 06-B3: wind first, so cancelling the Call never briefly sees her unwound (re-lock, sit, then nudge).
+            // 06-B3: wind first, so cancelling the Call never briefly sees her unwound (re-lock, sit, then stand up).
             _timer.UseSafeword(Configuration.SafewordHours);
 #if WINDUP_TESTING
             _relay.CancelActiveCall();

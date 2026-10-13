@@ -418,7 +418,7 @@ public sealed class WindTimerService
                 _pendingLoginSit = false;
         }
         else if (becameUnlocked && _objects.LocalPlayer is not null)
-            _lock.RequestCancelPoseNudge();
+            _lock.RequestPoseCancel();
     }
 
     public static string FormatRemaining(TimeSpan remaining)

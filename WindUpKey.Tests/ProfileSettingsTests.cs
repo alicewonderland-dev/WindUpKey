@@ -115,17 +115,17 @@ public sealed class ProfileSettingsTests
 
     private static readonly IReadOnlyList<(ushort Id, string Name)> Unlocked =
     [
-        (13, "Sit"),
+        (50, "Sit"),
         (52, "Sit on Ground"),
-        (88, "Doze"),
+        (88, "Sleep"),
     ];
 
     [Fact]
     public void LockEmoteDisplay_ShowsAnUnlockedEmoteByItsName()
     {
-        var view = LockEmoteDisplay.Resolve(88, Unlocked, "Doze");
+        var view = LockEmoteDisplay.Resolve(88, Unlocked, "Sleep");
 
-        Assert.Equal(new LockEmoteView(88, "Doze", Unlocked: true), view);
+        Assert.Equal(new LockEmoteView(88, "Sleep", Unlocked: true), view);
     }
 
     [Fact]
@@ -136,8 +136,8 @@ public sealed class ProfileSettingsTests
 
         Assert.Equal((ushort)141, view.SelectedId);
         Assert.False(view.Unlocked);
-        Assert.Equal("Pray (not unlocked on this character; Ground Sit is used)", view.Preview);
-        Assert.Equal("Emote #141" + LockEmoteDisplay.NotUnlockedNote, LockEmoteDisplay.Resolve(141, Unlocked, null).Preview);
+        Assert.Equal("Pray (not available on this character; Ground Sit is used)", view.Preview);
+        Assert.Equal("Emote #141" + LockEmoteDisplay.GroundSitFallbackNote, LockEmoteDisplay.Resolve(141, Unlocked, null).Preview);
     }
 
     [Fact]

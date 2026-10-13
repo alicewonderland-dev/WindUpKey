@@ -16,8 +16,8 @@ public readonly record struct LockEmoteView(ushort SelectedId, string Preview, b
 /// </summary>
 public static class LockEmoteDisplay
 {
-    /// <summary>Appended to the preview of an emote this character hasn't unlocked.</summary>
-    public const string NotUnlockedNote = " (not unlocked on this character; Ground Sit is used)";
+    /// <summary>Appended to the preview of an emote this character can't use as the unwound emote (not unlocked, or 06-C6 excluded).</summary>
+    public const string GroundSitFallbackNote = " (not available on this character; Ground Sit is used)";
 
     /// <summary>
     /// The view of <paramref name="storedId"/> given this character's unlocked looping emotes
@@ -38,6 +38,6 @@ public static class LockEmoteDisplay
         // Ground Sit is the fallback itself, so it never gets the note.
         return id == CharacterProfile.GroundSitEmoteId
             ? new LockEmoteView(id, display, Unlocked: true)
-            : new LockEmoteView(id, display + NotUnlockedNote, Unlocked: false);
+            : new LockEmoteView(id, display + GroundSitFallbackNote, Unlocked: false);
     }
 }
