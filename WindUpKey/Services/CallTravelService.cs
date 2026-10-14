@@ -1222,8 +1222,9 @@ public sealed class CallTravelService : IDisposable
                 // ignore: the next tick sees whether Lifestream is still busy
             }
 
+            _doorApproachActive = false;
             _teleportProgressSeen = true;
-            DebugCall("teleport: near owner in ward — handing off from Lifestream to vnavmesh", throttle: false);
+            DebugCall("teleport: near owner in ward — handing off from Lifestream to vnavmesh", key: "teleport-handoff");
             return;
         }
 

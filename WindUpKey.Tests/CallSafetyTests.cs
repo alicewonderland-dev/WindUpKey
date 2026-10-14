@@ -970,7 +970,7 @@ public sealed class CallSafetyTests
         Assert.Equal(2, Regex.Matches(afterThrottle, Regex.Escape("_doorApproachActive = _houseEntrancePathStarted;")).Count);
 
         // Teleporting doesn't clear it on every tick: each clear sits in a branch (in transit, off the ward, a hop, the
-        // apartment Yes/No, inside), never at the top level of the method.
+        // apartment Yes/No, inside, the Lifestream handoff), never at the top level of the method.
         var teleport = ProfileSettingsTests.MethodBody(source, "    private void TickTeleporting()");
         foreach (Match clear in Regex.Matches(teleport, Regex.Escape("_doorApproachActive = false;")))
         {
@@ -978,7 +978,7 @@ public sealed class CallSafetyTests
             Assert.True(clear.Index - line > 8, "a clear at the top level of TickTeleporting");
         }
 
-        Assert.Equal(5, Regex.Matches(teleport, Regex.Escape("_doorApproachActive = false;")).Count);
+        Assert.Equal(6, Regex.Matches(teleport, Regex.Escape("_doorApproachActive = false;")).Count);
         Assert.Contains(
             "if (IsBetweenAreas() || IsLifestreamBusy() || IsPlayerCasting())\n        {\n            _doorApproachActive = false;",
             teleport);
