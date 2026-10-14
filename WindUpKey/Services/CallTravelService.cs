@@ -1209,6 +1209,24 @@ public sealed class CallTravelService : IDisposable
             return;
         }
 
+        // Lifestream drives to the plot, which can sit past the owner. Once the doll is near the owner in their ward,
+        // stop Lifestream and let vnavmesh take the last stretch (CallHandoffRules).
+        if (_pending.IsHousingCall && IsLifestreamBusy() && ShouldHandOffToNavmesh())
+        {
+            try
+            {
+                _lsAbort?.InvokeAction();
+            }
+            catch
+            {
+                // ignore: the next tick sees whether Lifestream is still busy
+            }
+
+            _teleportProgressSeen = true;
+            DebugCall("teleport: near owner in ward — handing off from Lifestream to vnavmesh", throttle: false);
+            return;
+        }
+
         // Aetheryte Teleport does not set Lifestream.IsBusy — only the cast + BetweenAreas.
         if (IsBetweenAreas() || IsLifestreamBusy() || IsPlayerCasting())
         {
@@ -2275,6 +2293,23 @@ public sealed class CallTravelService : IDisposable
         {
             // ignore
         }
+    }
+
+    private bool ShouldHandOffToNavmesh()
+    {
+        var player = _objects.LocalPlayer;
+        if (player is null || _pending is null)
+            return false;
+
+        var dx = player.Position.X - _pending.Position.X;
+        var dz = player.Position.Z - _pending.Position.Z;
+        return CallHandoffRules.ShouldHandOffToNavmesh(
+            housingCall: _pending.IsHousingCall,
+            indoor: _pending.HousingIndoor,
+            atHousingWard: IsAtHousingWard(),
+            betweenAreas: IsBetweenAreas(),
+            casting: IsPlayerCasting(),
+            distanceToOwnerYalms: MathF.Sqrt(dx * dx + dz * dz));
     }
 
     private bool IsWithinSameInstancePathRange()

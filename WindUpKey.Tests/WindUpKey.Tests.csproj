@@ -65,6 +65,7 @@
     <Compile Include="..\WindUpKey\Services\CallDeadlines.cs" Link="Plugin\CallDeadlines.cs" />
     <Compile Include="..\WindUpKey\Services\PendingCallBook.cs" Link="Plugin\PendingCallBook.cs" />
     <Compile Include="..\WindUpKey\Services\CallStuckDetector.cs" Link="Plugin\CallStuckDetector.cs" />
+    <Compile Include="..\WindUpKey\Services\CallHandoffRules.cs" Link="Plugin\CallHandoffRules.cs" />
     <Compile Include="..\WindUpKey\Services\CallRequestRules.cs" Link="Plugin\CallRequestRules.cs" />
     <Compile Include="..\WindUpKey\Services\HousingYesnoMatcher.cs" Link="Plugin\HousingYesnoMatcher.cs" />
     <Compile Include="..\WindUpKey\Services\CallLogRules.cs" Link="Plugin\CallLogRules.cs" />
