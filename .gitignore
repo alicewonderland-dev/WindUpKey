@@ -1,0 +1,12 @@
+# Build output
+bin/
+obj/
+.vs/
+*.user
+deploy/dist/
+
+# The private relay is a separate repo checked out here; never commit it to this public one.
+WindUpRelay/
+
+# Holds the real relay token (see WindUpKey/RelaySecrets.cs.example); never commit it.
+WindUpKey/RelaySecrets.cs
