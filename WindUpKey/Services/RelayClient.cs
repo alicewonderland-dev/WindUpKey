@@ -1666,7 +1666,7 @@ public sealed class RelayClient : IDisposable
                         cancellationToken: ct)
                     .ConfigureAwait(false);
                 _connectPolicy.ClearCloseStatus();
-                _lastStatus = _authBlockStatus ?? "Cannot reach the host. Is Wind-Up Key Host running?";
+                _lastStatus = _authBlockStatus ?? "Cannot reach the relay. Check your connection; the relay may be down.";
                 if (verdict == RelayHostVerdict.Blocked)
                     _log.Information("WindUpKey no other relay host reachable after an identity rejection");
                 else
@@ -1675,7 +1675,7 @@ public sealed class RelayClient : IDisposable
             catch (Exception ex)
             {
                 _connectPolicy.ClearCloseStatus();
-                _lastStatus = _authBlockStatus ?? "Cannot reach the host. Is Wind-Up Key Host running?";
+                _lastStatus = _authBlockStatus ?? "Cannot reach the relay. Check your connection; the relay may be down.";
                 _log.Warning(ex, "WindUpKey relay connection issue");
             }
 
@@ -2157,7 +2157,7 @@ public sealed class RelayClient : IDisposable
         // Shared token goes in a header, not the URL (the relay accepts both). Same setup as the self-test's probes.
         RelaySocketSetup.Configure(socket.Options, _config.RelayToken);
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        // Keep per-host attempts bounded so failover to the other Funnel stays responsive.
+        // Keep each attempt bounded, so an unreachable relay fails within this time and the loop goes on to its backoff.
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(8));
         try
         {

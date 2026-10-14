@@ -1,9 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
     Dalamud-free tests for the plugin's relay identity, sync, unpair-queue, wire-limit and self-test code, and the rules
-    behind issue 06's review fixes, issue 07's Call safety and behaviour, issue 08's small fixes, and issue 09's send
-    results. Not part of the plugin build or its packaging: nothing references this project, and
-    deploy/Pack-Plugin.ps1 builds only WindUpKey/WindUpKey.csproj.
+    behind issue 06's review fixes, issue 07's Call safety and behaviour, issue 08's small fixes, issue 09's send
+    results, and issue 10's compiled relay list. Not part of the plugin build or its packaging: nothing references this
+    project, and deploy/Pack-Plugin.ps1 builds only WindUpKey/WindUpKey.csproj.
     Run with: dotnet test WindUpKey.Tests
   -->
   <PropertyGroup>
@@ -77,6 +77,8 @@
     <Compile Include="..\WindUpKey\Services\FireAndForget.cs" Link="Plugin\FireAndForget.cs" />
     <!-- 09-K4: when a failed wind request gives its cooldown back. -->
     <Compile Include="..\WindUpKey\Services\WindRequestCooldown.cs" Link="Plugin\WindRequestCooldown.cs" />
+    <!-- 10: the compiled relay list (one host). The real RelaySecrets.cs is never compiled here: TestRelaySecrets.cs stands in. -->
+    <Compile Include="..\WindUpKey\RelayDefaults.cs" Link="Plugin\RelayDefaults.cs" />
     <!-- The self-test's Dalamud-free units (04 Architecture); its thin adapters (SelfTestHost, SelfTestController) need Dalamud. -->
     <Compile Include="..\WindUpKey\SelfTest\*.cs" LinkBase="Plugin\SelfTest" />
     <ProjectReference Include="..\WindUpKey.Protocol\WindUpKey.Protocol.csproj" />

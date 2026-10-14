@@ -12,11 +12,9 @@ namespace WindUpKey;
 public static class RelayDefaults
 {
     /// <summary>
-    /// Funnel hosts to try, in default order. Only one should be running at a time;
-    /// the client fails over when the preferred host is offline. Each host keeps
-    /// its own independent SQLite database with no sync between them, so running
-    /// two live simultaneously risks a client's pairing/wind state fragmenting
-    /// across hosts — see deploy/HOSTING.md for the promotion runbook.
+    /// Funnel hosts to try, in order. There is one relay host, the Oracle Cloud VM, with no standby: see HOSTING.md in
+    /// the private WindUpRelay repo for running, updating and rebuilding it. Older plugin builds also list the retired
+    /// <c>dollhome</c> host, which stays off so no client's state is split across two databases.
     /// Every entry must be a real Tailscale machine with Funnel enabled — an
     /// unresolvable name here costs each client a failed connection attempt.
     /// Funnel always terminates on public :443, so these URLs carry no port and
@@ -24,22 +22,21 @@ public static class RelayDefaults
     /// </summary>
     public static readonly string[] RelayUrls =
     [
-        "wss://windup-relay-oracle.ancon-universe.ts.net/ws", // Oracle Cloud (primary — always-on)
-        "wss://dollhome.ancon-universe.ts.net/ws",             // Linux desktop (standby)
+        "wss://windup-relay-oracle.ancon-universe.ts.net/ws", // Oracle Cloud (the only host)
     ];
 
-    /// <summary>Primary Funnel address (first entry in <see cref="RelayUrls"/>).</summary>
+    /// <summary>The relay's Funnel address (the first, and now only, entry in <see cref="RelayUrls"/>).</summary>
     public static string RelayUrl => RelayUrls[0];
 
     /// <summary>
-    /// Shared secret; must match Relay:Token on every host relay. Lives in the
+    /// Shared secret; must match the relay's Relay:Token. Lives in the
     /// gitignored RelaySecrets.cs, not here — see RelaySecrets.cs.example.
     /// </summary>
     public const string RelayToken = RelaySecrets.RelayToken;
 
     /// <summary>
     /// Candidate URLs with an optional sticky preference first (last successful host).
-    /// Unknown preferences are ignored so the compiled list stays authoritative.
+    /// Unknown preferences (such as a saved retired host) are ignored so the compiled list stays authoritative.
     /// </summary>
     public static IEnumerable<string> OrderedRelayUrls(string? preferredUrl)
     {
