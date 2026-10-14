@@ -3,9 +3,10 @@
 #   deploy/dist/WindUpKey.zip          (Release — public/default version)
 #   deploy/dist/WindUpKey-Testing.zip  (Testing compile — higher AssemblyVersion / Testing manifest)
 #
-# Public testing = upload WindUpKey-Testing.zip and set repo.json TestingAssemblyVersion +
-# DownloadLinkTesting (opt-in). Private testing = use the zip/DLL locally only; do not link it
-# from public repo.json. Debug helpers are runtime-gated via Configuration.IsDebugEnabled,
+# Public testing = upload WindUpKey-Testing.zip and set TestingAssemblyVersion +
+# DownloadLinkTesting in the WindUpKey entry of the Wonderland repo.json catalog
+# (github.com/alicewonderland-dev/Wonderland; opt-in). Private testing = use the zip/DLL locally only; do not link it
+# from the catalog. Debug helpers are runtime-gated via Configuration.IsDebugEnabled,
 # not by the Testing compile channel.
 
 param(
