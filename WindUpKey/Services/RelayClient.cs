@@ -85,13 +85,6 @@ public sealed class RelayClient : IDisposable
     /// </summary>
     public static readonly TimeSpan MovementLockSafetyGrace = TimeSpan.FromSeconds(60);
 
-    /// <summary>Whether this build has the Call feature (Testing builds): sync changes to call rights are told only then.</summary>
-#if WINDUP_TESTING
-    private const bool CallFeature = true;
-#else
-    private const bool CallFeature = false;
-#endif
-
     private readonly Configuration _config;
     private readonly IClientState _clientState;
     private readonly IObjectTable _objectTable;
@@ -108,12 +101,10 @@ public sealed class RelayClient : IDisposable
     private readonly GameCommandRunner _commands;
     private readonly RelayIdentityStore _identityStore;
 
-#if WINDUP_TESTING
     private CallTravelService? _callTravel;
     /// <summary>07-A3: the owner's Calls awaiting a reply (30 min, at most 32); thread-safe (sends come from Draw).</summary>
     private readonly PendingCallBook _pendingCalls = new(() => Environment.TickCount64);
     private const string CallIndoorPlotUnknownFailure = "You can't Call from this house: its plot couldn't be read.";
-#endif
 
     private ClientWebSocket? _socket;
     private readonly object _socketGate = new();
@@ -284,7 +275,6 @@ public sealed class RelayClient : IDisposable
         _timer.DollWindChanged = QueueDollStatePush;
     }
 
-#if WINDUP_TESTING
     public void AttachCallTravel(CallTravelService callTravel) => _callTravel = callTravel;
 
     public void TickCallTravel() => _callTravel?.Tick();
@@ -463,7 +453,6 @@ public sealed class RelayClient : IDisposable
 
     /// <summary>07-A9: from ConfigWindow's Draw; the recall runs on the next framework tick.</summary>
     public void RequestRecallDebugCallPoint() => _callTravel?.RequestRecallDebugPoint();
-#endif
 
     public bool IsConnected => _socket?.State == WebSocketState.Open;
 
@@ -2359,7 +2348,6 @@ public sealed class RelayClient : IDisposable
             case MessageTypes.OwnerSettingsAck:
                 HandleOwnerSettingsAck(envelope);
                 break;
-#if WINDUP_TESTING
             case MessageTypes.Call:
                 await HandleInboundCallAsync(envelope, ct).ConfigureAwait(false);
                 break;
@@ -2369,7 +2357,6 @@ public sealed class RelayClient : IDisposable
             case MessageTypes.CallResult:
                 HandleCallResult(envelope);
                 break;
-#endif
             case MessageTypes.Ping:
                 await SendEnvelopeAsync(Envelope.Create(MessageTypes.Pong, new { }), ct).ConfigureAwait(false);
                 break;
@@ -2563,11 +2550,9 @@ public sealed class RelayClient : IDisposable
         var queueFull = payload.Code == ErrorCodes.QueueFull;
         if (!string.IsNullOrEmpty(payload.RequestId))
         {
-#if WINDUP_TESTING
             // Calls are deliberately silent on the owner side, including relay rejection/errors.
             if (TryTakePendingCall(payload.RequestId))
                 return;
-#endif
             lock (_pendingWindLock)
             {
                 if (_pendingWindRequestIds.Remove(payload.RequestId))
@@ -2838,7 +2823,7 @@ public sealed class RelayClient : IDisposable
 
             if (announce)
             {
-                foreach (var change in RelaySyncRules.Changes(newHere, wasOwner, couldCall, pair.IsOwner, pair.CanCallMe, CallFeature))
+                foreach (var change in RelaySyncRules.Changes(newHere, wasOwner, couldCall, pair.IsOwner, pair.CanCallMe))
                     announcements.Add((change, pair));
             }
         }
@@ -3234,16 +3219,8 @@ public sealed class RelayClient : IDisposable
         }), ct).ConfigureAwait(false);
     }
 
-    private bool TravelPluginsReady()
-    {
-#if WINDUP_TESTING
-        return _callTravel?.IsTravelReady ?? false;
-#else
-        return false;
-#endif
-    }
+    private bool TravelPluginsReady() => _callTravel?.IsTravelReady ?? false;
 
-#if WINDUP_TESTING
     private async Task HandleInboundCallAsync(Envelope envelope, CancellationToken ct)
     {
         var payload = envelope.GetPayload<CallPayload>();
@@ -3313,7 +3290,6 @@ public sealed class RelayClient : IDisposable
     }
 
     private bool TryTakePendingCall(string? requestId) => _pendingCalls.TryTake(requestId);
-#endif
 
     private async Task HandleInboundOwnerSettingsUpdateAsync(Envelope envelope, CancellationToken ct)
     {

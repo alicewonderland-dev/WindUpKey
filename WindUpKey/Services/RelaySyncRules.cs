@@ -14,7 +14,7 @@ public enum PairSyncChange
     /// <summary>A synced consent row turned on <see cref="PairedPartner.IsOwner"/>.</summary>
     MadeOwner,
 
-    /// <summary>A synced consent row turned on <see cref="PairedPartner.CanCallMe"/> (told only in builds with Call).</summary>
+    /// <summary>A synced consent row turned on <see cref="PairedPartner.CanCallMe"/>.</summary>
     AllowedCall,
 }
 
@@ -213,23 +213,20 @@ public static class RelaySyncRules
     /// <summary>
     /// What a sync changed for one partner, in the order told. <paramref name="newToThisPc"/> is true when the partner
     /// was neither a partner nor a pending request on this PC before; the flags are before and after the sync.
-    /// <paramref name="callFeature"/> is whether this build has the Call feature (<c>WINDUP_TESTING</c>): call
-    /// rights are told only then.
     /// </summary>
     public static IReadOnlyList<PairSyncChange> Changes(
         bool newToThisPc,
         bool wasOwner,
         bool couldCall,
         bool isOwner,
-        bool canCall,
-        bool callFeature)
+        bool canCall)
     {
         var changes = new List<PairSyncChange>();
         if (newToThisPc)
             changes.Add(PairSyncChange.PartnerAdded);
         if (!wasOwner && isOwner)
             changes.Add(PairSyncChange.MadeOwner);
-        if (callFeature && !couldCall && canCall)
+        if (!couldCall && canCall)
             changes.Add(PairSyncChange.AllowedCall);
         return changes;
     }

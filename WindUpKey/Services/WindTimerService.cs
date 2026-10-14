@@ -214,7 +214,6 @@ public sealed class WindTimerService
         return actualAdded;
     }
 
-#if WINDUP_TESTING
     /// <summary>
     /// True when remaining wind is strictly above <see cref="Configuration.MaxWindHours"/>.
     /// Used to block accepting a new daily quest while already over the configured cap.
@@ -242,7 +241,6 @@ public sealed class WindTimerService
             _lowWind.OnWoundReceived(actualAdded);
         return actualAdded;
     }
-#endif
 
     private TimeSpan AddWind(TimeSpan amount, bool ignoreMaxCap = false)
     {

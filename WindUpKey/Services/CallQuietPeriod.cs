@@ -1,4 +1,3 @@
-#if WINDUP_TESTING || WINDUP_CALL_UNITS
 using System;
 using System.Collections.Generic;
 using WindUpKey.Protocol;
@@ -85,4 +84,3 @@ public static class CallResultNotice
             ? $"{dollLabel} declined your Call."
             : null;
 }
-#endif

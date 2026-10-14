@@ -1,4 +1,3 @@
-#if WINDUP_TESTING
 using System;
 using Dalamud.Game.DutyState;
 using Dalamud.Plugin.Services;
@@ -209,6 +208,8 @@ public sealed class QuestWindService : IWindUpSource
                 _config.QuestRouletteClears);
         }
 
+        // 11-D4: the client language is fine here: this row is read by ID and only its ID fields are checked (the
+        // Savage name match uses the catalog's English cache).
         if (_contentFinderConditionId != 0
             && _data.GetExcelSheet<ContentFinderCondition>()?.TryGetRow(_contentFinderConditionId, out var cfc) == true)
         {
@@ -293,4 +294,3 @@ public sealed class QuestWindService : IWindUpSource
         _ => "None",
     };
 }
-#endif

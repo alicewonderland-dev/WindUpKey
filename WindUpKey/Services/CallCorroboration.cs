@@ -1,4 +1,3 @@
-#if WINDUP_TESTING || WINDUP_CALL_UNITS
 using System.Numerics;
 using WindUpKey.Protocol;
 
@@ -77,4 +76,3 @@ public static class CallCorroboration
 
     private static bool IsHousingCall(CallPayload call) => call.HousingWard > 0 && call.HousingCity != 0;
 }
-#endif

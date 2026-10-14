@@ -1520,7 +1520,8 @@ public sealed class CallSafetyTests
         Assert.False(CallLogRules.ShouldRotate(0, 2 * CallLogRules.RotateAtBytes));
 
         var log = ProfileSettingsTests.PluginSource(Path.Combine("Services", "CallTravelDebugLog.cs"));
-        Assert.StartsWith("#if WINDUP_TESTING\n", log);
+        // 11-C3: it ships in Release (its forced lines are location-free).
+        Assert.False(log.StartsWith("#if", StringComparison.Ordinal), "CallTravelDebugLog.cs is still gated");
         var rotate = log.IndexOf("CallLogRules.ShouldRotate(existing.Length, Encoding.UTF8.GetByteCount(line))", StringComparison.Ordinal);
         var move = log.IndexOf("File.Move(path, path + CallLogRules.RotatedSuffix, overwrite: true);", StringComparison.Ordinal);
         var append = log.IndexOf("File.AppendAllText(path, line);", StringComparison.Ordinal);

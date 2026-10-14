@@ -270,36 +270,25 @@ public sealed class RelaySyncRulesTests
     [Fact]
     public void APartnerNewToThisPc_IsAnnounced()
     {
-        Assert.Equal([PairSyncChange.PartnerAdded], RelaySyncRules.Changes(true, false, false, false, false, callFeature: false));
-        Assert.Empty(RelaySyncRules.Changes(false, false, false, false, false, callFeature: true));
+        Assert.Equal([PairSyncChange.PartnerAdded], RelaySyncRules.Changes(true, false, false, false, false));
+        Assert.Empty(RelaySyncRules.Changes(false, false, false, false, false));
     }
 
     [Fact]
     public void OwnerAndCall_TurnedOn_AreAnnounced_OncePerChange()
     {
-        Assert.Equal([PairSyncChange.MadeOwner], RelaySyncRules.Changes(false, false, false, true, false, callFeature: true));
-        Assert.Equal([PairSyncChange.AllowedCall], RelaySyncRules.Changes(false, true, false, true, true, callFeature: true));
+        Assert.Equal([PairSyncChange.MadeOwner], RelaySyncRules.Changes(false, false, false, true, false));
+        Assert.Equal([PairSyncChange.AllowedCall], RelaySyncRules.Changes(false, true, false, true, true));
         Assert.Equal(
             [PairSyncChange.PartnerAdded, PairSyncChange.MadeOwner, PairSyncChange.AllowedCall],
-            RelaySyncRules.Changes(true, false, false, true, true, callFeature: true));
-    }
-
-    // ---------- 02-D10: the call line only in builds with Call ----------
-
-    [Fact]
-    public void CallRights_AreNotAnnounced_WithoutTheCallFeature_TheOtherLinesAre()
-    {
-        Assert.Empty(RelaySyncRules.Changes(false, true, false, true, true, callFeature: false));
-        Assert.Equal(
-            [PairSyncChange.PartnerAdded, PairSyncChange.MadeOwner],
-            RelaySyncRules.Changes(true, false, false, true, true, callFeature: false));
+            RelaySyncRules.Changes(true, false, false, true, true));
     }
 
     [Fact]
     public void FlagsAlreadyOn_OrTurnedOff_AreNotAnnounced()
     {
-        Assert.Empty(RelaySyncRules.Changes(false, true, true, true, true, callFeature: true));
-        Assert.Empty(RelaySyncRules.Changes(false, true, true, false, false, callFeature: true));
+        Assert.Empty(RelaySyncRules.Changes(false, true, true, true, true));
+        Assert.Empty(RelaySyncRules.Changes(false, true, true, false, false));
     }
 
     [Fact]

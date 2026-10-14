@@ -2,7 +2,7 @@
   <!--
     Dalamud-free tests for the plugin's relay identity, sync, unpair-queue, wire-limit and self-test code, and the rules
     behind issue 06's review fixes, issue 07's Call safety and behaviour, issue 08's small fixes, issue 09's send
-    results, and issue 10's compiled relay list. Not part of the plugin build or its packaging: nothing references this
+    results, issue 10's compiled relay list, and issue 11's Release gating. Not part of the plugin build or its packaging: nothing references this
     project, and deploy/Pack-Plugin.ps1 builds only WindUpKey/WindUpKey.csproj.
     Run with: dotnet test WindUpKey.Tests
   -->
@@ -18,8 +18,7 @@
     <GenerateProgramFile>false</GenerateProgramFile>
     <!-- 04-D1: the self-test units are compiled into the plugin only under WINDUP_TESTING; here they always are. -->
     <DefineConstants>$(DefineConstants);WINDUP_SELFTEST_UNITS</DefineConstants>
-    <!-- 07: the Call rules are compiled into the plugin only under WINDUP_TESTING (Call is Testing-only); here they always are. -->
-    <DefineConstants>$(DefineConstants);WINDUP_CALL_UNITS</DefineConstants>
+    <!-- 11: Call and the daily quests ship in Release, so their files need no define here. -->
   </PropertyGroup>
 
   <ItemGroup>
@@ -43,6 +42,8 @@
     <Compile Include="..\WindUpKey\Services\RelayWireRules.cs" Link="Plugin\RelayWireRules.cs" />
     <!-- 06 Part A: the profile, and the Dalamud-free rules of the review fixes. -->
     <Compile Include="..\WindUpKey\CharacterProfile.cs" Link="Plugin\CharacterProfile.cs" />
+    <!-- 11: the profile's daily quest fields. -->
+    <Compile Include="..\WindUpKey\Quest\QuestDifficulty.cs" Link="Plugin\QuestDifficulty.cs" />
     <Compile Include="..\WindUpKey\PlayerRole.cs" Link="Plugin\PlayerRole.cs" />
     <Compile Include="..\WindUpKey\ProfileMigration.cs" Link="Plugin\ProfileMigration.cs" />
     <Compile Include="..\WindUpKey\Ui\LockEmoteDisplay.cs" Link="Plugin\LockEmoteDisplay.cs" />

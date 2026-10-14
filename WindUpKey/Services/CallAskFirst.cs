@@ -1,4 +1,3 @@
-#if WINDUP_TESTING || WINDUP_CALL_UNITS
 namespace WindUpKey.Services;
 
 /// <summary>What keeps a Call from travelling right now, other than another plugin's travel (in priority order).</summary>
@@ -102,4 +101,3 @@ public static class CallAskFirst
     public static bool IsOwnDrain(long? lastOwnAbortMs, long nowMs) =>
         lastOwnAbortMs is { } abortedAt && nowMs - abortedAt < OwnDrainMs;
 }
-#endif

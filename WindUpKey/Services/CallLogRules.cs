@@ -1,4 +1,3 @@
-#if WINDUP_TESTING || WINDUP_CALL_UNITS
 namespace WindUpKey.Services;
 
 /// <summary>
@@ -26,4 +25,3 @@ public static class CallLogRules
             ? $"{reason} | phase={phase} kind={kind}"
             : $"{reason} | phase={phase} kind={kind} ex={exceptionType}";
 }
-#endif

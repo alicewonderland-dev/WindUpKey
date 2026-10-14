@@ -1,4 +1,3 @@
-#if WINDUP_TESTING
 using System;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
@@ -139,4 +138,3 @@ public sealed class CallPromptWindow : Window
         };
     }
 }
-#endif

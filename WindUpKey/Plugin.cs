@@ -32,10 +32,8 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IContextMenu ContextMenu { get; private set; } = null!;
     [PluginService] internal static IGameInteropProvider GameInterop { get; private set; } = null!;
     [PluginService] internal static IObjectTable ObjectTable { get; private set; } = null!;
-#if WINDUP_TESTING
     /// <summary>07-B3: a Call is cross-checked against the owner's party-list territory.</summary>
     [PluginService] internal static IPartyList PartyList { get; private set; } = null!;
-#endif
     [PluginService] internal static ITargetManager TargetManager { get; private set; } = null!;
     [PluginService] internal static ICondition Condition { get; private set; } = null!;
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
@@ -61,9 +59,9 @@ public sealed class Plugin : IDalamudPlugin
     private readonly SoundEffectService _sounds;
     private readonly RelayClient _relay;
     private readonly MoodlesWindStatusService _moodlesStatus;
-#if WINDUP_TESTING
     private readonly CallPromptWindow _callPrompt;
     private readonly CallTravelService _callTravel;
+#if WINDUP_TESTING
     private readonly SelfTestController _selfTest;
 #endif
     private readonly List<IWindUpSource> _sources = [];
@@ -111,16 +109,13 @@ public sealed class Plugin : IDalamudPlugin
         _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition, _lowWind, ChatGui);
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
-#if WINDUP_TESTING
         var quests = new QuestWindService(
             Configuration, _timer, DutyState, DataManager, ClientState, ChatGui, Log);
-#endif
         _relay = new RelayClient(
             Configuration, ClientState, ObjectTable, Condition, Framework, Log, ChatGui, DataManager, PluginInterface, _consent, _timer, _notifier, _sounds, commands);
         _moodlesStatus = new MoodlesWindStatusService(
             PluginInterface, ClientState, ObjectTable, Configuration, _timer, lowWindMessages, Log);
 
-#if WINDUP_TESTING
         _callPrompt = new CallPromptWindow();
         _callTravel = new CallTravelService(
             PluginInterface,
@@ -141,6 +136,7 @@ public sealed class Plugin : IDalamudPlugin
             _consent.CanReceiveCallFromKey);
         _relay.AttachCallTravel(_callTravel);
 
+#if WINDUP_TESTING
         // 04: /windup selftest (Testing builds only, debug mode). The run's own Reconnect sets the epoch it expects.
         SelfTestController? selfTest = null;
         _selfTest = selfTest = new SelfTestController(
@@ -176,9 +172,7 @@ public sealed class Plugin : IDalamudPlugin
             Configuration,
             _relay,
             _timer,
-#if WINDUP_TESTING
             quests,
-#endif
             TargetManager,
             commands,
             _moodlesStatus,
@@ -187,18 +181,14 @@ public sealed class Plugin : IDalamudPlugin
             PluginInterface.Manifest.AssemblyVersion.ToString());
         _windowSystem.AddWindow(_configWindow);
         _windowSystem.AddWindow(_changelogWindow);
-#if WINDUP_TESTING
         _windowSystem.AddWindow(_callPrompt);
-#endif
 
         var contextMenuSource = new ContextMenuWindSource(ContextMenu, ClientState, Configuration, _relay, Log);
         _sources.Add(contextMenuSource);
         var commendationSource = new CommendationWindSource(
             DutyState, PlayerState, Framework, ClientState, Configuration, _timer, Log);
         _sources.Add(commendationSource);
-#if WINDUP_TESTING
         _sources.Add(quests);
-#endif
         foreach (var source in _sources)
             source.Enable();
 
@@ -206,8 +196,8 @@ public sealed class Plugin : IDalamudPlugin
         {
             HelpMessage =
                 "Open Wind-Up Key config.\n/windup safeword <word> uses your safeword (and pauses remote control).\n/windup safeword resume ends that pause early.\n/windup unlock clears Hardcore and all owners (confirmation required)."
-#if WINDUP_TESTING
                 + "\n/windup stopcall declines an active owner call (not in Hardcore)."
+#if WINDUP_TESTING
                 + "\n/windup selftest runs the relay self-test (debug mode)."
 #endif
                 ,
@@ -255,9 +245,7 @@ public sealed class Plugin : IDalamudPlugin
         _selfTest.Dispose();
 #endif
         _relay.Dispose();
-#if WINDUP_TESTING
         _callTravel.Dispose();
-#endif
         _moodlesStatus.Dispose();
         _sounds.Dispose();
         _lockController.Dispose();
@@ -292,10 +280,10 @@ public sealed class Plugin : IDalamudPlugin
         _timer.SetRelaySafetyBypass(_relay.ShouldSuspendMovementLocks);
         _timer.Tick();
         RecordSlowestPhase("timer", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
-#if WINDUP_TESTING
         phaseStart = Stopwatch.GetTimestamp();
         _relay.TickCallTravel();
         RecordSlowestPhase("call-travel", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
+#if WINDUP_TESTING
         _selfTest.Tick();
 #endif
         phaseStart = Stopwatch.GetTimestamp();
@@ -372,8 +360,8 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnLogout(int type, int code)
     {
-#if WINDUP_TESTING
         _relay.CancelActiveCall();
+#if WINDUP_TESTING
         // Its restore then only lifts the hold, never reconnecting a logged-out client (04-D10).
         _selfTest.OnLogout();
 #endif
@@ -407,6 +395,7 @@ public sealed class Plugin : IDalamudPlugin
             _selfTest.OnCommand(rest);
             return;
         }
+#endif
 
         if (string.Equals(verb, "stopcall", StringComparison.OrdinalIgnoreCase))
         {
@@ -423,7 +412,6 @@ public sealed class Plugin : IDalamudPlugin
                 PluginChat.Print(ChatGui, "There's no Call to stop.", PluginChat.Grey);
             return;
         }
-#endif
 
         if (string.Equals(verb, "unlock", StringComparison.OrdinalIgnoreCase))
         {
@@ -547,9 +535,7 @@ public sealed class Plugin : IDalamudPlugin
             // and stops an owner's Call. The safeword itself is never logged.
             // 06-B3: wind first, so cancelling the Call never briefly sees her unwound (re-lock, sit, then stand up).
             _timer.UseSafeword(Configuration.SafewordHours);
-#if WINDUP_TESTING
             _relay.CancelActiveCall();
-#endif
             // Confirmation only — never print remaining time to the doll.
             PluginChat.Print(ChatGui, "Safeword used. Remote control is paused for now.", PluginChat.Green);
             return;

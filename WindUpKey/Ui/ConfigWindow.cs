@@ -7,9 +7,7 @@ using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin.Services;
 using WindUpKey.Protocol;
-#if WINDUP_TESTING
 using WindUpKey.Quest;
-#endif
 using WindUpKey.Services;
 
 namespace WindUpKey.Ui;
@@ -19,9 +17,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly Configuration _config;
     private readonly RelayClient _relay;
     private readonly WindTimerService _timer;
-#if WINDUP_TESTING
     private readonly QuestWindService _quests;
-#endif
     private readonly ITargetManager _targets;
     private readonly GameCommandRunner _commands;
     private readonly MoodlesWindStatusService _moodlesStatus;
@@ -54,9 +50,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
     /// <summary>06-A4: the safeword being typed, until the edit ends (null when not editing).</summary>
     private string? _safewordDraft;
-#if WINDUP_TESTING
     private QuestDifficulty? _questConfirmDifficulty;
-#endif
     private string? _pairLabelsKey;
     private Vector2 _pairLabelsPos;
     private string? _pairPermsKey;
@@ -80,9 +74,7 @@ public sealed class ConfigWindow : Window, IDisposable
         Configuration config,
         RelayClient relay,
         WindTimerService timer,
-#if WINDUP_TESTING
         QuestWindService quests,
-#endif
         ITargetManager targets,
         GameCommandRunner commands,
         MoodlesWindStatusService moodlesStatus,
@@ -94,9 +86,7 @@ public sealed class ConfigWindow : Window, IDisposable
         _config = config;
         _relay = relay;
         _timer = timer;
-#if WINDUP_TESTING
         _quests = quests;
-#endif
         _targets = targets;
         _commands = commands;
         _moodlesStatus = moodlesStatus;
@@ -147,13 +137,11 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.EndTabItem();
         }
 
-#if WINDUP_TESTING
         if (_config.IsDoll && ImGui.BeginTabItem("Quests"))
         {
             DrawQuestsTab();
             ImGui.EndTabItem();
         }
-#endif
 
         if (ImGui.BeginTabItem("About"))
         {
@@ -654,10 +642,8 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.TextUnformatted($"Make {_ownerConfirmLabel} your owner?");
         ImGui.Spacing();
         ImGui.TextUnformatted("Owners can always wind and unwind you, and can lock your max hours and unwound emote settings.");
-#if WINDUP_TESTING
-        ImGui.TextUnformatted("In this Testing build owners can also call you to them: always while Hardcore is on,");
+        ImGui.TextUnformatted("Owners can also call you to them: always while Hardcore is on,");
         ImGui.TextUnformatted("otherwise only if you allow it with Can call me.");
-#endif
         ImGui.TextUnformatted("You can remove this owner by unpairing them, or every owner with /windup unlock.");
         ImGui.Spacing();
         if (ImGui.Button("Confirm", new Vector2(100, 0)))
@@ -977,7 +963,6 @@ public sealed class ConfigWindow : Window, IDisposable
         if (partner.IsOwner)
         {
             ImGui.TextDisabled("Can wind me / Can unwind me: always allowed for owners.");
-#if WINDUP_TESTING
             if (_config.HardcoreMode)
             {
                 ImGui.BeginDisabled();
@@ -995,7 +980,6 @@ public sealed class ConfigWindow : Window, IDisposable
                     _relay.NotifyConsentChanged(partner);
                 }
             }
-#endif
         }
         else
         {
@@ -1126,10 +1110,8 @@ public sealed class ConfigWindow : Window, IDisposable
 
         ImGui.TextDisabled("When locked, these settings cannot be changed until unlocked. Only owners can unlock.");
 
-#if WINDUP_TESTING
         ImGui.Spacing();
         DrawOwnerCallButton(dollKey, snap);
-#endif
 
         ImGui.Spacing();
         if (ImGui.Button("Close", new Vector2(100, 0)))
@@ -1278,15 +1260,19 @@ public sealed class ConfigWindow : Window, IDisposable
         return true;
     }
 
-#if WINDUP_TESTING
-    private void DrawOwnerCallButton(string dollKey, OwnerSettingsSnapshot snap)
+    private const string CallTravelNotReadyTooltip =
+        "This doll can't answer Calls yet. They need Lifestream and vnavmesh, and a current version of Wind-Up Key. Press Refresh settings to check again.";
+    private const string CallLocationTooltip = "Sends your current location to this doll.";
+
+    private void DrawOwnerCallButton(string dollKey, OwnerSettingsSnapshot? snap)
     {
         var online = _relay.GetPartnerPresence(dollKey) == PartnerPresence.Online;
-        var canCall = snap.CanCall;
-        var travelReady = snap.TravelReady;
+        var canCall = snap is { HasData: true, CanCall: true };
+        // 11-D3: from the doll's latest snapshot; older dolls (0.2.4.0) always report false. Travel plugins are
+        // required only on the receiving doll, never to initiate a Call.
+        var travelReady = snap is { HasData: true, TravelReady: true };
         var inWorld = Plugin.ObjectTable.LocalPlayer is not null && Plugin.ClientState.IsLoggedIn;
-        // Travel plugins are required only on the receiving doll — never to initiate a Call.
-        var enabled = online && canCall && inWorld && _relay.IsConnected;
+        var enabled = online && canCall && inWorld && _relay.IsConnected && travelReady;
 
         if (!enabled)
             ImGui.BeginDisabled();
@@ -1310,20 +1296,14 @@ public sealed class ConfigWindow : Window, IDisposable
                 ImGui.TextUnformatted("You must be in the world to call.");
             else if (!_relay.IsConnected)
                 ImGui.TextUnformatted("Relay is not connected yet.");
+            else if (!travelReady)
+                ImGui.TextUnformatted(CallTravelNotReadyTooltip);
             else
-            {
                 ImGui.TextUnformatted("Call the doll to travel near your current position.");
-                if (!travelReady)
-                {
-                    ImGui.TextUnformatted("The doll needs these installed to answer (you do not, even if you are also a doll):");
-                    ImGui.BulletText("Lifestream");
-                    ImGui.BulletText("vnavmesh");
-                }
-            }
+            ImGui.TextUnformatted(CallLocationTooltip);
             ImGui.EndTooltip();
         }
     }
-#endif
 
     private void PushOwnerSettings(string dollKey, OwnerSettingsDraft draft, bool notify = true)
     {
@@ -1444,7 +1424,6 @@ public sealed class ConfigWindow : Window, IDisposable
         }
     }
 
-#if WINDUP_TESTING
     private void DrawQuestsTab()
     {
         ImGui.Spacing();
@@ -1615,7 +1594,6 @@ public sealed class ConfigWindow : Window, IDisposable
             return $"{(int)remaining.TotalMinutes}m";
         return $"{Math.Max(1, (int)remaining.TotalSeconds)}s";
     }
-#endif
 
     private void DrawSafewordTab()
     {
@@ -1730,12 +1708,7 @@ public sealed class ConfigWindow : Window, IDisposable
             _timer.ResumeRemoteControl();
     }
 
-    // 06-B1: Release builds have no Call feature, so only Testing builds mention it (as 06-A11 does).
-#if WINDUP_TESTING
     private const string PausedRemoteControlText = "Partners can't unwind you, and owners can't change your settings or call you.";
-#else
-    private const string PausedRemoteControlText = "Partners can't unwind you, and owners can't change your settings.";
-#endif
     private const string SafewordPauseHelp =
         "Using the safeword also pauses remote control for the safeword hours. " + PausedRemoteControlText + " Winding still works.";
 
@@ -1763,7 +1736,6 @@ public sealed class ConfigWindow : Window, IDisposable
         if (!_config.IsDoll)
             return;
 
-#if WINDUP_TESTING
         ImGui.Spacing();
         ImGui.TextUnformatted("Call travel");
         // 07-A9: Draw only raises the request; the store and recall run on the next framework tick.
@@ -1781,7 +1753,6 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.TextDisabled(_relay.HasDebugCallPoint
             ? "Recall travels to the last stored point (local; no relay)."
             : "Store a point first, then Recall acts like an owner call to that spot.");
-#endif
 
         ImGui.Spacing();
         ImGui.TextUnformatted("Self wind");

@@ -257,7 +257,7 @@ public sealed class SafewordPauseTests
 
         var command = SafewordCommand;
         var match = command.IndexOf("if (!SafewordText.Matches(rest, Configuration.Safeword))", StringComparison.Ordinal);
-        var cancel = command.IndexOf("#if WINDUP_TESTING\n            _relay.CancelActiveCall();\n#endif", StringComparison.Ordinal);
+        var cancel = command.IndexOf("_relay.CancelActiveCall();", StringComparison.Ordinal);
         var used = command.IndexOf("_timer.UseSafeword(Configuration.SafewordHours);", StringComparison.Ordinal);
         Assert.True(match >= 0 && match < used && cancel >= 0, "the safeword doesn't pause and cancel the Call after matching");
         // 06-B3: wind before cancelling the Call, so she's never briefly unwound (re-locked, sat down, then stood up again).

@@ -233,7 +233,7 @@ public sealed class CallBehaviourTests
         var plugin = PluginSource;
         var stopcall = plugin.IndexOf("if (string.Equals(verb, \"stopcall\", StringComparison.OrdinalIgnoreCase))", StringComparison.Ordinal);
         Assert.True(stopcall >= 0);
-        var block = plugin[stopcall..plugin.IndexOf("#endif", stopcall, StringComparison.Ordinal)];
+        var block = plugin[stopcall..plugin.IndexOf("if (string.Equals(verb, \"unlock\"", stopcall, StringComparison.Ordinal)];
         var refuse = block.IndexOf("if (!CallAskFirst.MayDecline(Configuration.HardcoreMode))\n            {\n                PluginChat.PrintError(ChatGui, CallAskFirst.HardcoreStopRefusal);\n                return;", StringComparison.Ordinal);
         Assert.True(refuse >= 0);
         Assert.True(refuse < block.IndexOf("_relay.RequestDeclineActiveCall()", StringComparison.Ordinal));

@@ -1,4 +1,3 @@
-#if WINDUP_TESTING || WINDUP_CALL_UNITS
 using System;
 using System.Collections.Generic;
 
@@ -86,4 +85,3 @@ public sealed class PendingCallBook(Func<long> clock)
         }
     }
 }
-#endif

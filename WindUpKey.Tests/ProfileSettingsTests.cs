@@ -83,7 +83,7 @@ public sealed class ProfileSettingsTests
     [Fact]
     public void EveryProfileField_IsCapturedAndApplied_AndHasItsActiveMirror()
     {
-        // From the source, so the WINDUP_TESTING quest fields count too; reflection checks the parse found them all.
+        // From the source (the quest fields included); reflection checks the parse found them all.
         var names = Regex.Matches(ProfileSource, @"public\s+[\w<>?,\s]+?\s+(\w+)\s*\{\s*get;\s*set;\s*\}")
             .Select(m => m.Groups[1].Value)
             .ToList();

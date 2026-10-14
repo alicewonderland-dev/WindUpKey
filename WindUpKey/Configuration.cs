@@ -4,9 +4,7 @@ using System.Linq;
 using Dalamud.Configuration;
 using WindUpKey.Protocol;
 using WindUpKey.Services;
-#if WINDUP_TESTING
 using WindUpKey.Quest;
-#endif
 
 namespace WindUpKey;
 
@@ -182,7 +180,6 @@ public class Configuration : IPluginConfiguration
     /// <summary>UTC time of the last low-wind chat echo (any band or expiry).</summary>
     public DateTimeOffset? LowWindLastWarningUtc { get; set; }
 
-#if WINDUP_TESTING
     /// <summary>Active daily quest difficulty, or <see cref="QuestDifficulty.None"/>.</summary>
     public QuestDifficulty QuestDifficulty { get; set; } = QuestDifficulty.None;
 
@@ -200,7 +197,6 @@ public class Configuration : IPluginConfiguration
 
     /// <summary>True after the quest reward has been granted for this accept.</summary>
     public bool QuestRewardClaimed { get; set; }
-#endif
 
     public bool IsDoll => Role == PlayerRole.Doll;
     public bool IsWinder => Role == PlayerRole.Winder;
@@ -226,14 +222,12 @@ public class Configuration : IPluginConfiguration
                 NormalizePartnerLabels(profile.PairedPartners);
             if (profile is null)
                 continue;
-#if WINDUP_TESTING
             profile.QuestRouletteClears = Math.Clamp(
                 profile.QuestRouletteClears, 0, QuestContentCatalog.EasyRouletteRequired);
             if (profile.QuestExtremeClears < 0)
                 profile.QuestExtremeClears = 0;
             if (profile.QuestDifficulty is < QuestDifficulty.None or > QuestDifficulty.Hard)
                 profile.QuestDifficulty = QuestDifficulty.None;
-#endif
         }
 
         if (MaxWindHours <= 0)
@@ -261,13 +255,11 @@ public class Configuration : IPluginConfiguration
 
         NormalizePendingKeys();
 
-#if WINDUP_TESTING
         QuestRouletteClears = Math.Clamp(QuestRouletteClears, 0, QuestContentCatalog.EasyRouletteRequired);
         if (QuestExtremeClears < 0)
             QuestExtremeClears = 0;
         if (QuestDifficulty is < QuestDifficulty.None or > QuestDifficulty.Hard)
             QuestDifficulty = QuestDifficulty.None;
-#endif
 
         // Always force compiled-in relay endpoint so users cannot drift or see/edit it.
         ApplyRelayDefaults();
@@ -356,14 +348,12 @@ public class Configuration : IPluginConfiguration
             LowWindTriggerMidSeconds = LowWindTriggerMidSeconds,
             LowWindTriggerLowSeconds = LowWindTriggerLowSeconds,
             LowWindLastWarningUtc = LowWindLastWarningUtc,
-#if WINDUP_TESTING
             QuestDifficulty = QuestDifficulty,
             QuestAcceptedAtUtc = QuestAcceptedAtUtc,
             QuestRouletteClears = QuestRouletteClears,
             QuestExtremeClears = QuestExtremeClears,
             QuestSavageCleared = QuestSavageCleared,
             QuestRewardClaimed = QuestRewardClaimed,
-#endif
         };
     }
 
@@ -398,14 +388,12 @@ public class Configuration : IPluginConfiguration
         LowWindTriggerMidSeconds = profile.LowWindTriggerMidSeconds;
         LowWindTriggerLowSeconds = profile.LowWindTriggerLowSeconds;
         LowWindLastWarningUtc = profile.LowWindLastWarningUtc;
-#if WINDUP_TESTING
         QuestDifficulty = profile.QuestDifficulty;
         QuestAcceptedAtUtc = profile.QuestAcceptedAtUtc;
         QuestRouletteClears = Math.Clamp(profile.QuestRouletteClears, 0, QuestContentCatalog.EasyRouletteRequired);
         QuestExtremeClears = Math.Max(0, profile.QuestExtremeClears);
         QuestSavageCleared = profile.QuestSavageCleared;
         QuestRewardClaimed = profile.QuestRewardClaimed;
-#endif
 
         if (HardcoreMode)
         {

@@ -46,7 +46,7 @@ public sealed unsafe class LockController : IDisposable
     private readonly InputDiagnosticLog _diagnostics;
 
     private bool _locked;
-    /// <summary>Mute player/controller steer during owner-call auto-travel (Testing).</summary>
+    /// <summary>Mute player/controller steer during owner-call auto-travel.</summary>
     private bool _inputMute;
     /// <summary>
     /// When muted for Call pathing: allow Jump (vnav takeoff) and apply vnav IgnoreUserInput tweaks.

@@ -1,4 +1,3 @@
-#if WINDUP_TESTING
 using System;
 using System.IO;
 using System.Text;
@@ -11,7 +10,7 @@ namespace WindUpKey.Services;
 /// Call travel diagnostics, appended to <see cref="FileName"/> in the config folder. Written by both the Call sender
 /// (owner snapshot) and the doll travel state machine. Routine lines need <see cref="Configuration.IsDebugEnabled"/>;
 /// a forced line is written regardless and must be location-free (07-A8, <see cref="CallLogRules"/>). The file rotates
-/// at <see cref="CallLogRules.RotateAtBytes"/>, keeping one older file (D11). Testing builds only.
+/// at <see cref="CallLogRules.RotateAtBytes"/>, keeping one older file (D11).
 /// </summary>
 internal static class CallTravelDebugLog
 {
@@ -46,4 +45,3 @@ internal static class CallTravelDebugLog
         }
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if WINDUP_TESTING || WINDUP_CALL_UNITS
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -264,4 +263,3 @@ public sealed class CallWaypointReader(
         return _first ?? finalTarget;
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if WINDUP_TESTING || WINDUP_CALL_UNITS
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -211,4 +210,3 @@ public static class HousingYesnoMatcher
     private static bool Within(long? atMs, long nowMs, long windowMs) =>
         atMs is { } at && nowMs >= at && nowMs - at <= windowMs;
 }
-#endif

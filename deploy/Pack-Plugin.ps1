@@ -1,13 +1,15 @@
 # Builds WindUpKey Release and/or Testing zips for the Dalamud custom repo.
 # Output:
 #   deploy/dist/WindUpKey.zip          (Release — public/default version)
-#   deploy/dist/WindUpKey-Testing.zip  (Testing compile — higher AssemblyVersion / Testing manifest)
+#   deploy/dist/WindUpKey-Testing.zip  (Testing compile — same version, adds the self-test / Testing manifest)
 #
-# Public testing = upload WindUpKey-Testing.zip and set TestingAssemblyVersion +
-# DownloadLinkTesting in the WindUpKey entry of the Wonderland repo.json catalog
-# (github.com/alicewonderland-dev/Wonderland; opt-in). Private testing = use the zip/DLL locally only; do not link it
-# from the catalog. Debug helpers are runtime-gated via Configuration.IsDebugEnabled,
+# Release and Testing are built from the same commit with the same version (11-D2). The Wonderland repo.json catalog
+# (github.com/alicewonderland-dev/Wonderland) currently has no Testing link: WindUpKey-Testing.zip is for local or
+# private use only (it adds the self-test). Debug helpers are runtime-gated via Configuration.IsDebugEnabled,
 # not by the Testing compile channel.
+#
+# 11: after each build the DLL's metadata names are checked. Release must have Call and daily quests but no
+# self-test; Testing must have both (a positive control for the check itself). A mismatch fails the pack.
 
 param(
     [ValidateSet('Release', 'Testing', 'Both')]
@@ -50,6 +52,67 @@ Clear-GeneratedReadOnly (Join-Path $repoRoot "WindUpKey\obj")
 Clear-GeneratedReadOnly $distDir
 New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
+# Metadata names are UTF-8 in the DLL, so a plain search of its bytes finds them.
+$selfTestNames = @(
+    'WindUpKey.SelfTest',
+    'SelfTestController',
+    'SelfTestHost',
+    'SelfTestTap',
+    'TapVerdict',
+    'CallIdleFact',
+    'RelayIdentityDiagnosis',
+    'SnapshotHookResults',
+    'SetSelfTestTap',
+    'ResidentialTerritoryIds',
+    'ISigScanner'
+)
+$shippedNames = @(
+    'CallTravelService',
+    'CallPromptWindow',
+    'CallTravelDebugLog',
+    'PendingCallBook',
+    'HousingYesnoMatcher',
+    'CallAskFirst',
+    'CallHandoffRules',
+    'QuestWindService',
+    'QuestContentCatalog',
+    'QuestDifficulty',
+    'IPartyList',
+    'SendCallAsync',
+    'AddQuestWind'
+)
+
+function Assert-DllNames {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DllPath,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Release', 'Testing')]
+        [string]$Configuration
+    )
+
+    # Latin-1 keeps one char per byte, so the ASCII names match where they are.
+    $bytes = [System.IO.File]::ReadAllBytes($DllPath)
+    $text = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)
+
+    $missing = @($shippedNames | Where-Object { -not $text.Contains($_) })
+    $unexpected = @()
+    if ($Configuration -eq 'Release') {
+        $unexpected = @($selfTestNames | Where-Object { $text.Contains($_) })
+    } else {
+        $missing += @($selfTestNames | Where-Object { -not $text.Contains($_) })
+    }
+
+    $problems = @()
+    if ($missing.Count -gt 0) { $problems += "missing: $($missing -join ', ')" }
+    if ($unexpected.Count -gt 0) { $problems += "must not contain: $($unexpected -join ', ')" }
+    if ($problems.Count -gt 0) {
+        throw "$Configuration DLL check failed ($DllPath): $($problems -join '; ')"
+    }
+
+    Write-Host "$Configuration DLL check passed ($($shippedNames.Count) shipped names present; self-test names $(if ($Configuration -eq 'Release') { 'absent' } else { 'present' }))."
+}
+
 function Pack-Channel {
     param(
         [Parameter(Mandatory = $true)]
@@ -78,6 +141,8 @@ function Pack-Channel {
             throw "Missing build output: $path"
         }
     }
+
+    Assert-DllNames -DllPath (Join-Path $outDir "WindUpKey.dll") -Configuration $Configuration
 
     $iconPath = Join-Path $outDir "images\icon.png"
     if (-not (Test-Path $iconPath)) {

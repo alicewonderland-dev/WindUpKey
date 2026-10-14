@@ -1,6 +1,6 @@
-#if WINDUP_TESTING
 using System;
 using System.Collections.Generic;
+using Dalamud.Game;
 using Dalamud.Plugin.Services;
 using Lumina.Excel.Sheets;
 
@@ -8,7 +8,7 @@ namespace WindUpKey.Quest;
 
 /// <summary>
 /// Classifies duties for daily quests. Roulette allowlist and current savage tier are
-/// resolved from Excel sheets (name match) so daily-complete flags are never used.
+/// resolved from the English Excel sheets (name match) so daily-complete flags are never used.
 /// Update <see cref="CurrentSavageNameNeedle"/> when the savage tier rotates.
 /// </summary>
 public static class QuestContentCatalog
@@ -93,7 +93,8 @@ public static class QuestContentCatalog
             return;
 
         var ids = new HashSet<uint>();
-        var sheet = data.GetExcelSheet<ContentRoulette>();
+        // 11-D4: English names on every client, so the needles match on Japanese, German and French clients.
+        var sheet = data.GetExcelSheet<ContentRoulette>(ClientLanguage.English);
         if (sheet is null)
         {
             _allowedRouletteIds = ids;
@@ -127,7 +128,8 @@ public static class QuestContentCatalog
             return;
 
         var ids = new HashSet<uint>();
-        var sheet = data.GetExcelSheet<ContentFinderCondition>();
+        // 11-D4: English, as for the roulettes (the needle is the English tier name).
+        var sheet = data.GetExcelSheet<ContentFinderCondition>(ClientLanguage.English);
         if (sheet is null)
         {
             _currentSavageCfcIds = ids;
@@ -151,4 +153,3 @@ public static class QuestContentCatalog
         _currentSavageCfcIds = ids;
     }
 }
-#endif

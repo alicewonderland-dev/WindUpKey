@@ -11,45 +11,18 @@ public sealed class ChangelogWindow : Window
 
     private static readonly ChangelogEntry[] Entries =
     [
-#if WINDUP_TESTING
         new(
-            "0.2.5.1 — Calls in housing areas (Testing)",
+            "0.2.6.0 — Calls, daily quests and safety",
             [
-                "Calls to an owner outside in a housing ward now switch from Lifestream to walking once you're close, so you no longer go past your owner and come back.",
+                "Each character now has its own relay secret. To use another PC, copy it from the Pairing tab.",
+                "Using your safeword now also pauses remote control for a while.",
+                "Being wound stands you up with the game's own emote interrupt. Doze can no longer be the unwound emote, and the unwound emote is now saved per character.",
+                "New Moodles option: re-apply your Moodles automation after every zone change.",
+                "Calls: an owner can call their doll to them. The doll needs Lifestream and vnavmesh.",
+                "A doll is asked first and can decline the Call. A Hardcore doll is not asked.",
+                "Daily quests: dolls can take an Easy, Medium or Hard quest and earn winding time from duties.",
+                "Many smaller fixes.",
             ]),
-        new(
-            "0.2.5.0 — Security and safety update (Testing)",
-            [
-                "Each character now has its own relay secret, so nobody else can pose as you on the relay. To use another PC, copy it over from the Pairing tab.",
-                "The safeword now also pauses remote control (unwind, Calls and owner settings) for its duration.",
-                "Being wound again stands you up with the game's own emote interrupt instead of a step forward. Doze can no longer be the unwound emote, and the unwound emote is now saved per character.",
-                "Calls now ask first (Hardcore excepted), can be declined, expire, and stop if the path gets stuck.",
-                "Many smaller fixes: owner grant confirmation, clearer messages when a wind doesn't go out, and safer logging.",
-            ]),
-        new(
-            "0.2.4.4 — Moodles automation after zone changes (Testing)",
-            [
-                "New option under General > Moodles: re-apply your Moodles automation after every zone change.",
-                "Automation moodles you removed come back on the next zone change instead of waiting for a job swap or relog.",
-            ]),
-        new(
-            "0.2.4.3 — Second relay host (Testing)",
-            [
-                "Added an always-on relay host as primary, with the desktop relay as standby.",
-                "Should mean fewer dropped connections when the desktop host is offline.",
-            ]),
-        new(
-            "0.2.4.2 — Relay token rotated (Testing)",
-            [
-                "Rotated the shared relay secret. Update to keep pairing and winding working.",
-            ]),
-        new(
-            "0.2.4.1 — Daily quests (Testing)",
-            [
-                "Dolls can accept Easy, Medium, or Hard daily quests for winding time from duty completions.",
-                "Quest rewards can exceed max wind hours; a new quest cannot be accepted while already above the max.",
-            ]),
-#endif
         new(
             "0.2.4.0 — Connection reliability",
             [

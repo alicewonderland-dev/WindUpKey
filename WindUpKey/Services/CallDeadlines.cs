@@ -1,4 +1,3 @@
-#if WINDUP_TESTING || WINDUP_CALL_UNITS
 using System;
 
 namespace WindUpKey.Services;
@@ -86,4 +85,3 @@ public sealed class CallDeadlines(Func<long> clock)
         return expiry;
     }
 }
-#endif

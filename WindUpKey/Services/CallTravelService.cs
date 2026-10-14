@@ -1,4 +1,3 @@
-#if WINDUP_TESTING
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -23,12 +22,14 @@ using WindUpKey.Ui;
 namespace WindUpKey.Services;
 
 /// <summary>
-/// Testing-only: answers an owner call by traveling near the owner's position via Lifestream + vnavmesh.
+/// Answers an owner call by traveling near the owner's position via Lifestream + vnavmesh.
 /// </summary>
 public sealed class CallTravelService : IDisposable
 {
-    private const string CallErrorEcho =
-        "Your owner's call encountered an error. This feature is still in testing.";
+    private const string CallErrorEcho = "Your owner's Call ran into a problem.";
+    /// <summary>11-D3: the owner gets the same Failed result; only the doll's line names the missing plugins.</summary>
+    private const string NoTravelPluginsEcho =
+        "Your owner tried to Call you. Lifestream and vnavmesh must be installed and ready to answer Calls.";
     private const float CloseRangeYalms = 2f;
     private const float ArrivedSlopYalms = 0.25f;
     /// <summary>Short final legs are quicker and more reliable on the ground, especially into housing lots.</summary>
@@ -497,7 +498,8 @@ public sealed class CallTravelService : IDisposable
         {
             ReportEdgeCaseError(
                 "request rejected: travel plugins unavailable",
-                $"terr={payload.TerritoryId} world={payload.WorldId}");
+                $"terr={payload.TerritoryId} world={payload.WorldId}",
+                NoTravelPluginsEcho);
             await SendResultOrLocalAsync(payload, CallResultStatuses.Failed, "Lifestream and vnavmesh are required.", localDebug)
                 .ConfigureAwait(false);
             return;
@@ -3000,9 +3002,9 @@ public sealed class CallTravelService : IDisposable
     /// The generic chat line, a forced log line with the location-free <paramref name="reason"/> (07-A8), and the
     /// location only in a debug line.
     /// </summary>
-    private void ReportEdgeCaseError(string reason, string? locationDetail = null)
+    private void ReportEdgeCaseError(string reason, string? locationDetail = null, string echo = CallErrorEcho)
     {
-        PluginChat.Print(_chat, CallErrorEcho, PluginChat.Yellow);
+        PluginChat.Print(_chat, echo, PluginChat.Yellow);
         DebugCall(CallLogRules.Forced($"ERROR: {reason}", _phase, PendingKind()), throttle: false, force: true);
         if (locationDetail is not null)
             DebugCall($"ERROR at: {locationDetail}", throttle: false);
@@ -3278,4 +3280,3 @@ public sealed class CallTravelService : IDisposable
         }
     }
 }
-#endif

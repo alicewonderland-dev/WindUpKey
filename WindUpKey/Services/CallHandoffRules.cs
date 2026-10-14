@@ -1,4 +1,3 @@
-#if WINDUP_TESTING || WINDUP_CALL_UNITS
 namespace WindUpKey.Services;
 
 /// <summary>
@@ -25,4 +24,3 @@ public static class CallHandoffRules
         && !casting
         && distanceToOwnerYalms <= HandoffYalms;
 }
-#endif

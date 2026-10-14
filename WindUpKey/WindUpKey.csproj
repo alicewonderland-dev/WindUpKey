@@ -1,15 +1,15 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
     <PropertyGroup>
-    <Version>0.2.4.0</Version>
+    <Version>0.2.6.0</Version>
     <Description></Description>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Configurations>Debug;Release;Testing</Configurations>
   </PropertyGroup>
 
-  <!-- Testing channel must be a higher version than Release for Dalamud to serve it. -->
+  <!-- 11-D2: Testing is the same version as Release (same commit); it adds the self-test and its diagnostics. The catalog has no Testing link. -->
   <PropertyGroup Condition="'$(Configuration)' == 'Testing'">
-    <Version>0.2.5.1</Version>
+    <Version>0.2.6.0</Version>
     <DefineConstants>$(DefineConstants);WINDUP_TESTING</DefineConstants>
   </PropertyGroup>
 
