@@ -313,11 +313,13 @@ public sealed class SafewordPauseTests
     [Fact]
     public void TheOwner_AfterAPausedSettingsChange_TheWindowShowsWhatsActuallySet()
     {
-        // 06-B3: a safeword_paused refusal of a settings change restores the last confirmed snapshot in the window.
+        // 06-B3: a safeword_paused refusal of a settings change restores the last confirmed snapshot in the window
+        // (08-T6: then re-queries the doll, keeping the message; see SmallFixesSourceTests).
         var handler = ProfileSettingsTests.MethodBody(RelayClientSource, "    private async Task HandleErrorAsync(");
         Assert.Contains(
-            "if (payload.Code == ErrorCodes.SafewordPaused)\n                    RestoreOwnerSettingsAfterRefusal(dollKey, message);\n                else\n                    SetOwnerSettingsError(dollKey, message);",
+            "if (payload.Code == ErrorCodes.SafewordPaused)\n                {\n                    var requery = !OwnerSettingsReQueryPending(dollKey);\n                    RestoreOwnerSettingsAfterRefusal(dollKey, message, keepErrorOnNextResult: true);",
             handler);
+        Assert.Contains("}\n                else\n                    SetOwnerSettingsError(dollKey, message);", handler);
 
         var restore = ProfileSettingsTests.MethodBody(RelayClientSource, "    private void RestoreOwnerSettingsAfterRefusal(");
         Assert.Contains("snap.LastError = message;", restore);

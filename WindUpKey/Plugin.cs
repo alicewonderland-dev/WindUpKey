@@ -468,7 +468,7 @@ public sealed class Plugin : IDalamudPlugin
 
             if (hasOwners)
             {
-                _ = _relay.ClearAllOwnersAsync();
+                _relay.Forget(_relay.ClearAllOwnersAsync(), "clear owners");
                 PluginChat.Print(ChatGui, "All owners cleared. Owner-locked settings are unlocked.", PluginChat.Green);
             }
 

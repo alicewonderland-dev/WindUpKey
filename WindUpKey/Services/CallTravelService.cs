@@ -858,14 +858,10 @@ public sealed class CallTravelService : IDisposable
 
     /// <summary>
     /// 07-A9: a send nobody awaits (from the tick or a UI callback). A failure is logged at Debug, never left
-    /// unobserved.
+    /// unobserved (through the shared helper since 08-P1).
     /// </summary>
     private void Forget(Task task, string what) =>
-        _ = task.ContinueWith(
-            t => _log.Debug(t.Exception?.GetBaseException(), "Call {What} failed", what),
-            CancellationToken.None,
-            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
+        FireAndForget.Run(task, ex => _log.Debug(ex, "Call {What} failed", what));
 
     /// <summary>07-A2: an ack through the gate (only a changed status, at most one every 2 s).</summary>
     private void Ack(string status)

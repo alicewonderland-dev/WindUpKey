@@ -232,7 +232,10 @@ public sealed class PresenceResultPayload
     [JsonPropertyName("online")]
     public bool Online { get; set; }
 
-    /// <summary>Set by peer when answering a forwarded query; omit on relay offline replies.</summary>
+    /// <summary>
+    /// Set only by the partner's client when answering a forwarded query (unset until its register is accepted,
+    /// 08-D15); the relay's own presence answer, online or offline, omits it.
+    /// </summary>
     [JsonPropertyName("stillPaired")]
     public bool? StillPaired { get; set; }
 }

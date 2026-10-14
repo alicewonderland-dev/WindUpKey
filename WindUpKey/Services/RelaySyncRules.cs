@@ -69,6 +69,34 @@ public static class RelaySyncRules
     }
 
     /// <summary>
+    /// 08-D15: the <c>stillPaired</c> a presence reply carries. Unset (null) until this connection's register is accepted
+    /// (its pairSync arrived): before that the local list may be empty (a second PC, a fresh install), and a
+    /// <c>false</c> from it would take a real partner off the asker's list. An asker treats null as no answer, as it
+    /// does the relay's own presence answer, which never carries <c>stillPaired</c>, online or offline. A <c>false</c>
+    /// only removes the partner on the asker's side, never on the relay (08-D19).
+    /// </summary>
+    public static bool? PresenceStillPairedAnswer(bool stillPaired, bool registerAccepted) =>
+        registerAccepted ? stillPaired : null;
+
+    /// <summary>
+    /// 08-T6 (D10): the error an owner-settings result leaves on the doll's snapshot. Normally none (the result is the
+    /// doll's current values), but the re-query after a <c>safeword_paused</c> refusal keeps the "paused" message
+    /// through its one result (<see cref="IsOwnerSettingsReQueryResult"/>).
+    /// </summary>
+    public static string? OwnerSettingsErrorAfterResult(string? previousError, bool keepErrorOnNextResult) =>
+        keepErrorOnNextResult ? previousError : null;
+
+    /// <summary>
+    /// 08-D17: whether an owner-settings result is the one the re-query after a refusal waits for: the snapshot is
+    /// marked to keep its error, and the result's RequestId is the re-query's. Any other result (an earlier query's,
+    /// say) clears the error as usual, and a re-query not yet sent (no RequestId) matches nothing.
+    /// </summary>
+    public static bool IsOwnerSettingsReQueryResult(bool keepErrorOnNextResult, string? reQueryRequestId, string? resultRequestId) =>
+        keepErrorOnNextResult
+        && !string.IsNullOrEmpty(reQueryRequestId)
+        && string.Equals(reQueryRequestId, resultRequestId, StringComparison.Ordinal);
+
+    /// <summary>
     /// Reads a remote consent or wind stamp from relay sync. False when it's missing, unreadable, or more than
     /// <see cref="SyncStamp.MaxFutureSkew"/> after this PC's clock: such a row would win last-write-wins until then,
     /// so it's treated as absent.

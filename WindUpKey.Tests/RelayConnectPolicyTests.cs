@@ -554,4 +554,24 @@ public sealed class RelayConnectPolicyTests
         Assert.Equal(RelaySessionSignal.None, RelayConnectPolicy.ClassifyClose(status, ErrorCodes.AuthFailed));
         Assert.Equal(RelaySessionSignal.None, RelayConnectPolicy.ClassifyClose(status, ErrorCodes.SessionReplaced));
     }
+
+    // ---------- 08-T5: a connection that ends without a close ----------
+
+    [Fact]
+    public void AConnectionEndingWithoutAClose_ClearsTheBindLimitStatus_OnlyInItsOwnEpoch()
+    {
+        // The receive loop's finally records "no close" (null, null) when it saw none: the rejected-host path, a dropped
+        // socket, a cancel. 05-D13: from an earlier cycle it changes nothing.
+        var policy = new RelayConnectPolicy();
+        var epoch = policy.Epoch;
+        policy.RecordClose(epoch, (System.Net.WebSockets.WebSocketCloseStatus)1013, WireCloseReasons.BindRateLimited);
+        Assert.Equal(RelayConnectPolicy.BindRateLimitedStatus, policy.CurrentCloseStatus);
+        policy.RecordClose(epoch, null, null);
+        Assert.Null(policy.CurrentCloseStatus);
+
+        policy.Reset();
+        policy.RecordClose(policy.Epoch, (System.Net.WebSockets.WebSocketCloseStatus)1013, WireCloseReasons.BindRateLimited);
+        policy.RecordClose(epoch, null, null);
+        Assert.Equal(RelayConnectPolicy.BindRateLimitedStatus, policy.CurrentCloseStatus);
+    }
 }

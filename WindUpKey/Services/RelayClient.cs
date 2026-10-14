@@ -47,6 +47,19 @@ public sealed class OwnerSettingsSnapshot
     /// change never touched.
     /// </summary>
     public long RestoreSeq { get; set; }
+
+    /// <summary>
+    /// 08-T6 (D10): set with the re-query after a <c>safeword_paused</c> refusal, so its result keeps
+    /// <see cref="LastError"/> (the "paused" message) once. Cleared by that result, another error, or an ack.
+    /// 08-D17: also cleared when the re-query isn't sent, so it can't stick and block the next re-query.
+    /// </summary>
+    internal bool KeepErrorOnNextResult { get; set; }
+
+    /// <summary>
+    /// 08-D17: the RequestId of the re-query <see cref="KeepErrorOnNextResult"/> waits for; only its result keeps the
+    /// message. Null until the re-query is sent, and cleared with the flag.
+    /// </summary>
+    internal string? ReQueryRequestId { get; set; }
 }
 
 /// <summary>
@@ -519,7 +532,7 @@ public sealed class RelayClient : IDisposable
             _presenceLastQueryUtc[key] = now;
         }
 
-        _ = RequestPresenceAsync(key);
+        Forget(RequestPresenceAsync(key), "presence query", background: true);
     }
 
     public async Task RequestPresenceAsync(string partnerKey)
@@ -1049,6 +1062,10 @@ public sealed class RelayClient : IDisposable
 
             await _framework.RunOnTick(() =>
             {
+                // 08-P2 (K3a): a tick queued before an unload never touches the config of the unloaded plugin.
+                if (_disposed)
+                    return;
+
                 if (_config.PendingPartnerKeys.RemoveAll(k =>
                         string.Equals(PairingKeyUtil.Normalize(k), partnerKey, StringComparison.Ordinal)) > 0)
                 {
@@ -1084,6 +1101,18 @@ public sealed class RelayClient : IDisposable
         if (removal is null || !IsConnected)
             return;
 
+        await SendQueuedPairRemovalAsync(removal, peerKey).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends a queued unpair of <paramref name="peerKey"/> on this connection (its <c>ownerRevoked</c> first, when it
+    /// has one), and completes it once sent on a connection whose register was accepted, for the same character.
+    /// Otherwise it stays queued and is sent again on the next connect. Started on the framework thread, which reads
+    /// the gate and the character before the first await. Used by <see cref="UnpairByKeyAsync"/>; a presence reply never
+    /// queues one (08-D19).
+    /// </summary>
+    private async Task SendQueuedPairRemovalAsync(PendingPairRemoval removal, string peerKey)
+    {
         // Sent before this connection's register was accepted, a refusing host would ignore it: then it stays queued.
         var accepted = _registerAccepted;
         var contentId = _config.ActiveContentId;
@@ -1101,6 +1130,10 @@ public sealed class RelayClient : IDisposable
 
             await _framework.RunOnTick(() =>
             {
+                // 08-P2 (K3a): nothing after an unload; the removal stays queued and is sent on the next connect.
+                if (_disposed)
+                    return;
+
                 // After a character switch it stays queued on that character, and is sent again on its next connect.
                 if (string.Equals(_config.ActiveContentId, contentId, StringComparison.Ordinal)
                     && PairRemovalQueue.Complete(_config.PendingPairRemovals, [removal]))
@@ -1219,11 +1252,39 @@ public sealed class RelayClient : IDisposable
         }
     }
 
-    public async Task QueryOwnerSettingsAsync(string dollKey)
+    public Task QueryOwnerSettingsAsync(string dollKey) => SendOwnerSettingsQueryAsync(dollKey, Guid.NewGuid().ToString("N"));
+
+    /// <summary>
+    /// 08-T6 (D10): the re-query after a <c>safeword_paused</c> refusal, started on the framework thread. 08-D17: its
+    /// RequestId is recorded before the send, so only its own result keeps the "paused" message; when it isn't sent (no
+    /// socket, a message the relay wouldn't take, or a throw) <see cref="OwnerSettingsSnapshot.KeepErrorOnNextResult"/>
+    /// is cleared, so it can't stick and keep the next refusal from asking again.
+    /// </summary>
+    private async Task ReQueryOwnerSettingsAsync(string dollKey)
+    {
+        var requestId = Guid.NewGuid().ToString("N");
+        SetOwnerSettingsReQuery(dollKey, requestId);
+        var sent = false;
+        try
+        {
+            sent = await SendOwnerSettingsQueryAsync(dollKey, requestId).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (!sent)
+                ClearOwnerSettingsReQuery(dollKey, requestId);
+        }
+    }
+
+    /// <summary>
+    /// Asks the doll for her settings under <paramref name="requestId"/>. True only when the query went out to the relay;
+    /// false for an invalid key, the debug self-owner (answered locally), no connection, or a send that didn't go out.
+    /// </summary>
+    private async Task<bool> SendOwnerSettingsQueryAsync(string dollKey, string requestId)
     {
         var key = PairingKeyUtil.Normalize(dollKey);
         if (!PairingKeyUtil.IsValid(key))
-            return;
+            return false;
 
         EnsureOwnerSettingsSlot(key);
 
@@ -1232,19 +1293,18 @@ public sealed class RelayClient : IDisposable
             && string.Equals(key, PairingKeyUtil.Normalize(_config.PairingKey), StringComparison.Ordinal))
         {
             ApplyLocalOwnerSettingsSnapshot(key);
-            return;
+            return false;
         }
 
         if (!IsConnected)
         {
             SetOwnerSettingsError(key, "Not connected yet. Try again in a moment.");
-            return;
+            return false;
         }
 
-        var requestId = Guid.NewGuid().ToString("N");
         RememberPendingOwnerRequest(requestId, key);
 
-        await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerSettingsQuery, new OwnerSettingsQueryPayload
+        return await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerSettingsQuery, new OwnerSettingsQueryPayload
         {
             RequestId = requestId,
             From = _config.PairingKey,
@@ -1372,6 +1432,20 @@ public sealed class RelayClient : IDisposable
             };
         }
     }
+
+    /// <summary>
+    /// 08-P1 (K3d, D8): a task nobody awaits, started on the caller's thread. A fault is logged at Warning for a player's
+    /// action, or at Debug for <paramref name="background"/> work (presence, the doll-state push, revoke), never left
+    /// unobserved. <paramref name="what"/> is a constant: never a key or anything else from a message (04-D10).
+    /// </summary>
+    internal void Forget(Task task, string what, bool background = false) =>
+        FireAndForget.Run(task, ex =>
+        {
+            if (background)
+                _log.Debug(ex, "WindUpKey {What} failed", what);
+            else
+                _log.Warning(ex, "WindUpKey {What} failed", what);
+        });
 
     private Task<bool> SendOwnerRevokedAsync(string ownerKey) =>
         SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerRevoked, new OwnerRevokedPayload
@@ -2065,53 +2139,67 @@ public sealed class RelayClient : IDisposable
         var pump = new RelayInboundPump(limit => _log.Warning(
             "WindUpKey discarded a relay message over {Limit} bytes; keeping the connection (logged once per connection)",
             limit));
-        while (socket.State == WebSocketState.Open && !ct.IsCancellationRequested)
+        // 08-P2 (T5): a connection that ends without a close (a rejected host returning early, a dropped socket, a
+        // cancel) still clears the last close's status for this epoch (05-D13); a close already recorded its own, which
+        // the close branch's `break` must not clear.
+        var closeSeen = false;
+        try
         {
-            var inbound = await pump.NextAsync(socket, ct).ConfigureAwait(false);
-            if (inbound.Envelope is not { } envelope)
+            while (socket.State == WebSocketState.Open && !ct.IsCancellationRequested)
             {
-#if WINDUP_TESTING
-                RecordSelfTestClose(inbound.CloseStatus, inbound.CloseDescription);
-#endif
-                // 05-D9: a close that explains itself (the first-bind limit) is shown while reconnecting; any other
-                // close clears it. 05-D13: only for this connection's own epoch, so a close read after a character
-                // switch (or login, Reconnect, import, revert) can't carry its message into the new cycle.
-                _connectPolicy.RecordClose(epoch, inbound.CloseStatus, inbound.CloseDescription);
-                // Relay refusals close with PolicyViolation; a secretless refusal sends no error first.
-                switch (RelayConnectPolicy.ClassifyClose(inbound.CloseStatus, inbound.CloseDescription))
+                var inbound = await pump.NextAsync(socket, ct).ConfigureAwait(false);
+                if (inbound.Envelope is not { } envelope)
                 {
-                    case RelaySessionSignal.Rejected:
-                        return inbound.CloseDescription;
-                    case RelaySessionSignal.SessionReplaced:
-                        await _framework.RunOnTick(ApplySessionReplaced, cancellationToken: ct)
-                            .ConfigureAwait(false);
-                        break;
+#if WINDUP_TESTING
+                    RecordSelfTestClose(inbound.CloseStatus, inbound.CloseDescription);
+#endif
+                    // 05-D9: a close that explains itself (the first-bind limit) is shown while reconnecting; any other
+                    // close clears it. 05-D13: only for this connection's own epoch, so a close read after a character
+                    // switch (or login, Reconnect, import, revert) can't carry its message into the new cycle.
+                    _connectPolicy.RecordClose(epoch, inbound.CloseStatus, inbound.CloseDescription);
+                    closeSeen = true;
+                    // Relay refusals close with PolicyViolation; a secretless refusal sends no error first.
+                    switch (RelayConnectPolicy.ClassifyClose(inbound.CloseStatus, inbound.CloseDescription))
+                    {
+                        case RelaySessionSignal.Rejected:
+                            return inbound.CloseDescription;
+                        case RelaySessionSignal.SessionReplaced:
+                            await _framework.RunOnTick(ApplySessionReplaced, cancellationToken: ct)
+                                .ConfigureAwait(false);
+                            break;
+                    }
+
+                    break;
                 }
 
-                break;
-            }
-
 #if WINDUP_TESTING
-            // 04-D6: the self-test's replies never reach normal handling, so no chat line can appear; a partner's presence
-            // answer to a self-test query is only observed, and still handled below.
-            if (SelfTestTap.Inspect(_selfTestTap, envelope) == TapVerdict.Consume)
-                continue;
+                // 04-D6: the self-test's replies never reach normal handling, so no chat line can appear; a partner's
+                // presence answer to a self-test query is only observed, and still handled below.
+                if (SelfTestTap.Inspect(_selfTestTap, envelope) == TapVerdict.Consume)
+                    continue;
 #endif
 
-            // Socket IO and parsing the envelope stay on this worker (03-D10); all plugin/config/game state is applied
-            // on Dalamud's framework thread so lock hooks cannot change at an unsafe time.
-            // 06-A9: a message is for the connection (epoch) and character it arrived on. A switch closes this socket,
-            // but a message already queued here would still run in the next tick, so it is checked again when handled
-            // and dropped once the active character or the connect cycle has changed: it never applies to another one.
-            await _framework.RunOnTick(
-                    () => RelayConnectPolicy.InboundStillCurrent(epoch, profile, _connectPolicy.Epoch, _config.ActiveContentId)
-                        ? HandleMessageAsync(envelope, ct)
-                        : DropStaleInbound(),
-                    cancellationToken: ct)
-                .ConfigureAwait(false);
+                // Socket IO and parsing the envelope stay on this worker (03-D10); all plugin/config/game state is
+                // applied on Dalamud's framework thread so lock hooks cannot change at an unsafe time.
+                // 06-A9: a message is for the connection (epoch) and character it arrived on. A switch closes this
+                // socket, but a message already queued here would still run in the next tick, so it is checked again
+                // when handled and dropped once the active character or the connect cycle has changed: it never applies
+                // to another one.
+                await _framework.RunOnTick(
+                        () => RelayConnectPolicy.InboundStillCurrent(epoch, profile, _connectPolicy.Epoch, _config.ActiveContentId)
+                            ? HandleMessageAsync(envelope, ct)
+                            : DropStaleInbound(),
+                        cancellationToken: ct)
+                    .ConfigureAwait(false);
 
-            if (_registerRejection is { } rejected)
-                return rejected;
+                if (_registerRejection is { } rejected)
+                    return rejected;
+            }
+        }
+        finally
+        {
+            if (!closeSeen)
+                _connectPolicy.RecordClose(epoch, null, null);
         }
 
         return _registerRejection;
@@ -2425,8 +2513,17 @@ public sealed class RelayClient : IDisposable
                                 ? SafewordPausedFailure
                                 : GenericOwnerSettingsFailure;
                 // 06-B3: after a pause refused a change, the window shows what's actually set, not the refused values.
+                // 08-T6 (D10): the last confirmed values may be stale (another owner may have changed them since), so
+                // the doll is asked again; she still answers queries while paused (06-B). Its result keeps the message.
+                // At most one re-query waits at a time, so a refusal of the re-query itself (only a modified client
+                // would send one) can't start a query-refusal loop.
                 if (payload.Code == ErrorCodes.SafewordPaused)
-                    RestoreOwnerSettingsAfterRefusal(dollKey, message);
+                {
+                    var requery = !OwnerSettingsReQueryPending(dollKey);
+                    RestoreOwnerSettingsAfterRefusal(dollKey, message, keepErrorOnNextResult: true);
+                    if (requery)
+                        Forget(ReQueryOwnerSettingsAsync(dollKey), "owner settings re-query", background: true);
+                }
                 else
                     SetOwnerSettingsError(dollKey, message);
                 _notifier.NotifyWinderError(message);
@@ -2748,7 +2845,7 @@ public sealed class RelayClient : IDisposable
         if (Interlocked.Exchange(ref _dollStatePushQueued, 1) == 1)
             return;
 
-        _ = PushDollStateAsync();
+        Forget(PushDollStateAsync(), "doll-state push", background: true);
     }
 
     private async Task PushDollStateAsync()
@@ -2764,6 +2861,10 @@ public sealed class RelayClient : IDisposable
             // Config and chat belong to the framework thread.
             var payload = await _framework.RunOnTick(() =>
                 {
+                    // 08-P2 (K3a): nothing after an unload.
+                    if (_disposed)
+                        return null;
+
                     var windStampReset = ResetFutureLocalSyncStamps();
                     EnsureLocalSyncStamps(stampWind: !windStampReset);
                     return BuildDollStatePushPayload();
@@ -2912,7 +3013,7 @@ public sealed class RelayClient : IDisposable
         var wasOwner = _config.FindPairByKey(peerKey) is { IsOwner: true };
         SilentRemovePartner(peerKey);
         if (wasOwner && IsConnected)
-            _ = SendOwnerRevokedAsync(peerKey);
+            Forget(SendOwnerRevokedAsync(peerKey), "owner revoke", background: true);
     }
 
     private async Task HandleInboundPresenceQueryAsync(Envelope envelope, CancellationToken ct)
@@ -2934,7 +3035,8 @@ public sealed class RelayClient : IDisposable
             From = _config.PairingKey,
             To = fromKey,
             Online = true,
-            StillPaired = stillPaired,
+            // 08-D15: unset until this connection's pairSync arrived; the local list may not be loaded from it yet.
+            StillPaired = RelaySyncRules.PresenceStillPairedAnswer(stillPaired, _registerAccepted),
         }), ct).ConfigureAwait(false);
     }
 
@@ -2950,6 +3052,11 @@ public sealed class RelayClient : IDisposable
 
         SetPresence(peerKey, payload.Online ? PartnerPresence.Online : PartnerPresence.Offline);
 
+        // 08-D19: removed here only; the relay keeps the pair, so the next pairSync brings the partner back until their own
+        // queued unpair lands. Never an unpair on the relay: released clients (0.1.2.0 to 0.2.0.1) never sync their pair
+        // list, so on a second PC or after a reinstall they answer false to every query. stillPaired is only ever sent by
+        // the partner's client (unset until its register is accepted, 08-D15); the relay's own answer, online or
+        // offline, leaves it unset.
         if (payload.StillPaired == false)
             SilentRemovePartner(peerKey);
     }
@@ -3198,19 +3305,26 @@ public sealed class RelayClient : IDisposable
 
         lock (_ownerSettingsLock)
         {
+            // 08-T6: the result of the re-query after a refusal keeps the "paused" message, and a new RestoreSeq makes
+            // the Owner window take these values into its draft. 08-D17: only the re-query's own result (by RequestId);
+            // any result replaces the snapshot, so it also clears the flag.
+            _ownerSettingsByDollKey.TryGetValue(dollKey, out var previous);
+            var keepError = RelaySyncRules.IsOwnerSettingsReQueryResult(
+                previous is { KeepErrorOnNextResult: true }, previous?.ReQueryRequestId, payload.RequestId);
             _ownerSettingsByDollKey[dollKey] = new OwnerSettingsSnapshot
             {
                 DollKey = dollKey,
                 MaxWindHours = payload.MaxWindHours,
                 AutoGroundSit = payload.AutoGroundSit,
-                LockEmoteId = payload.LockEmoteId == 0 ? (ushort)52 : payload.LockEmoteId,
+                LockEmoteId = payload.LockEmoteId == 0 ? CharacterProfile.GroundSitEmoteId : payload.LockEmoteId,
                 SettingsLocked = payload.SettingsLocked,
                 // 03-D12: named from this client's own Emote sheet by ID; the doll's names only as a sanitised fallback.
                 Emotes = RelayWireRules.ResolveOwnerEmotes(payload.Emotes, _commands.GetEmoteName),
                 CanCall = payload.CanCall,
                 TravelReady = payload.TravelReady,
-                LastError = null,
+                LastError = RelaySyncRules.OwnerSettingsErrorAfterResult(previous?.LastError, keepError),
                 HasData = true,
+                RestoreSeq = keepError ? ++_ownerSettingsRestoreSeq : 0,
             };
         }
     }
@@ -3237,9 +3351,11 @@ public sealed class RelayClient : IDisposable
 
             existing.MaxWindHours = payload.MaxWindHours;
             existing.AutoGroundSit = payload.AutoGroundSit;
-            existing.LockEmoteId = payload.LockEmoteId == 0 ? (ushort)52 : payload.LockEmoteId;
+            existing.LockEmoteId = payload.LockEmoteId == 0 ? CharacterProfile.GroundSitEmoteId : payload.LockEmoteId;
             existing.SettingsLocked = payload.SettingsLocked;
             existing.LastError = null;
+            existing.KeepErrorOnNextResult = false;
+            existing.ReQueryRequestId = null;
             existing.HasData = true;
         }
 
@@ -3297,6 +3413,9 @@ public sealed class RelayClient : IDisposable
             }
 
             snap.LastError = message;
+            // 08-T6: a newer error replaces the "paused" message; the next result doesn't keep it.
+            snap.KeepErrorOnNextResult = false;
+            snap.ReQueryRequestId = null;
         }
     }
 
@@ -3304,8 +3423,9 @@ public sealed class RelayClient : IDisposable
     /// 06-B3: the doll refused a settings change because her safeword paused remote control. Only a result or an ack
     /// changes the snapshot, so it still holds the last confirmed values; a new <see cref="OwnerSettingsSnapshot.RestoreSeq"/>
     /// makes the Owner window drop the refused values from its draft and show these again.
+    /// 08-T6: <paramref name="keepErrorOnNextResult"/> when a re-query follows, so its result keeps the message.
     /// </summary>
-    private void RestoreOwnerSettingsAfterRefusal(string dollKey, string message)
+    private void RestoreOwnerSettingsAfterRefusal(string dollKey, string message, bool keepErrorOnNextResult = false)
     {
         lock (_ownerSettingsLock)
         {
@@ -3317,7 +3437,46 @@ public sealed class RelayClient : IDisposable
 
             snap.LastError = message;
             snap.RestoreSeq = ++_ownerSettingsRestoreSeq;
+            snap.KeepErrorOnNextResult = keepErrorOnNextResult;
+            // 08-D17: a re-query already waiting keeps its RequestId; a new one records its own when it's sent.
+            if (!keepErrorOnNextResult)
+                snap.ReQueryRequestId = null;
         }
+    }
+
+    /// <summary>08-D17: the re-query about to be sent; only its result keeps the "paused" message.</summary>
+    private void SetOwnerSettingsReQuery(string dollKey, string requestId)
+    {
+        lock (_ownerSettingsLock)
+        {
+            if (_ownerSettingsByDollKey.TryGetValue(dollKey, out var snap) && snap.KeepErrorOnNextResult)
+                snap.ReQueryRequestId = requestId;
+        }
+    }
+
+    /// <summary>
+    /// 08-D17: the re-query <paramref name="requestId"/> wasn't sent, so no result will clear the flag: clear it here,
+    /// with the one-at-a-time guard it is (<see cref="OwnerSettingsReQueryPending"/>). The "paused" message stays.
+    /// Nothing changes when a newer error, ack or result already replaced it.
+    /// </summary>
+    private void ClearOwnerSettingsReQuery(string dollKey, string requestId)
+    {
+        lock (_ownerSettingsLock)
+        {
+            if (!_ownerSettingsByDollKey.TryGetValue(dollKey, out var snap)
+                || !string.Equals(snap.ReQueryRequestId, requestId, StringComparison.Ordinal))
+                return;
+
+            snap.KeepErrorOnNextResult = false;
+            snap.ReQueryRequestId = null;
+        }
+    }
+
+    /// <summary>08-T6: whether a re-query after an earlier refusal is still waiting for its result.</summary>
+    private bool OwnerSettingsReQueryPending(string dollKey)
+    {
+        lock (_ownerSettingsLock)
+            return _ownerSettingsByDollKey.TryGetValue(dollKey, out var snap) && snap.KeepErrorOnNextResult;
     }
 
     private void ClearOwnerSettings(string dollKey)
@@ -3591,11 +3750,16 @@ public sealed class RelayClient : IDisposable
     }
 #endif
 
+    /// <summary>
+    /// Never blocks the framework thread (08-D6): no wait on the loop task or a send. Ticks queued before this check
+    /// <see cref="_disposed"/> and do nothing.
+    /// </summary>
     public void Dispose()
     {
         _disposed = true;
         _timer.DollWindChanged = null;
         Stop();
-        _sendLock.Dispose();
+        // 08-P2 (K3a): _sendLock isn't disposed, so a send still finishing in the background can release it without an
+        // ObjectDisposedException. A SemaphoreSlim whose AvailableWaitHandle is never read holds nothing unmanaged.
     }
 }

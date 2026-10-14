@@ -117,10 +117,11 @@ public class Configuration : IPluginConfiguration
 
     /// <summary>
     /// Emote sheet row played while unwound when <see cref="AutoGroundSit"/> is on.
-    /// Default 52 = Ground Sit. 0 is treated as Ground Sit for old configs.
+    /// Default <see cref="CharacterProfile.GroundSitEmoteId"/> (52, Ground Sit; 08-T7). 0 is treated as Ground Sit for
+    /// old configs.
     /// 06-A1: per character, mirrored like <see cref="AutoGroundSit"/>.
     /// </summary>
-    public ushort LockEmoteId { get; set; } = 52;
+    public ushort LockEmoteId { get; set; } = CharacterProfile.GroundSitEmoteId;
 
     /// <summary>Resolved lock emote id (0 → Ground Sit).</summary>
     public ushort EffectiveLockEmoteId => LockEmoteId == 0 ? CharacterProfile.GroundSitEmoteId : LockEmoteId;

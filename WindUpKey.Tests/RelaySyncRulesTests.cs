@@ -16,6 +16,47 @@ public sealed class RelaySyncRulesTests
 
     // ---------- 02-D3 and 02-D18: presence replies ----------
 
+    // ---------- 08-T6 (D10): the re-query after a safeword refusal keeps the "paused" message once ----------
+
+    [Fact]
+    public void OwnerSettingsResult_ClearsTheError_UnlessTheReQueryKeepsIt()
+    {
+        Assert.Null(RelaySyncRules.OwnerSettingsErrorAfterResult("That doll is offline.", keepErrorOnNextResult: false));
+        Assert.Null(RelaySyncRules.OwnerSettingsErrorAfterResult(null, keepErrorOnNextResult: false));
+        const string paused = "That doll has paused remote control for now.";
+        Assert.Equal(paused, RelaySyncRules.OwnerSettingsErrorAfterResult(paused, keepErrorOnNextResult: true));
+        Assert.Null(RelaySyncRules.OwnerSettingsErrorAfterResult(null, keepErrorOnNextResult: true));
+    }
+
+    [Theory]
+    [InlineData(true, "req1", "req1", true)]
+    [InlineData(true, "req1", "req2", false)]
+    [InlineData(true, "req1", null, false)]
+    [InlineData(true, null, "req1", false)]
+    [InlineData(true, null, null, false)]
+    [InlineData(true, "", "", false)]
+    [InlineData(false, "req1", "req1", false)]
+    public void OwnerSettingsResult_KeepsTheError_OnlyForTheReQuerysOwnRequestId(
+        bool keepErrorOnNextResult, string? reQueryRequestId, string? resultRequestId, bool expected)
+    {
+        // 08-D17: an earlier query's result (another RequestId), or one before the re-query was sent, clears it.
+        Assert.Equal(expected, RelaySyncRules.IsOwnerSettingsReQueryResult(keepErrorOnNextResult, reQueryRequestId, resultRequestId));
+    }
+
+    // ---------- 08-D15: a presence answer leaves stillPaired unset until the register is accepted ----------
+
+    [Theory]
+    [InlineData(true, true, true)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, null)]
+    [InlineData(false, false, null)]
+    public void PresenceAnswer_LeavesStillPairedUnset_UntilTheRegisterIsAccepted(bool stillPaired, bool registerAccepted, bool? expected)
+    {
+        // Before this connection's pairSync the local list may be empty (a second PC, a fresh install): a false from it
+        // would take a real partner off the asker's list (only there: never on the relay, 08-D19).
+        Assert.Equal(expected, RelaySyncRules.PresenceStillPairedAnswer(stillPaired, registerAccepted));
+    }
+
     [Fact]
     public void Presence_FromAPartner_IsAnsweredStillPaired()
     {

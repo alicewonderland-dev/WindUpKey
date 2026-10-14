@@ -70,7 +70,7 @@ public sealed class ConfigWindow : Window, IDisposable
     {
         public double MaxHours = 72;
         public bool AutoSit = true;
-        public ushort EmoteId = 52;
+        public ushort EmoteId = CharacterProfile.GroundSitEmoteId;
         public bool Locked;
         public bool Synced;
         public long RestoreSeq;
@@ -461,7 +461,8 @@ public sealed class ConfigWindow : Window, IDisposable
         {
             var key = _pairKeyDraft;
             _pairKeyDraft = string.Empty;
-            _ = _relay.SubmitPairKeyAsync(key);
+            // 08-P1: a send nobody awaits goes through Forget, so a failure is logged rather than left unobserved.
+            _relay.Forget(_relay.SubmitPairKeyAsync(key), "pair submit");
         }
 
         if (_config.PendingPartnerKeys.Count > 0)
@@ -480,7 +481,7 @@ public sealed class ConfigWindow : Window, IDisposable
             }
 
             if (cancelPendingKey is not null)
-                _ = _relay.CancelPendingPairAsync(cancelPendingKey);
+                _relay.Forget(_relay.CancelPendingPairAsync(cancelPendingKey), "pair cancel");
         }
 
         if (_config.PairedPartners.Count > 0)
@@ -534,11 +535,11 @@ public sealed class ConfigWindow : Window, IDisposable
                     if (!hasValidPartnerKey)
                         ImGui.BeginDisabled();
                     DrawWindHourButtons(
-                        hours => _ = _relay.SendWindByKeyAsync(actionPartnerKey, hours),
+                        hours => _relay.Forget(_relay.SendWindByKeyAsync(actionPartnerKey, hours), "wind"),
                         smallButtons: true);
 
                     if (ImGui.SmallButton("Unwind"))
-                        _ = _relay.SendUnwindByKeyAsync(actionPartnerKey);
+                        _relay.Forget(_relay.SendUnwindByKeyAsync(actionPartnerKey), "unwind");
 
                     if (_config.IsDoll)
                     {
@@ -549,7 +550,7 @@ public sealed class ConfigWindow : Window, IDisposable
                         if (!requestAvailable)
                             ImGui.BeginDisabled();
                         if (ImGui.SmallButton("Request winding"))
-                            _ = _relay.SendWindRequestAsync(actionPartnerKey);
+                            _relay.Forget(_relay.SendWindRequestAsync(actionPartnerKey), "wind request");
                         if (!requestAvailable)
                             ImGui.EndDisabled();
 
@@ -584,7 +585,7 @@ public sealed class ConfigWindow : Window, IDisposable
                         ImGui.PushStyleColor(ImGuiCol.ButtonActive, dangerActive);
                         if (ImGui.Button("Confirm", new Vector2(100, 0)))
                         {
-                            _ = _relay.UnpairByKeyAsync(actionPartnerKey);
+                            _relay.Forget(_relay.UnpairByKeyAsync(actionPartnerKey), "unpair");
                             ImGui.CloseCurrentPopup();
                             i--;
                         }
@@ -661,7 +662,7 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.Spacing();
         if (ImGui.Button("Confirm", new Vector2(100, 0)))
         {
-            _ = _relay.GrantOwnerAsync(partnerKey);
+            _relay.Forget(_relay.GrantOwnerAsync(partnerKey), "owner grant");
             _ownerConfirm = null;
             _ownerConfirmError = null;
             ImGui.CloseCurrentPopup();
@@ -1028,7 +1029,7 @@ public sealed class ConfigWindow : Window, IDisposable
             return;
 
         _ownerDrafts[dollKey] = new OwnerSettingsDraft();
-        _ = _relay.QueryOwnerSettingsAsync(dollKey);
+        _relay.Forget(_relay.QueryOwnerSettingsAsync(dollKey), "owner settings query");
     }
 
     private void DrawPairOwnerWindow(string dollKey, string partnerKey)
@@ -1055,7 +1056,7 @@ public sealed class ConfigWindow : Window, IDisposable
         if (ImGui.Button("Refresh settings"))
         {
             draft.Synced = false;
-            _ = _relay.QueryOwnerSettingsAsync(dollKey);
+            _relay.Forget(_relay.QueryOwnerSettingsAsync(dollKey), "owner settings query");
         }
 
         if (snap is not { HasData: true })
@@ -1075,7 +1076,7 @@ public sealed class ConfigWindow : Window, IDisposable
         {
             draft.MaxHours = snap.MaxWindHours;
             draft.AutoSit = snap.AutoGroundSit;
-            draft.EmoteId = snap.LockEmoteId == 0 ? (ushort)52 : snap.LockEmoteId;
+            draft.EmoteId = snap.LockEmoteId == 0 ? CharacterProfile.GroundSitEmoteId : snap.LockEmoteId;
             draft.Locked = snap.SettingsLocked;
             draft.Synced = true;
             draft.RestoreSeq = snap.RestoreSeq;
@@ -1291,7 +1292,7 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.BeginDisabled();
 
         if (ImGui.Button("Call"))
-            _ = _relay.SendCallAsync(dollKey);
+            _relay.Forget(_relay.SendCallAsync(dollKey), "call");
 
         if (!enabled)
             ImGui.EndDisabled();
@@ -1326,13 +1327,15 @@ public sealed class ConfigWindow : Window, IDisposable
 
     private void PushOwnerSettings(string dollKey, OwnerSettingsDraft draft, bool notify = true)
     {
-        _ = _relay.UpdateOwnerSettingsAsync(
-            dollKey,
-            maxWindHours: draft.MaxHours,
-            autoGroundSit: draft.AutoSit,
-            lockEmoteId: draft.EmoteId,
-            settingsLocked: draft.Locked,
-            notify: notify);
+        _relay.Forget(
+            _relay.UpdateOwnerSettingsAsync(
+                dollKey,
+                maxWindHours: draft.MaxHours,
+                autoGroundSit: draft.AutoSit,
+                lockEmoteId: draft.EmoteId,
+                settingsLocked: draft.Locked,
+                notify: notify),
+            "owner settings update");
     }
 
     private static bool DrawOwnerLockToggle(bool locked)
@@ -1361,7 +1364,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
     private void DrawOwnerEmoteCombo(IReadOnlyList<(ushort Id, string Name)> emotes, ref ushort emoteId)
     {
-        var selectedId = emoteId == 0 ? (ushort)52 : emoteId;
+        var selectedId = emoteId == 0 ? CharacterProfile.GroundSitEmoteId : emoteId;
         var selectedInList = TryFindEmoteName(emotes, selectedId, out var selectedName);
         if (!selectedInList)
             selectedName = _commands.GetEmoteName(selectedId) ?? $"Emote {selectedId}";
@@ -1786,12 +1789,12 @@ public sealed class ConfigWindow : Window, IDisposable
             hours =>
             {
                 if (EnsureDebugSelfPair(canWind: true, canUnwind: false))
-                    _ = _relay.SendWindByKeyAsync(_config.PairingKey, hours);
+                    _relay.Forget(_relay.SendWindByKeyAsync(_config.PairingKey, hours), "debug self-wind");
             },
             smallButtons: false);
 
         if (ImGui.Button("Unwind") && EnsureDebugSelfPair(canWind: false, canUnwind: true))
-            _ = _relay.SendUnwindByKeyAsync(_config.PairingKey);
+            _relay.Forget(_relay.SendUnwindByKeyAsync(_config.PairingKey), "debug self-unwind");
     }
 
     /// <summary>

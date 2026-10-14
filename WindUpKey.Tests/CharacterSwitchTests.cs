@@ -353,8 +353,8 @@ public sealed class CharacterSwitchTests
         var loop = ProfileSettingsTests.MethodBody(client, "private async Task<string?> ReceiveLoopAsync(");
         Assert.Contains(
             "RelayConnectPolicy.InboundStillCurrent(epoch, profile, _connectPolicy.Epoch, _config.ActiveContentId)\n"
-            + "                        ? HandleMessageAsync(envelope, ct)\n"
-            + "                        : DropStaleInbound(),",
+            + "                            ? HandleMessageAsync(envelope, ct)\n"
+            + "                            : DropStaleInbound(),",
             loop);
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(client, @"HandleMessageAsync\(envelope, ct\)"));
         Assert.Contains("profile = _config.ActiveContentId;", client);

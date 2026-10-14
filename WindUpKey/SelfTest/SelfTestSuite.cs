@@ -446,7 +446,9 @@ public sealed class SelfTestSuite(ISelfTestHost host, IProbeConnector connector,
                     "locks were suspended, but the plugin is unloading or logged out, so it didn't reconnect; the hold is lifted", ct)
                 .ConfigureAwait(false) is { } notReconnected)
             return [notReconnected];
-        var back = await WaitForAcceptedAsync(before.AcceptedConnections, ct).ConfigureAwait(false);
+        // 08-D13: a session_replaced after this verb's own Start() is someone else taking over, not a reconnect that
+        // didn't happen, so it doesn't stop the wait here; the restore reports it, as before 08.
+        var (back, _) = await WaitForAcceptedAsync(before, stopOnTakeover: false, ct).ConfigureAwait(false);
         if (back is not { } reconnected)
             return [CheckResult.LoudFail(id, $"locks were suspended after {suspendedAfter.TotalSeconds:0} s, but the client didn't reconnect within {_t.Reconnect.TotalSeconds:0} s: the relay may really be down. {ReconnectRecovery}")];
         return reconnected.ShouldSuspendMovementLocks
@@ -478,7 +480,12 @@ public sealed class SelfTestSuite(ISelfTestHost host, IProbeConnector connector,
         var close = ProbeJudge.Limit(id, new ProbeOutcome(ProbeOutcomeKind.Closed, CloseStatus: state.LastCloseStatus, CloseDescription: state.LastCloseDescription),
             WebSocketCloseStatus.MessageTooBig, WireCloseReasons.MessageTooBig, retried: true).Result;
 
-        var back = await WaitForAcceptedAsync(before.AcceptedConnections, ct).ConfigureAwait(false);
+        // 08-P4 (T3): a session_replaced (or auth block) that arrives only after the close stops the wait too, and is
+        // reported once instead of an extra "didn't reconnect" FAIL. 08-D13: only here, where the self-test hasn't
+        // reconnected itself, so the client really won't come back by itself.
+        var (back, lateRisk) = await WaitForAcceptedAsync(before, stopOnTakeover: true, ct).ConfigureAwait(false);
+        if (lateRisk is not null)
+            return [TakeoverFail(id, lateRisk)];
         if (back is null)
             return [close, CheckResult.LoudFail(id, $"the client didn't reconnect within {_t.Reconnect.TotalSeconds:0} s after the 1009 close. {ReconnectRecovery}")];
         return close.Status == CheckStatus.Pass
@@ -490,24 +497,33 @@ public sealed class SelfTestSuite(ISelfTestHost host, IProbeConnector connector,
     {
         if (await TryReconnectAsync(id, before, liftOutageHold: false, "the plugin is unloading or logged out, so nothing was changed", ct).ConfigureAwait(false) is { } notReconnected)
             return [notReconnected];
-        return await WaitForAcceptedAsync(before.AcceptedConnections, ct).ConfigureAwait(false) is not null
+        // 08-D13: as in the outage, a session_replaced after this Start() is someone else's takeover; the restore reports it.
+        var (back, _) = await WaitForAcceptedAsync(before, stopOnTakeover: false, ct).ConfigureAwait(false);
+        return back is not null
             ? [CheckResult.Pass(id, "the Reconnect path reconnected, and the register was accepted")]
             : [CheckResult.Fail(id, $"no accepted reconnect within {_t.Reconnect.TotalSeconds:0} s")];
     }
 
-    /// <summary>A newer accepted connection that is open, or null within <see cref="SelfTestTimings.Reconnect"/>.</summary>
-    private async Task<RelayLiveState?> WaitForAcceptedAsync(int acceptedBefore, CancellationToken ct)
+    /// <summary>
+    /// A newer accepted connection than <paramref name="before"/>'s that is open, or neither within
+    /// <see cref="SelfTestTimings.Reconnect"/>. 08-P4 (T3): with <paramref name="stopOnTakeover"/>, stops as soon as
+    /// <see cref="TakeoverRisk"/> appears, with the risk, since the client then waits for the user and won't reconnect by
+    /// itself. 08-D13: only the oversize step asks for that; after the verb's own Start(), a takeover is someone else's.
+    /// </summary>
+    private async Task<(RelayLiveState? Accepted, string? Risk)> WaitForAcceptedAsync(RelayLiveState before, bool stopOnTakeover, CancellationToken ct)
     {
         var watch = Stopwatch.StartNew();
         while (watch.Elapsed <= _t.Reconnect)
         {
             var state = await host.StateAsync(ct).ConfigureAwait(false);
-            if (state.Connected && state.RegisterAccepted && state.AcceptedConnections > acceptedBefore)
-                return state;
+            if (stopOnTakeover && TakeoverRisk(before, state) is { } risk)
+                return (null, risk);
+            if (state.Connected && state.RegisterAccepted && state.AcceptedConnections > before.AcceptedConnections)
+                return (state, null);
             await Task.Delay(_t.Poll, ct).ConfigureAwait(false);
         }
 
-        return null;
+        return (null, null);
     }
 
     /// <summary>
@@ -515,13 +531,15 @@ public sealed class SelfTestSuite(ISelfTestHost host, IProbeConnector connector,
     /// register, take the Reconnect path and wait for it. After an unload or a logout (04-D10) it only lifts the hold:
     /// the next login starts the relay again, and an unloaded plugin stays stopped. After a <c>session_replaced</c> or a
     /// new auth block during the verb (04-D11) it also only lifts the hold, and reports a loud FAIL: reconnecting would
-    /// re-register with the real secret and take the key from the other PC.
+    /// re-register with the real secret and take the key from the other PC. 08-P4 (T4): the hold is lifted only after the
+    /// state is read, so a reconnect lifts it in the same framework tick as <c>Start()</c> (04-D12) and the connect loop
+    /// can't register once more in between; the controller's <c>finally</c> still lifts it if that tick never runs.
     /// </summary>
     private async Task<bool> RestoreAsync(string id, RelayLiveState before, CancellationToken ct)
     {
-        await host.SetOutageHoldAsync(false, ct).ConfigureAwait(false);
         if (!host.ReconnectAllowed)
         {
+            await host.SetOutageHoldAsync(false, ct).ConfigureAwait(false);
             Runner.Add(CheckResult.Info("X-restore", "the hold was lifted; no reconnect, as the plugin is unloading or logged out"));
             return true;
         }
@@ -529,14 +547,19 @@ public sealed class SelfTestSuite(ISelfTestHost host, IProbeConnector connector,
         var state = await host.StateAsync(ct).ConfigureAwait(false);
         if (TakeoverRisk(before, state) is { } risk)
         {
+            await host.SetOutageHoldAsync(false, ct).ConfigureAwait(false);
             if (!_takeoverReported)
                 Runner.Add(TakeoverFail(id, risk));
             return true;
         }
 
         if (state.Connected && state.RegisterAccepted)
+        {
+            await host.SetOutageHoldAsync(false, ct).ConfigureAwait(false);
             return true;
-        await host.ReconnectAsync(before, liftOutageHold: false, ct).ConfigureAwait(false);
+        }
+
+        await host.ReconnectAsync(before, liftOutageHold: true, ct).ConfigureAwait(false);
         var watch = Stopwatch.StartNew();
         while (watch.Elapsed <= _t.Reconnect)
         {

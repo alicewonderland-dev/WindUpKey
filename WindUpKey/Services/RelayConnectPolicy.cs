@@ -417,7 +417,8 @@ public sealed class RelayConnectPolicy
 
     /// <summary>
     /// What the relay's last close explained in the current cycle (05-D9), shown while reconnecting; null when it
-    /// explained nothing, or once a register is accepted, the host can't be reached, or the cycle is reset.
+    /// explained nothing, or once a register is accepted, the host can't be reached, a connection ends without a close
+    /// (08-T5), or the cycle is reset.
     /// </summary>
     public string? CurrentCloseStatus
     {

@@ -164,6 +164,13 @@ public sealed class SelfTestSuiteTests
         public bool AuthBlockOnOversize;
         public bool SessionReplacedDuringHold;
 
+        /// <summary>
+        /// 08-T3: a <c>session_replaced</c> that arrives late, after the 1009 close: the state that shows the close
+        /// doesn't have it yet, the next one does (so the verb is already waiting for the reconnect).
+        /// </summary>
+        public bool SessionReplacedAfterOversizeClose;
+        private int _statesSinceClose;
+
         public ISelfTestLink Link => this;
 
         public Task<SessionSnapshot> SnapshotAsync(CancellationToken ct)
@@ -284,6 +291,8 @@ public sealed class SelfTestSuiteTests
             lock (_gate)
             {
                 var suspended = _heldFor is { } held && held.Elapsed >= SuspendAfter;
+                if (SessionReplacedAfterOversizeClose && CloseCount > 0 && ++_statesSinceClose == 2)
+                    SessionReplacedSeen++;
                 return Task.FromResult(new RelayLiveState(Connected, Connected && Accepted, AcceptedConnections, suspended, AuthBlocked,
                     SessionReplacedSeen, CloseCount, LastCloseStatus, LastCloseDescription));
             }
@@ -674,6 +683,11 @@ public sealed class SelfTestSuiteTests
         var session = suite.Runner.Results.Last(r => r.Id == "X-session");
         Assert.True(session.Status == CheckStatus.Warn, $"{session.Status}: {session.Reason}");
         Assert.Contains("session_replaced", session.Reason);
+        // 08-D13: the session_replaced came after the verb's own reconnect, so the step itself still passes, as before
+        // 08 (the restore then reports the takeover); it isn't turned into the step's own takeover FAIL.
+        var step = suite.Runner.Results.First(r => r.Id == "V-reconnect");
+        Assert.True(step is { Status: CheckStatus.Pass }, $"{step.Status}: {step.Reason}");
+        Assert.Equal("the Reconnect path reconnected, and the register was accepted", step.Reason);
 
         var clean = new SelfTestSuite(new FakeHost(), new FakeRelay("Bind"), new FakeRelay("Bind"), Fast);
         await clean.RunVerbAsync(SelfTestTier.Reconnect, CancellationToken.None).WaitAsync(Wait);
@@ -727,6 +741,57 @@ public sealed class SelfTestSuiteTests
         Assert.False(host.Hold);
         var takeover = Assert.Single(suite.Runner.Results, r => r.Reason.Contains("press Reconnect in the Pairing tab yourself"));
         Assert.True(takeover is { Id: "01-9", Status: CheckStatus.Fail, Loud: true }, takeover.Reason);
+    }
+
+    [Fact]
+    public async Task ASessionReplacedArrivingAfterTheOversizeClose_StopsTheWait_AndIsOneFail()
+    {
+        // 08-T3: the takeover shows up only while the verb waits for the reconnect. The wait stops at once and reports
+        // it (setting _takeoverReported), so neither "didn't reconnect" nor the restore adds a second FAIL.
+        var host = new FakeHost { SessionReplacedAfterOversizeClose = true, ReconnectWorks = false };
+        var suite = new SelfTestSuite(host, new FakeRelay("Bind"), new FakeRelay("Bind"), Fast with { Reconnect = TimeSpan.FromSeconds(20) });
+        await suite.RunVerbAsync(SelfTestTier.Oversize, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+
+        var fail = Assert.Single(suite.Runner.Results, r => r.Status == CheckStatus.Fail);
+        Assert.True(fail is { Id: "03-2", Loud: true }, fail.Reason);
+        Assert.Contains("session_replaced", fail.Reason);
+        Assert.Contains("press Reconnect in the Pairing tab yourself", fail.Reason);
+        Assert.DoesNotContain(suite.Runner.Results, r => r.Reason.Contains("didn't reconnect"));
+        Assert.Equal(0, host.ReconnectCalls);
+        Assert.False(host.Hold);
+    }
+
+    [Fact]
+    public async Task ASessionReplacedAfterTheOutagesOwnReconnect_KeepsTheStepsResult()
+    {
+        // 08-D13: only the oversize step stops its wait on a takeover. After the outage's own Start(), a session_replaced
+        // is someone else taking over: the step's result stays what it was before 08, and the restore reports it once.
+        var host = new FakeHost { SessionReplacedOnReconnect = true };
+        var suite = new SelfTestSuite(host, new FakeRelay("Bind"), new FakeRelay("Bind"), Fast);
+        await suite.RunVerbAsync(SelfTestTier.Outage, CancellationToken.None).WaitAsync(Wait);
+
+        var results = suite.Runner.Results.Where(r => r.Id == "01-9" && r.Status != CheckStatus.Info).ToList();
+        Assert.True(results is [{ Status: CheckStatus.Pass }, { Status: CheckStatus.Fail, Loud: true }],
+            string.Join(" | ", results.Select(r => $"{r.Status}: {r.Reason}")));
+        Assert.StartsWith("locks suspended after", results[0].Reason);
+        Assert.Contains("session_replaced", results[1].Reason);
+        Assert.Equal(1, host.ReconnectCalls);
+    }
+
+    [Fact]
+    public async Task AnOutageRestore_LiftsTheHoldInTheSameTickAsStart()
+    {
+        // 08-T4: the verb failed before its own reconnect, so the restore reconnects, lifting the hold in that tick
+        // (04-D12) rather than in a separate one first, which let the connect loop register once more in between.
+        var host = new FakeHost { SuspendAfter = TimeSpan.Zero };
+        var suite = new SelfTestSuite(host, new FakeRelay("Bind"), new FakeRelay("Bind"), Fast);
+        await suite.RunVerbAsync(SelfTestTier.Outage, CancellationToken.None).WaitAsync(Wait);
+
+        Assert.Equal(CheckStatus.Fail, ById(suite)["01-9"].Status);
+        Assert.Equal(["hold", "lift+start"], host.HoldEvents);
+        Assert.Equal(1, host.ReconnectCalls);
+        Assert.False(host.Hold);
+        Assert.True(host.Connected);
     }
 
     [Fact]

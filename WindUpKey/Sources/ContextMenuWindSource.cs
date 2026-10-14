@@ -122,12 +122,13 @@ public sealed class ContextMenuWindSource : IWindUpSource
 
     private void StartWind(string identity, double hours)
     {
-        _ = SendWindSafeAsync(identity, hours);
+        // 08-P1: already catches its own failures; wrapped too so no send is ever left unobserved.
+        _relay.Forget(SendWindSafeAsync(identity, hours), "context-menu wind");
     }
 
     private void StartUnwind(string identity)
     {
-        _ = SendUnwindSafeAsync(identity);
+        _relay.Forget(SendUnwindSafeAsync(identity), "context-menu unwind");
     }
 
     private async Task SendWindSafeAsync(string identity, double hours)

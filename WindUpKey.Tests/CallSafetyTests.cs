@@ -1588,7 +1588,9 @@ public sealed class CallSafetyTests
         Assert.Equal(11, Regex.Matches(source, @"\bForget\((FinishAsync|AckAsync|RequestAsync)\(").Count);
         var forget = ProfileSettingsTests.MethodBody(source, "    private void Forget(Task task, string what)");
         Assert.Contains("_log.Debug(", forget);
-        Assert.Contains("TaskContinuationOptions.OnlyOnFaulted", forget);
+        // 08-P1: through the shared helper.
+        Assert.Contains("FireAndForget.Run(task,", forget);
+        Assert.Contains("TaskContinuationOptions.OnlyOnFaulted", ProfileSettingsTests.PluginSource(Path.Combine("Services", "FireAndForget.cs")));
     }
 
     // ---------- self-test (04, read-only) ----------
