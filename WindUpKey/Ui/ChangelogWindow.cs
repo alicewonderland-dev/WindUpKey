@@ -13,6 +13,15 @@ public sealed class ChangelogWindow : Window
     [
 #if WINDUP_TESTING
         new(
+            "0.2.5.0 — Security and safety update (Testing)",
+            [
+                "Each character now has its own relay secret, so nobody else can pose as you on the relay. To use another PC, copy it over from the Pairing tab.",
+                "The safeword now also pauses remote control (unwind, Calls and owner settings) for its duration.",
+                "Being wound again stands you up with the game's own emote interrupt instead of a step forward. Doze can no longer be the unwound emote, and the unwound emote is now saved per character.",
+                "Calls now ask first (Hardcore excepted), can be declined, expire, and stop if the path gets stuck.",
+                "Many smaller fixes: owner grant confirmation, clearer messages when a wind doesn't go out, and safer logging.",
+            ]),
+        new(
             "0.2.4.4 — Moodles automation after zone changes (Testing)",
             [
                 "New option under General > Moodles: re-apply your Moodles automation after every zone change.",
