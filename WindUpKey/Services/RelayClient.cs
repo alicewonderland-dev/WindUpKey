@@ -845,7 +845,29 @@ public sealed class RelayClient : IDisposable
         };
 
         RememberPendingWind(payload.RequestId, hours);
-        await SendEnvelopeAsync(Envelope.Create(MessageTypes.Wind, payload), CancellationToken.None);
+        // 09-K5: a wind that didn't go out (no open socket, over the limit, or a throw, which still reaches Forget's
+        // log) gets no reply, so its pending entry goes and the winder is told, on the framework thread.
+        var sent = false;
+        try
+        {
+            sent = await SendEnvelopeAsync(Envelope.Create(MessageTypes.Wind, payload), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            if (!sent)
+            {
+                Forget(_framework.RunOnTick(() =>
+                {
+                    // 08-P2 (K3a): nothing after an unload.
+                    if (_disposed)
+                        return;
+
+                    TryTakePendingWind(payload.RequestId, out _);
+                    _notifier.NotifyWinderError("Not connected yet. Try again in a moment.");
+                }), "wind send result", background: true);
+            }
+        }
     }
 
     public TimeSpan WindRequestCooldownRemaining
@@ -898,7 +920,12 @@ public sealed class RelayClient : IDisposable
             PercentRemaining = percent,
         };
 
-        _config.LastWindRequestUtc = DateTimeOffset.UtcNow;
+        // 09-K4: the cooldown still starts before the send, so a double click can't send twice. A send that doesn't go
+        // out gives it back below, only while it is still this stamp on this character.
+        var previous = _config.LastWindRequestUtc;
+        var stamp = DateTimeOffset.UtcNow;
+        var contentId = _config.ActiveContentId;
+        _config.LastWindRequestUtc = stamp;
         _config.Save();
         lock (_pendingWindLock)
         {
@@ -906,9 +933,42 @@ public sealed class RelayClient : IDisposable
             _pendingWindRequestIds.Add(payload.RequestId);
         }
 
-        await SendEnvelopeAsync(Envelope.Create(MessageTypes.WindRequest, payload), CancellationToken.None)
-            .ConfigureAwait(false);
-        PluginChat.Print(_chat, "Your request for additional winding was sent.", PluginChat.Yellow);
+        var sent = false;
+        try
+        {
+            sent = await SendEnvelopeAsync(Envelope.Create(MessageTypes.WindRequest, payload), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            // 09-K4: chat and config belong to the framework thread. A throw counts as unsent and still reaches
+            // Forget's log.
+            Forget(_framework.RunOnTick(() =>
+            {
+                // 08-P2 (K3a): nothing after an unload.
+                if (_disposed)
+                    return;
+
+                if (sent)
+                {
+                    PluginChat.Print(_chat, "Your request for additional winding was sent.", PluginChat.Yellow);
+                    return;
+                }
+
+                // Nothing went out, so no reply comes for it. After a character switch, or under a newer stamp, the
+                // cooldown now set is left alone. (Qualified: this class's own WindRequestCooldown is the hour.)
+                lock (_pendingWindLock)
+                    _pendingWindRequestIds.Remove(payload.RequestId);
+                if (Services.WindRequestCooldown.ShouldRollBack(
+                        _config.LastWindRequestUtc, _config.ActiveContentId, stamp, contentId))
+                {
+                    _config.LastWindRequestUtc = previous;
+                    _config.Save();
+                }
+
+                _notifier.NotifyWinderError("Unable to send that winding request.");
+            }), "wind request result", background: true);
+        }
     }
 
     public async Task SendUnwindAsync(string targetIdentity)
@@ -977,7 +1037,28 @@ public sealed class RelayClient : IDisposable
             To = toKey,
         };
 
-        await SendEnvelopeAsync(Envelope.Create(MessageTypes.Unwind, payload), CancellationToken.None);
+        // 09-K5: an unwind that didn't go out (no open socket, over the limit, or a throw, which still reaches Forget's
+        // log) is told to the winder, on the framework thread.
+        var sent = false;
+        try
+        {
+            sent = await SendEnvelopeAsync(Envelope.Create(MessageTypes.Unwind, payload), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            if (!sent)
+            {
+                Forget(_framework.RunOnTick(() =>
+                {
+                    // 08-P2 (K3a): nothing after an unload.
+                    if (_disposed)
+                        return;
+
+                    _notifier.NotifyWinderError("Not connected yet. Try again in a moment.");
+                }), "unwind send result", background: true);
+            }
+        }
     }
 
     public async Task SubmitPairKeyAsync(string theirKeyRaw)

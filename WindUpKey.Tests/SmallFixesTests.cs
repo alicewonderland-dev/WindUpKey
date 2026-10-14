@@ -112,6 +112,10 @@ public sealed class SmallFixesSourceTests
     [InlineData("    public async Task CancelPendingPairAsync(")]
     [InlineData("    private async Task SendQueuedPairRemovalAsync(")]
     [InlineData("    private async Task PushDollStateAsync(")]
+    // 09-K4, 09-K5: the send results.
+    [InlineData("    public async Task SendWindByKeyAsync(")]
+    [InlineData("    public async Task SendUnwindByKeyAsync(")]
+    [InlineData("    public async Task SendWindRequestAsync(")]
     public void TicksWithoutAToken_DoNothingAfterDispose(string signature)
     {
         // These ticks take no cancellation token, so one queued before an unload can still run after it.
