@@ -13,6 +13,11 @@ public sealed class ChangelogWindow : Window
     [
 #if WINDUP_TESTING
         new(
+            "0.2.5.1 — Calls in housing areas (Testing)",
+            [
+                "Calls to an owner outside in a housing ward now switch from Lifestream to walking once you're close, so you no longer go past your owner and come back.",
+            ]),
+        new(
             "0.2.5.0 — Security and safety update (Testing)",
             [
                 "Each character now has its own relay secret, so nobody else can pose as you on the relay. To use another PC, copy it over from the Pairing tab.",
