@@ -10,3 +10,6 @@ WindUpRelay/
 
 # Holds the real relay token (see WindUpKey/RelaySecrets.cs.example); never commit it.
 WindUpKey/RelaySecrets.cs
+
+# Changelog drafts for the Discord webhook (deploy/Post-Changelog.ps1); kept out of the public repo.
+private/
