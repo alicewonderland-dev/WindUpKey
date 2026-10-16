@@ -12,6 +12,13 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.6.1 — Moodle fix and Discord link",
+            [
+                "The wind charge Moodle is now off by default for new installs. Your current setting is kept.",
+                "Fixed the wind charge Moodle staying visible to others after you turned it off or became a Winder.",
+                "The About tab has a Discord button.",
+            ]),
+        new(
             "0.2.6.0 — Calls, daily quests and safety",
             [
                 "Each character now has its own relay secret. To use another PC, copy it from the Pairing tab.",
