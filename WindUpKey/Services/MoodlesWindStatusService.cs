@@ -74,6 +74,9 @@ public sealed class MoodlesWindStatusService : IDisposable
     /// <summary>06-A12: Moodles' Ready asked for the status to be applied again; the next <see cref="SyncDesiredState"/> does.</summary>
     private bool _forceApplyPending;
 
+    /// <summary>Whether the last <see cref="SyncDesiredState"/> wanted the status (on, a doll); losing it asks for a clear.</summary>
+    private bool _wasWanted;
+
     /// <summary>06-A3: Moodles assemblies that have unloaded, held weakly so they can be collected; rebinding skips them.</summary>
     private readonly List<WeakReference<Assembly>> _unloadedAssemblies = [];
 
@@ -179,6 +182,9 @@ public sealed class MoodlesWindStatusService : IDisposable
             HandleIpcSignals();
             // 06-A3: a login tries again at once, whatever the backoff.
             _gate.ResetBackoff();
+            // A permanent wind moodle from an earlier session (status since turned off, or now a winder) stays visible
+            // to others; one clear per login removes it. Acts only while the status isn't wanted.
+            _gate.RequestClear();
             SyncDesiredState(forceApply: true, skipIfPresent: true);
         }
         catch (Exception ex)
@@ -256,6 +262,8 @@ public sealed class MoodlesWindStatusService : IDisposable
         _moodlesAvailable = false;
         _gate.OnMoodlesReady();
         _forceApplyPending = true;
+        // Moodles loaded after the login's clear found it unavailable: clear a leftover now (only if not wanted).
+        _gate.RequestClear();
     }
 
     /// <summary>06-A3: drops every cached reflection handle, including the assembly itself.</summary>
@@ -360,6 +368,12 @@ public sealed class MoodlesWindStatusService : IDisposable
             _forceApplyPending = false;
             forceApply = true;
         }
+
+        // Turned off by any path, or the role changed (switched to winder, remote settings): ask for the clear below.
+        var wanted = _config.MoodlesStatusEnabled && _config.IsDoll;
+        if (_wasWanted && !wanted)
+            _gate.RequestClear();
+        _wasWanted = wanted;
 
         // 06-A13: turned off in the UI: one probe and clear, even of a status we don't remember applying.
         if (_gate.TakeClearRequest(_config.MoodlesStatusEnabled, _config.IsDoll, _clientState.IsLoggedIn))

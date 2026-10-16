@@ -130,8 +130,9 @@ public class Configuration : IPluginConfiguration
     /// <summary>
     /// When true (doll), apply a no-timer Moodles status for coarse wind charge.
     /// Requires Moodles with remote apply enabled; partners see it via their sync plugin.
+    /// Off by default, since others see it: a doll opts in. Existing configs keep their saved value.
     /// </summary>
-    public bool MoodlesStatusEnabled { get; set; } = true;
+    public bool MoodlesStatusEnabled { get; set; }
 
     /// <summary>
     /// When true, re-run Moodles' own automation after each area change. Moodles only runs it

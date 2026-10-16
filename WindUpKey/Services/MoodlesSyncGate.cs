@@ -33,12 +33,14 @@ public enum MoodlesStep
 /// the caller passes the clock (UTC now).
 /// <list type="bullet">
 /// <item>Nothing is probed unless the status is wanted (<see cref="Configuration.MoodlesStatusEnabled"/>, a doll,
-/// logged in), so a winder, a doll who turned it off, or anyone without Moodles never calls into it.</item>
+/// logged in), so a winder, a doll who turned it off, or anyone without Moodles calls into it only for the one clear
+/// per login (or turn-off) below.</item>
 /// <item>While Moodles is unavailable, it is probed at most every <see cref="ProbeInterval"/>.</item>
 /// <item>After an apply (or reflection rebind) that failed, the next attempt waits <see cref="FirstBackoff"/>, doubling
 /// up to <see cref="MaxBackoff"/>. Moodles' Ready, a login and a change of level start again at once.</item>
-/// <item>06-A13: the doll turning the status off in the UI asks for one probe and clear on the next tick
-/// (<see cref="RequestClear"/>, <see cref="TakeClearRequest"/>), so a leftover permanent wind moodle doesn't stay.</item>
+/// <item>06-A13: the status stopping being wanted (turned off, the role changed), a login, or Moodles' Ready asks for
+/// one probe and clear on the next tick while it isn't wanted (<see cref="RequestClear"/>, <see cref="TakeClearRequest"/>),
+/// so a leftover permanent wind moodle, which Moodles keeps across sessions and others see, doesn't stay.</item>
 /// </list>
 /// Framework thread only (not thread-safe), except <see cref="RequestClear"/>.
 /// </summary>
@@ -122,21 +124,25 @@ public sealed class MoodlesSyncGate
         _nextApplyUtc = null;
     }
 
-    /// <summary>06-A13: the doll turned the status off in the UI. Only sets a flag (any thread).</summary>
+    /// <summary>
+    /// 06-A13: the status stopped being wanted (turned off, the role changed) or may have been left over (a login,
+    /// Moodles' Ready). Only sets a flag (any thread).
+    /// </summary>
     public void RequestClear() => _clearRequested = true;
 
     /// <summary>
     /// 06-A13: whether this tick does the one probe and clear asked for by <see cref="RequestClear"/>. Each request is
-    /// taken once, and acts only if the status is still off for a logged-in doll: turned back on, the normal sync takes
-    /// over; not a doll or not logged in, there is nothing of ours to clear. Nothing else probes while it stays off.
+    /// taken once, and acts only if the status isn't wanted (off, or not a doll): wanted, the normal sync takes over. A
+    /// permanent wind moodle outlives the session and the role, so a winder clears a leftover one too. Logged out, the
+    /// request waits for the login instead of being dropped. Nothing else probes while the status stays unwanted.
     /// </summary>
     public bool TakeClearRequest(bool statusEnabled, bool isDoll, bool loggedIn)
     {
-        if (!_clearRequested)
+        if (!_clearRequested || !loggedIn)
             return false;
 
         _clearRequested = false;
-        return !statusEnabled && isDoll && loggedIn;
+        return !(statusEnabled && isDoll);
     }
 
     /// <summary>Moodles announced it is ready: probe and try again at once.</summary>

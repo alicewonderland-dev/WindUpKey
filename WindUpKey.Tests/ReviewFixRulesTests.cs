@@ -246,18 +246,71 @@ public sealed class ReviewFixRulesTests
         Assert.False(gate.TakeClearRequest(statusEnabled: false, isDoll: true, loggedIn: true));
     }
 
-    [Theory]
-    [InlineData(true, true, true)]
-    [InlineData(false, false, true)]
-    [InlineData(false, true, false)]
-    public void Moodles_TheClearRequest_IsDroppedUnlessStillOffForALoggedInDoll(bool enabled, bool isDoll, bool loggedIn)
+    [Fact]
+    public void Moodles_TheClearRequest_IsDroppedWhenTheStatusIsWantedAgain()
     {
-        // Turned back on before the tick: the normal sync takes over. Not a doll, or logged out: nothing of ours to clear.
+        // Turned back on for a doll before the tick: the normal sync takes over.
         var gate = new MoodlesSyncGate();
         gate.RequestClear();
 
-        Assert.False(gate.TakeClearRequest(enabled, isDoll, loggedIn));
+        Assert.False(gate.TakeClearRequest(statusEnabled: true, isDoll: true, loggedIn: true));
         Assert.False(gate.TakeClearRequest(statusEnabled: false, isDoll: true, loggedIn: true));
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    public void Moodles_AWinder_ClearsALeftoverWindMoodle(bool enabled, bool isDoll)
+    {
+        // A permanent wind moodle outlives the role: a doll who became a winder still has it, and others see it.
+        var gate = new MoodlesSyncGate();
+        gate.RequestClear();
+
+        Assert.True(gate.TakeClearRequest(enabled, isDoll, loggedIn: true));
+        Assert.False(gate.TakeClearRequest(enabled, isDoll, loggedIn: true));
+    }
+
+    [Fact]
+    public void Moodles_TheClearRequest_WaitsForTheLogin()
+    {
+        // Turned off while logged out: kept until the login instead of dropped, so the leftover is still cleared.
+        var gate = new MoodlesSyncGate();
+        gate.RequestClear();
+
+        Assert.False(gate.TakeClearRequest(statusEnabled: false, isDoll: true, loggedIn: false));
+        Assert.False(gate.TakeClearRequest(statusEnabled: false, isDoll: true, loggedIn: false));
+        Assert.True(gate.TakeClearRequest(statusEnabled: false, isDoll: true, loggedIn: true));
+        Assert.False(gate.TakeClearRequest(statusEnabled: false, isDoll: true, loggedIn: true));
+    }
+
+    [Fact]
+    public void Moodles_ALoginOrReadyOrLosingTheStatus_AsksForAClear()
+    {
+        var service = ProfileSettingsTests.PluginSource(Path.Combine("Services", "MoodlesWindStatusService.cs"));
+
+        var login = ProfileSettingsTests.MethodBody(service, "    public void OnLoggedIn()");
+        var request = login.IndexOf("_gate.RequestClear();", StringComparison.Ordinal);
+        var sync = login.IndexOf("SyncDesiredState(", StringComparison.Ordinal);
+        Assert.True(request >= 0 && sync > request, "a login doesn't ask for a clear before syncing");
+
+        var signals = ProfileSettingsTests.MethodBody(service, "    private void HandleIpcSignals()");
+        var ready = signals[signals.IndexOf("_readyPending = false;", StringComparison.Ordinal)..];
+        Assert.Contains("_gate.RequestClear();", ready);
+
+        var syncBody = ProfileSettingsTests.MethodBody(service, "    private void SyncDesiredState(");
+        Assert.Contains("var wanted = _config.MoodlesStatusEnabled && _config.IsDoll;\n        if (_wasWanted && !wanted)\n            _gate.RequestClear();", syncBody);
+        Assert.True(
+            syncBody.IndexOf("_wasWanted = wanted;", StringComparison.Ordinal)
+            < syncBody.IndexOf("_gate.TakeClearRequest(", StringComparison.Ordinal),
+            "losing the status isn't noticed before the clear request is taken");
+    }
+
+    [Fact]
+    public void Moodles_TheStatus_IsOptIn()
+    {
+        // Others see the wind moodle through their sync plugin, so a new config doesn't show it.
+        var config = ProfileSettingsTests.PluginSource("Configuration.cs");
+        Assert.Contains("    public bool MoodlesStatusEnabled { get; set; }\n", config);
     }
 
     [Fact]
