@@ -21,6 +21,7 @@
     <Content Include="Sounds\**\*.wav" CopyToOutputDirectory="PreserveNewest" />
     <!-- Dalamud loads local/DevPlugin icons from images/icon.png next to the DLL. -->
     <Content Include="..\key.png" Link="images\icon.png" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="images\discord-symbol.png" LogicalName="WindUpKey.discord-symbol.png" />
   </ItemGroup>
 
   <!-- Swap in the testing-branded manifest for Testing packs (same InternalName). -->

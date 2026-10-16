@@ -23,7 +23,11 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly MoodlesWindStatusService _moodlesStatus;
     private readonly string _lowWindMessagesPath;
     private readonly ChangelogWindow _changelogWindow;
+    private readonly ITextureProvider _textures;
     private readonly string _pluginVersion;
+
+    /// <summary>The Discord's invite (shared with LookingGlass), opened by the Discord button on the About tab.</summary>
+    private const string DiscordInvite = "https://discord.gg/WY6hPnrNJ3";
     private readonly Dictionary<string, string> _pairLabelDrafts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, OwnerSettingsDraft> _ownerDrafts = new(StringComparer.Ordinal);
     private string _pairKeyDraft = string.Empty;
@@ -80,6 +84,7 @@ public sealed class ConfigWindow : Window, IDisposable
         MoodlesWindStatusService moodlesStatus,
         string lowWindMessagesPath,
         ChangelogWindow changelogWindow,
+        ITextureProvider textures,
         string pluginVersion)
         : base("Wind-Up Key###WindUpKeyConfig")
     {
@@ -92,6 +97,7 @@ public sealed class ConfigWindow : Window, IDisposable
         _moodlesStatus = moodlesStatus;
         _lowWindMessagesPath = lowWindMessagesPath;
         _changelogWindow = changelogWindow;
+        _textures = textures;
         _pluginVersion = pluginVersion;
         Size = new Vector2(520, 480);
         SizeCondition = ImGuiCond.FirstUseEver;
@@ -187,7 +193,12 @@ public sealed class ConfigWindow : Window, IDisposable
     private void DrawAboutTab()
     {
         ImGui.Spacing();
+        var right = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
+        ImGui.AlignTextToFramePadding();
         ImGui.TextUnformatted("Wind-Up Key");
+        ImGui.SameLine(right - ImGui.GetFrameHeight());
+        if (DiscordButton())
+            Dalamud.Utility.Util.OpenLink(DiscordInvite);
         ImGui.TextDisabled($"Version {_pluginVersion}");
         ImGui.Separator();
         ImGui.Spacing();
@@ -198,6 +209,28 @@ public sealed class ConfigWindow : Window, IDisposable
 
         if (ImGui.Button("Change Log"))
             _changelogWindow.IsOpen = true;
+    }
+
+    /// <summary>A square button with no background until hovered, showing the embedded Discord icon (as in LookingGlass).</summary>
+    private bool DiscordButton()
+    {
+        ImGui.PushStyleColor(ImGuiCol.Button, Vector4.Zero);
+        var clicked = ImGui.Button("##discord", new Vector2(ImGui.GetFrameHeight()));
+        ImGui.PopStyleColor();
+
+        var texture = _textures.GetFromManifestResource(typeof(ConfigWindow).Assembly, "WindUpKey.discord-symbol.png");
+        if (texture.TryGetWrap(out var wrap, out _) && wrap.Width > 0 && wrap.Height > 0)
+        {
+            var height = ImGui.GetFontSize();
+            var fitted = new Vector2(height * wrap.Width / wrap.Height, height);
+            var min = (ImGui.GetItemRectMin() + ImGui.GetItemRectMax() - fitted) / 2;
+            ImGui.GetWindowDrawList().AddImage(wrap.Handle, min, min + fitted);
+        }
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Join the Discord");
+
+        return clicked;
     }
 
     private void DrawRoleSetup()

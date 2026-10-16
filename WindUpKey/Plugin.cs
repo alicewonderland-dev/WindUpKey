@@ -41,6 +41,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IUnlockState UnlockState { get; private set; } = null!;
     [PluginService] internal static IDutyState DutyState { get; private set; } = null!;
     [PluginService] internal static IPlayerState PlayerState { get; private set; } = null!;
+    [PluginService] internal static ITextureProvider Textures { get; private set; } = null!;
 #if WINDUP_TESTING
     /// <summary>04-D8: the self-test resolves hook signatures with it, without installing a hook.</summary>
     [PluginService] internal static ISigScanner SigScanner { get; private set; } = null!;
@@ -178,6 +179,7 @@ public sealed class Plugin : IDalamudPlugin
             _moodlesStatus,
             lowWindMessages.FilePath,
             _changelogWindow,
+            Textures,
             PluginInterface.Manifest.AssemblyVersion.ToString());
         _windowSystem.AddWindow(_configWindow);
         _windowSystem.AddWindow(_changelogWindow);
