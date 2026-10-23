@@ -52,6 +52,10 @@ public sealed class LowWindWarningService
     /// <summary>Call each framework tick. Fires only on a downward cross of a random trigger.</summary>
     public void Tick()
     {
+        // Vacation: the wind is frozen, so there is nothing to warn about (and its stale expiry must not read as expired).
+        if (_config.IsOnVacation)
+            return;
+
         ForgetOtherProfile();
         if (!TryGetRemaining(out var remaining))
         {
@@ -104,6 +108,10 @@ public sealed class LowWindWarningService
     /// </summary>
     public void OnLoggedIn()
     {
+        // Vacation: frozen wind, and a stale expiry that would read as draining.
+        if (_config.IsOnVacation)
+            return;
+
         ForgetOtherProfile();
         if (!TryGetRemaining(out var remaining) || remaining > HighMax)
             return;
@@ -154,7 +162,7 @@ public sealed class LowWindWarningService
     /// <summary>After AddHours: re-arm / mark past silently — never print remaining.</summary>
     public void OnWindChanged()
     {
-        if (!_config.IsDoll)
+        if (!_config.IsDoll || _config.IsOnVacation)
             return;
 
         ForgetOtherProfile();

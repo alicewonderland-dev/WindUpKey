@@ -62,6 +62,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly MoodlesWindStatusService _moodlesStatus;
     private readonly CallPromptWindow _callPrompt;
     private readonly UnwindConfirmWindow _unwindConfirm;
+    private readonly DiscordPromptWindow _discordPrompt;
     private readonly CallTravelService _callTravel;
 #if WINDUP_TESTING
     private readonly SelfTestController _selfTest;
@@ -112,7 +113,7 @@ public sealed class Plugin : IDalamudPlugin
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
         var quests = new QuestBoardService(
-            Configuration, _timer, DutyState, DataManager, ClientState, Condition, Framework, PlayerState, ChatGui, Log);
+            Configuration, _timer, DutyState, DataManager, ClientState, Condition, Framework, PlayerState, PartyList, ChatGui, Log);
         _relay = new RelayClient(
             Configuration, ClientState, ObjectTable, Condition, Framework, Log, ChatGui, DataManager, PluginInterface, _consent, _timer, _notifier, _sounds, commands);
         _moodlesStatus = new MoodlesWindStatusService(
@@ -187,6 +188,8 @@ public sealed class Plugin : IDalamudPlugin
         _windowSystem.AddWindow(_callPrompt);
         _unwindConfirm = new UnwindConfirmWindow(_relay);
         _windowSystem.AddWindow(_unwindConfirm);
+        _discordPrompt = new DiscordPromptWindow(Configuration, Textures);
+        _windowSystem.AddWindow(_discordPrompt);
         quests.GrantSprings = (lines, requestId) => _relay.Forget(_relay.SendSpringGrantAsync(lines, requestId), "quest springs");
         _relay.SpringGrantSettled = quests.OnSpringGrantSettled;
         quests.CanGrantSprings = () => _relay.IsConnected && _relay.SpringBalance is not null;
@@ -291,6 +294,8 @@ public sealed class Plugin : IDalamudPlugin
         phaseStart = Stopwatch.GetTimestamp();
         _relay.TickCallTravel();
         _unwindConfirm.Sync();
+        // After the role is chosen, so it never sits on top of the first-time setup.
+        _discordPrompt.Sync(ClientState.IsLoggedIn && Configuration.HasChosenRole);
         RecordSlowestPhase("call-travel", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
 #if WINDUP_TESTING
         _selfTest.Tick();

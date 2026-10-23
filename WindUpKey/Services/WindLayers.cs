@@ -194,6 +194,23 @@ public readonly record struct WindLayers(double Normal, double Quest, double Pla
         return this with { Normal = Normal + moved, Player = Player - moved };
     }
 
+    /// <summary>
+    /// Vacation: the layers exactly as stored, moved to <paramref name="now"/> with nothing drained, and a break's end moved
+    /// on by the time since <see cref="AsOf"/>, so the time it had left is kept too.
+    /// </summary>
+    public WindLayers Frozen(DateTimeOffset now)
+    {
+        var paused = now > AsOf ? now - AsOf : TimeSpan.Zero;
+        return this with
+        {
+            Normal = Math.Max(0, Normal),
+            Quest = Math.Max(0, Quest),
+            Player = Math.Max(0, Player),
+            AsOf = now,
+            BrokenUntil = BrokenUntil is { } until ? until + paused : null,
+        };
+    }
+
     /// <summary>A repair: the break ends now, and the wind carries on from where it was.</summary>
     public WindLayers Repair(DateTimeOffset now) => At(now) with { BrokenUntil = null };
 }

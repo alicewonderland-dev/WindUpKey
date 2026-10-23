@@ -338,6 +338,22 @@ public sealed class PairSyncPayload
     /// <summary>The wind layers stored with the expiry (protocol 6; absent when the row has none).</summary>
     [JsonPropertyName("layers")]
     public WindLayersWire? Layers { get; set; }
+
+    /// <summary>The doll's vacation state as stored (see <see cref="VacationWire"/>); absent when never set.</summary>
+    [JsonPropertyName("vacation")]
+    public VacationWire? Vacation { get; set; }
+}
+
+/// <summary>A doll's vacation mode, merged last-write-wins by <see cref="UpdatedUtc"/>.</summary>
+public sealed class VacationWire
+{
+    /// <summary>When vacation mode began (ISO-8601), or null when it is off.</summary>
+    [JsonPropertyName("sinceUtc")]
+    public string? SinceUtc { get; set; }
+
+    /// <summary>When it was last turned on or off (ISO-8601).</summary>
+    [JsonPropertyName("updatedUtc")]
+    public string? UpdatedUtc { get; set; }
 }
 
 /// <summary>One directed consent record from a doll toward a peer.</summary>
@@ -382,6 +398,10 @@ public sealed class DollStatePushPayload
     /// <summary>The wind layers, merged with the expiry under <see cref="WindUpdatedUtc"/> (protocol 6).</summary>
     [JsonPropertyName("layers")]
     public WindLayersWire? Layers { get; set; }
+
+    /// <summary>Vacation mode, merged by its own stamp; null leaves the relay's unchanged.</summary>
+    [JsonPropertyName("vacation")]
+    public VacationWire? Vacation { get; set; }
 }
 
 /// <summary>Offline store-and-forward status for a requestId-bearing message.</summary>
@@ -433,6 +453,10 @@ public sealed class PresenceResultPayload
     /// </summary>
     [JsonPropertyName("stillPaired")]
     public bool? StillPaired { get; set; }
+
+    /// <summary>The partner is a doll on vacation (set by the relay from its record, and by the doll itself); null when unknown.</summary>
+    [JsonPropertyName("vacation")]
+    public bool? Vacation { get; set; }
 }
 
 /// <summary>Doll designates the recipient as an owner.</summary>
@@ -790,6 +814,12 @@ public static class ErrorCodes
 
     /// <summary>Relay → sender: the quest springs for today are used up, or the grant was a replay.</summary>
     public const string GrantRefused = "grant_refused";
+
+    /// <summary>
+    /// Relay or doll → sender: the doll (or the sender, when they are a doll) is on vacation, so winds, unwinds,
+    /// repairs, gifts and quest springs are refused; nothing is spent.
+    /// </summary>
+    public const string OnVacation = "on_vacation";
 
     /// <summary>
     /// Session-level codes only the relay may send. The relay drops routed errors with these codes,

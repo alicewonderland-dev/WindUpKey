@@ -120,7 +120,7 @@ public sealed class ReviewFixRulesTests
         Assert.Contains("private void OnMoodlesUnloading() => _unloadPending = true;", service);
 
         var sync = ProfileSettingsTests.MethodBody(service, "    private void SyncDesiredState(");
-        var gateIndex = sync.IndexOf("_gate.Next(_config.MoodlesStatusEnabled, _config.IsDoll, _clientState.IsLoggedIn,", StringComparison.Ordinal);
+        var gateIndex = sync.IndexOf("_gate.Next(enabled, _config.IsDoll, _clientState.IsLoggedIn,", StringComparison.Ordinal);
         var probeIndex = sync.IndexOf("TryProbeMoodles()", StringComparison.Ordinal);
         Assert.True(gateIndex >= 0 && probeIndex > gateIndex, "SyncDesiredState probes before checking the settings");
         Assert.Contains("if (step == MoodlesStep.Probe)\n            TryProbeMoodles();", sync);
@@ -298,7 +298,8 @@ public sealed class ReviewFixRulesTests
         Assert.Contains("_gate.RequestClear();", ready);
 
         var syncBody = ProfileSettingsTests.MethodBody(service, "    private void SyncDesiredState(");
-        Assert.Contains("var wanted = _config.MoodlesStatusEnabled && _config.IsDoll;\n        if (_wasWanted && !wanted)\n            _gate.RequestClear();", syncBody);
+        // Vacation counts as off: the wind moodles go while the doll is away.
+        Assert.Contains("var enabled = _config.MoodlesStatusEnabled && !_config.IsOnVacation;\n        var wanted = enabled && _config.IsDoll;\n        if (_wasWanted && !wanted)\n            _gate.RequestClear();", syncBody);
         Assert.True(
             syncBody.IndexOf("_wasWanted = wanted;", StringComparison.Ordinal)
             < syncBody.IndexOf("_gate.TakeClearRequest(", StringComparison.Ordinal),
@@ -321,7 +322,7 @@ public sealed class ReviewFixRulesTests
         Assert.Contains("public void OnStatusTurnedOff() => _gate.RequestClear();", service);
         var sync = ProfileSettingsTests.MethodBody(service, "    private void SyncDesiredState(");
         var signals = sync.IndexOf("HandleIpcSignals();", StringComparison.Ordinal);
-        var take = sync.IndexOf("if (_gate.TakeClearRequest(_config.MoodlesStatusEnabled, _config.IsDoll, _clientState.IsLoggedIn))\n            ClearAfterTurnedOff();", StringComparison.Ordinal);
+        var take = sync.IndexOf("if (_gate.TakeClearRequest(enabled, _config.IsDoll, _clientState.IsLoggedIn))\n            ClearAfterTurnedOff();", StringComparison.Ordinal);
         var next = sync.IndexOf("_gate.Next(", StringComparison.Ordinal);
         Assert.True(signals >= 0 && take > signals && next > take, "the clear request isn't taken between the signals and the gate");
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(service, @"ClearAfterTurnedOff\(\);"));

@@ -93,6 +93,12 @@ public sealed class CharacterProfile
     /// <summary>How long a break lasts (5–240 minutes). Owners can change it, as for max wind hours.</summary>
     public int BrokenRecoveryMinutes { get; set; } = Services.WindLayers.DefaultRecoveryMinutes;
 
+    /// <summary>Vacation mode: when it began, or null when off. The wind is frozen as of then.</summary>
+    public DateTimeOffset? VacationSinceUtc { get; set; }
+
+    /// <summary>Last-write-wins stamp for <see cref="VacationSinceUtc"/> sync with the relay.</summary>
+    public DateTimeOffset? VacationUpdatedUtc { get; set; }
+
     /// <summary>Last paired-partner wind request sent by this doll; shared across all partners.</summary>
     public DateTimeOffset? LastWindRequestUtc { get; set; }
 

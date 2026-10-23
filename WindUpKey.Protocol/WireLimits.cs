@@ -128,11 +128,15 @@ public static class WireLimits
 
     private static bool IsHours(double hours) => double.IsFinite(hours) && hours >= 0 && hours <= 100_000;
 
+    /// <summary>Absent, or short stamps.</summary>
+    public static bool IsValid(VacationWire? p) => p is null || (FitsShort(p.SinceUtc) && FitsShort(p.UpdatedUtc));
+
     /// <summary>At most <see cref="ListEntries"/> consent rows, each for a key, with short stamps.</summary>
     public static bool IsValid(DollStatePushPayload p) =>
         FitsShort(p.ExpiryUtc)
         && FitsShort(p.WindUpdatedUtc)
         && IsValid(p.Layers)
+        && IsValid(p.Vacation)
         && (p.Peers is null
             || (p.Peers.Count <= ListEntries
                 && p.Peers.All(e => e is not null && IsKey(e.PeerKey) && FitsShort(e.UpdatedUtc))));

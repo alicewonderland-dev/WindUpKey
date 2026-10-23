@@ -12,6 +12,17 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.9.0 — Quest board tuning and vacation mode (Testing)",
+            [
+                "Hard duties now come only from the newest Savage tier, starting with the first fights. One is always a fight you've cleared, if you have one. Ultimates you've cleared can still come up, now and then, for triple wind.",
+                "One Medium Extreme is always one you've cleared, if you have one.",
+                "A first clear of a board duty gives triple wind. A partner in your party adds half again, and your owner doubles it.",
+                "Finishing a line now wipes only that line; the rest of the board stays.",
+                "Finish every Easy duty and a fresh set appears right away. Up to 10 lines a day pay spare springs.",
+                "Vacation mode (General tab): for a long break, it freezes a doll's wind and lets them move freely. Winding, springs, Calls and the quest board pause until they're back.",
+                "The Discord button moved to the General tab.",
+            ]),
+        new(
             "0.2.8.0 — Spare springs (Testing)",
             [
                 "Winding now costs spare springs: each spring winds a partner for 8 hours, or 12 from a doll's owner. Dolls hold up to 10 springs and winders up to 20.",

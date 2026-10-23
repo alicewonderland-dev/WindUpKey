@@ -24,9 +24,6 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly ChangelogWindow _changelogWindow;
     private readonly ITextureProvider _textures;
     private readonly string _pluginVersion;
-
-    /// <summary>The Discord's invite (shared with LookingGlass), opened by the Discord button on the About tab.</summary>
-    private const string DiscordInvite = "https://discord.gg/WY6hPnrNJ3";
     private readonly Dictionary<string, string> _pairLabelDrafts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, OwnerSettingsDraft> _ownerDrafts = new(StringComparer.Ordinal);
     private string _pairKeyDraft = string.Empty;
@@ -67,6 +64,9 @@ public sealed class ConfigWindow : Window, IDisposable
 
     /// <summary>Max wind hours while typed, committed when the edit ends (null when not editing).</summary>
     private int? _maxHoursDraft;
+
+    /// <summary>The vacation confirm is open.</summary>
+    private bool _vacationConfirm;
 
     private sealed class OwnerSettingsDraft
     {
@@ -201,12 +201,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private void DrawAboutTab()
     {
         ImGui.Spacing();
-        var right = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
-        ImGui.AlignTextToFramePadding();
         ImGui.TextUnformatted("Wind-Up Key");
-        ImGui.SameLine(right - ImGui.GetFrameHeight());
-        if (DiscordButton())
-            Dalamud.Utility.Util.OpenLink(DiscordInvite);
         ImGui.TextDisabled($"Version {_pluginVersion}");
         ImGui.Separator();
         ImGui.Spacing();
@@ -217,28 +212,6 @@ public sealed class ConfigWindow : Window, IDisposable
 
         if (ImGui.Button("Change Log"))
             _changelogWindow.IsOpen = true;
-    }
-
-    /// <summary>A square button with no background until hovered, showing the embedded Discord icon (as in LookingGlass).</summary>
-    private bool DiscordButton()
-    {
-        ImGui.PushStyleColor(ImGuiCol.Button, Vector4.Zero);
-        var clicked = ImGui.Button("##discord", new Vector2(ImGui.GetFrameHeight()));
-        ImGui.PopStyleColor();
-
-        var texture = _textures.GetFromManifestResource(typeof(ConfigWindow).Assembly, "WindUpKey.discord-symbol.png");
-        if (texture.TryGetWrap(out var wrap, out _) && wrap.Width > 0 && wrap.Height > 0)
-        {
-            var height = ImGui.GetFontSize();
-            var fitted = new Vector2(height * wrap.Width / wrap.Height, height);
-            var min = (ImGui.GetItemRectMin() + ImGui.GetItemRectMax() - fitted) / 2;
-            ImGui.GetWindowDrawList().AddImage(wrap.Handle, min, min + fitted);
-        }
-
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Join the Discord");
-
-        return clicked;
     }
 
     private void DrawRoleSetup()
@@ -281,6 +254,8 @@ public sealed class ConfigWindow : Window, IDisposable
         {
             _config.Role = PlayerRole.Winder;
             _config.HasCompletedInitialSetup = true;
+            // Winders never have vacation: a doll's ends here (and on the relay when they register as a winder).
+            _timer.EndVacationForRoleChange();
             _timer.SuspendDollRestrictions();
             _config.Save();
             _relay.ResyncRole();
@@ -298,10 +273,71 @@ public sealed class ConfigWindow : Window, IDisposable
         _timer.OnMaxWindHoursChanged();
     }
 
+    /// <summary>The doll's vacation mode: a banner and End button while on, and a confirm before it begins.</summary>
+    private void DrawVacation()
+    {
+        ImGui.Spacing();
+        if (_timer.IsOnVacation)
+        {
+            var since = _config.VacationSinceUtc?.ToLocalTime().ToString("d MMM yyyy");
+            ImGui.TextColored(new Vector4(0.45f, 0.75f, 1f, 1f), $"On vacation since {since}.");
+            ImGui.TextWrapped(
+                "Your wind is frozen and you can move freely. Winding, unwinding, repairs, springs, Calls and the quest " +
+                "board are paused until you're back.");
+            if (ImGui.Button("End vacation"))
+            {
+                _timer.SetVacation(false);
+            }
+
+            return;
+        }
+
+        if (ImGui.Button("Go on vacation…"))
+            _vacationConfirm = true;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("For a long break from the game: freezes your wind so you don't come back unwound.");
+
+        if (_vacationConfirm)
+            ImGui.OpenPopup("Vacation###WindUpKeyVacationConfirm");
+        var open = true;
+        if (ImGui.BeginPopupModal("Vacation###WindUpKeyVacationConfirm", ref open, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.PushTextWrapPos(ImGui.GetFontSize() * 26);
+            ImGui.TextWrapped(
+                "Go on vacation? Your wind freezes where it is and you can move freely, even if you're unwound now. " +
+                "Until you end it, no one can wind, unwind, repair or Call you, you can't wind others or give springs, " +
+                "and you get no daily springs or quest board rewards. You can end it at any time.");
+            ImGui.PopTextWrapPos();
+            ImGui.Spacing();
+            if (ImGui.Button("Go on vacation", new Vector2(140, 0)))
+            {
+                _timer.SetVacation(true);
+                _vacationConfirm = false;
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new Vector2(140, 0)))
+            {
+                _vacationConfirm = false;
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.EndPopup();
+        }
+
+        if (!open)
+            _vacationConfirm = false;
+    }
+
     private void DrawGeneralTab()
     {
         ImGui.Spacing();
+        var right = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
+        ImGui.AlignTextToFramePadding();
         ImGui.TextUnformatted("Connection");
+        ImGui.SameLine(right - ImGui.GetFrameHeight());
+        DiscordLink.IconButton(_textures);
         ImGui.Separator();
 
         ImGui.TextUnformatted(_relay.IsConnected ? "Status: Online" : "Status: Offline");
@@ -369,6 +405,9 @@ public sealed class ConfigWindow : Window, IDisposable
 
             if (settingsLocked)
                 ImGui.EndDisabled();
+
+            // Vacation is the doll's own choice: never locked by an owner or Hardcore.
+            DrawVacation();
 
             var moodlesOn = _config.MoodlesStatusEnabled;
             if (ImGui.Checkbox("Show wind charge as Moodle (requires Moodles)", ref moodlesOn))
@@ -1350,6 +1389,12 @@ public sealed class ConfigWindow : Window, IDisposable
             default:
                 ImGui.TextDisabled("…");
                 break;
+        }
+
+        if (_relay.IsPartnerOnVacation(partnerKey))
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(new Vector4(0.45f, 0.75f, 1f, 1f), "On vacation");
         }
     }
 

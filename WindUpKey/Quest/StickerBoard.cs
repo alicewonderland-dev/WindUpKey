@@ -6,7 +6,8 @@ namespace WindUpKey.Quest;
 
 /// <summary>
 /// The 4×4 sticker board as a 16-bit mask (bit <c>row * 4 + column</c>). Ten lines: four rows, four columns and the two
-/// diagonals. A board can't fill without a line (each row holds at most three stickers without finishing it).
+/// diagonals. A finished line's cells are wiped and the rest of the board stays, so it never fills (the last empty cell
+/// always finishes its row).
 /// </summary>
 public static class StickerBoard
 {

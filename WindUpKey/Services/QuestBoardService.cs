@@ -32,6 +32,7 @@ public sealed class QuestBoardService : IWindUpSource
     private readonly IClientState _clientState;
     private readonly ICondition _condition;
     private readonly IFramework _framework;
+    private readonly IPartyList _party;
     private readonly IChatGui _chat;
     private readonly IPluginLog _log;
     private readonly QuestGameFacts _facts;
@@ -61,6 +62,7 @@ public sealed class QuestBoardService : IWindUpSource
         ICondition condition,
         IFramework framework,
         IPlayerState playerState,
+        IPartyList party,
         IChatGui chat,
         IPluginLog log)
     {
@@ -71,6 +73,7 @@ public sealed class QuestBoardService : IWindUpSource
         _clientState = clientState;
         _condition = condition;
         _framework = framework;
+        _party = party;
         _chat = chat;
         _log = log;
         _facts = new QuestGameFacts(data, playerState);
@@ -128,6 +131,9 @@ public sealed class QuestBoardService : IWindUpSource
     /// <summary>A doll's board pays wind as well as springs; a winder's pays springs only.</summary>
     public bool ForDoll => _config.IsDoll;
 
+    /// <summary>The doll is on vacation: the board neither rolls nor awards.</summary>
+    public bool OnVacation => _config.IsOnVacation;
+
     public QuestBoardState Board => _config.QuestBoard ??= new QuestBoardState();
 
     public void Enable()
@@ -174,7 +180,8 @@ public sealed class QuestBoardService : IWindUpSource
         }
     }
 
-    public bool CanReroll(QuestDifficulty difficulty) => _config.HasChosenRole && IsRolled && QuestRollRules.CanReroll(Board, difficulty);
+    public bool CanReroll(QuestDifficulty difficulty) =>
+        _config.HasChosenRole && !_config.IsOnVacation && IsRolled && QuestRollRules.CanReroll(Board, difficulty);
 
     /// <summary>Rerolls the open Medium or Hard slots (once a week each). Returns false when it isn't allowed.</summary>
     public bool TryReroll(QuestDifficulty difficulty)
@@ -247,11 +254,23 @@ public sealed class QuestBoardService : IWindUpSource
         {
             // A reset during a duty waits for it to end, so the slot the doll queued for is still there to credit.
             SeedMsqHistory();
+            // Vacation: no rolls, credits or quest springs. Turn-ins done meanwhile are recorded, so they never pay later.
+            if (_config.IsOnVacation)
+            {
+                ForgetMsqTurnInsOnVacation();
+                return;
+            }
+
             SendSpringGrants();
             // Also while bound by duty before it starts (zoned in, waiting on the party; joined in progress before
             // combat): the duty is only watched from its start.
             if (_duty is null && !_condition[ConditionFlag.BoundByDuty])
+            {
                 EnsureRolled();
+                // An award that finished the Easy set while the board waited on a reset (or couldn't read the
+                // character) rerolls it here once the board is up to date.
+                RerollEasyIfAllDone();
+            }
             PollMsq();
         }
         catch (Exception ex)
@@ -356,6 +375,24 @@ public sealed class QuestBoardService : IWindUpSource
         _config.Save();
     }
 
+    /// <summary>
+    /// On vacation: main scenario quests turned in are recorded as credited without wind or a sticker, and the board waits
+    /// on the new next one, so coming back never pays for them.
+    /// </summary>
+    private void ForgetMsqTurnInsOnVacation()
+    {
+        var next = _facts.NextMsqQuestId(out var ready);
+        var board = Board;
+        if (!ready || board.MsqTrackedQuestId == next)
+            return;
+
+        board.MsqTrackedQuestId = next;
+        var done = _facts.Completed(QuestContentCatalog.MainScenarioQuestIds(_data));
+        var known = board.CreditedMsqQuestIds.ToHashSet();
+        board.CreditedMsqQuestIds.AddRange(done.Where(id => id != 0 && known.Add(id)));
+        _config.Save();
+    }
+
     private void OnDutyStarted(IDutyStateEventArgs args) => BeginObservedDuty();
 
     /// <summary>
@@ -374,9 +411,12 @@ public sealed class QuestBoardService : IWindUpSource
         // Fail open: if a game update breaks the reads, clears still count rather than every doll losing them.
         var synced = true;
         var levelingBelowCap = false;
+        var firstClear = false;
         uint territory = 0;
         try
         {
+            // Read now: the game marks the duty completed at the clear, which would hide a first clear.
+            firstClear = _facts.IsUncleared(cfcId);
             var queue = _facts.ReadQueue();
             if (_data.GetExcelSheet<ContentFinderCondition>()?.TryGetRow(cfcId, out var cfc) == true)
             {
@@ -393,7 +433,7 @@ public sealed class QuestBoardService : IWindUpSource
 
         var periods = _boardAtZoneIn ?? new BoardPeriods(IsRolled, Board.DailyPeriodStartUtc, Board.WeeklyPeriodStartUtc);
         _duty = new DutyObservation(
-            cfcId, territory, contentId, synced, levelingBelowCap, periods.Rolled, periods.Daily, periods.Weekly);
+            cfcId, territory, contentId, synced, levelingBelowCap, periods.Rolled, periods.Daily, periods.Weekly, firstClear);
     }
 
     /// <summary>
@@ -436,7 +476,11 @@ public sealed class QuestBoardService : IWindUpSource
 
     private void CreditClear(DutyObservation watched)
     {
-        var clear = new QuestDutyClear(watched.ContentFinderConditionId, watched.Synced, watched.LevelingRouletteBelowCap);
+        // Vacation: the board doesn't award (the board's periods catch up once the doll is back).
+        if (_config.IsOnVacation)
+            return;
+
+        var clear = new QuestDutyClear(watched.ContentFinderConditionId, watched.Synced, watched.LevelingRouletteBelowCap, watched.FirstClear);
 
         // A reset that passed during the duty waited (see OnFrameworkUpdate): the slots the board had when it began still
         // count, and the tick rolls the new ones once it ends. Any other slots are brought up to date first.
@@ -464,13 +508,49 @@ public sealed class QuestBoardService : IWindUpSource
             clear.ContentFinderConditionId,
             clear.Synced,
             credit.Credits.Count);
-        Award(credit.Credits, DutyName(clear.ContentFinderConditionId));
+        var firstClear = clear.FirstClear && credit.Credits.Any(c => c.Slot is { } slot && QuestRewardRules.CanBeFirstClear(slot.Kind));
+        Award(credit.Credits, DutyName(clear.ContentFinderConditionId), firstClear);
     }
 
-    private void Award(IReadOnlyList<QuestSlotCredit> credits, string what)
+    /// <summary>
+    /// The best party bonus now: one of the doll's owners in the party, else any paired partner. Members are matched to
+    /// pairs by pairing key (from their ContentId), as Call does; neither is logged. Winders get no wind, so none.
+    /// </summary>
+    private QuestPartyBonus ReadPartyBonus()
+    {
+        if (!_config.IsDoll)
+            return QuestPartyBonus.None;
+
+        var bonus = QuestPartyBonus.None;
+        try
+        {
+            foreach (var member in _party)
+            {
+                if (member.ContentId == 0)
+                    continue;
+                var key = PairingKeyUtil.FromContentId((ulong)member.ContentId);
+                if (string.Equals(key, _config.PairingKey, StringComparison.Ordinal) || _config.FindPairByKey(key) is not { } pair)
+                    continue;
+                if (pair.IsOwner)
+                    return QuestPartyBonus.Owner;
+                bonus = QuestPartyBonus.Partner;
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Debug("Quest board: party read failed: {Type}", ex.GetType().Name);
+        }
+
+        return bonus;
+    }
+
+    private void Award(IReadOnlyList<QuestSlotCredit> credits, string what, bool firstClear = false)
     {
         var stickers = credits.Sum(c => c.Reward.Stickers);
-        var hours = credits.Sum(c => c.Reward.Hours);
+        var party = ReadPartyBonus();
+        // The party bonus multiplies the slots' own wind; line bonuses stay as they are.
+        var hours = credits.Sum(c => c.Reward.Hours) * QuestRewardRules.PartyMultiplier(party);
+        var ultimate = credits.Any(c => c.Slot?.Kind == QuestSlotKind.Ultimate);
         var board = Board;
         var award = QuestBoardEngine.PlaceStickers(board, stickers, hours, n => _rng.Next(n));
 
@@ -497,12 +577,52 @@ public sealed class QuestBoardService : IWindUpSource
         if (award.LinesCleared > 0)
             SendSpringGrants(force: true);
 
-        PluginChat.Print(_chat, Message(what, stickers, award, _config.IsDoll), PluginChat.Green);
+        var doll = _config.IsDoll;
+        PluginChat.Print(_chat, Message(what, stickers, award, doll), PluginChat.Green);
+        if (doll && BonusMessage(firstClear, ultimate, party) is { } bonusLine)
+            PluginChat.Print(_chat, bonusLine, PluginChat.Green);
         _log.Information(
-            "Quest board award: stickers={Stickers}, lines={Lines}, fill={Fill}",
+            "Quest board award: stickers={Stickers}, lines={Lines}, fill={Fill}, first={First}, party={Party}",
             stickers,
             award.LinesCleared,
-            award.FillToCap);
+            award.FillToCap,
+            firstClear,
+            party);
+
+        RerollEasyIfAllDone();
+    }
+
+    /// <summary>
+    /// Every Easy slot of this set is done: a new set is rolled at once, before the daily reset. The day's MSQ sticker
+    /// stays given (a turn-in still gives one sticker a day), so a new MSQ slot starts done when the last one was.
+    /// </summary>
+    private void RerollEasyIfAllDone()
+    {
+        var board = Board;
+        if (!QuestRollRules.AllEasyDone(board) || !IsRolled || board.DailyPeriodStartUtc is not { } daily)
+            return;
+
+        var nextMsq = _facts.NextMsqQuestId(out _);
+        var duties = QuestContentCatalog.Duties(_data);
+        if (_facts.Read(duties, nextMsq != 0) is not { } facts)
+            return;
+
+        var msqStickerGiven = board.SlotsOf(QuestDifficulty.Easy).Any(s => s.Kind == QuestSlotKind.Msq && s.Completed);
+        var easy = QuestRollRules.RollEasy(duties, facts, _rng);
+        if (msqStickerGiven)
+        {
+            foreach (var slot in easy.Where(s => s.Kind == QuestSlotKind.Msq))
+                slot.Completed = true;
+        }
+
+        // A set that would start all done (only an MSQ slot whose sticker is given) isn't rolled: it would roll again at once.
+        if (easy.Count == 0 || easy.All(s => s.Completed))
+            return;
+
+        QuestRollRules.ReplaceEasy(board, easy, daily);
+        _config.Save();
+        PluginChat.Print(_chat, "Quest board: every Easy duty is done. A fresh set is on the board.", PluginChat.Green);
+        _log.Information("Quest board: Easy set done, rerolled ({Slots} slots)", easy.Count);
     }
 
     /// <summary>The chat line for an award. 06: it never names hours or how much wind the doll has.</summary>
@@ -511,7 +631,7 @@ public sealed class QuestBoardService : IWindUpSource
         if (!doll)
         {
             if (award.LinesCleared > 0)
-                return $"Quest board: {what}. {(award.LinesCleared == 1 ? "A line" : $"{award.LinesCleared} lines at once")}! The board clears.";
+                return $"Quest board: {what}. {(award.LinesCleared == 1 ? "A line" : $"{award.LinesCleared} lines at once")}!";
             return stickers switch
             {
                 0 => $"Quest board: {what}. No sticker this time.",
@@ -523,14 +643,33 @@ public sealed class QuestBoardService : IWindUpSource
         if (award.TripleLine)
             return $"Quest board: {what}. Three lines at once! The key turns and turns and turns.";
         if (award.LinesCleared >= 2)
-            return $"Quest board: {what}. Two lines at once! The board clears and the key turns with fresh wind.";
+            return $"Quest board: {what}. {award.LinesCleared} lines! The key turns with fresh wind.";
         if (award.LinesCleared == 1)
-            return $"Quest board: {what}. A line! The board clears and the key turns with fresh wind.";
+            return $"Quest board: {what}. A line! The key turns with fresh wind.";
         if (stickers == 0)
             return $"Quest board: {what}. No sticker this time, but the key turns a little.";
         return stickers == 1
             ? $"Quest board: {what}. A sticker for your board, and the key turns."
             : $"Quest board: {what}. {stickers} stickers for your board, and the key turns.";
+    }
+
+    /// <summary>Why the wind was bigger, without naming hours (06), or null when nothing added to it.</summary>
+    private static string? BonusMessage(bool firstClear, bool ultimate, QuestPartyBonus party)
+    {
+        var reasons = new List<string>();
+        if (firstClear)
+            reasons.Add("a first clear");
+        if (ultimate)
+            reasons.Add("an Ultimate");
+        if (party == QuestPartyBonus.Owner)
+            reasons.Add("your owner at your side");
+        else if (party == QuestPartyBonus.Partner)
+            reasons.Add("a partner at your side");
+        if (reasons.Count == 0)
+            return null;
+
+        var joined = reasons.Count == 1 ? reasons[0] : string.Join(", ", reasons.Take(reasons.Count - 1)) + " and " + reasons[^1];
+        return $"Quest board: extra wind for {joined}.";
     }
 
     /// <summary>
@@ -544,8 +683,8 @@ public sealed class QuestBoardService : IWindUpSource
 public sealed record QuestLineClear(ushort BoardBefore, ushort LineCells, long Timestamp);
 
 /// <summary>
-/// A duty being watched, as first seen: its synced and Leveling Roulette state, and the board's periods at its start
-/// (so a reset during it doesn't take its slot away).
+/// A duty being watched, as first seen: its synced and Leveling Roulette state, the board's periods at its start (so a
+/// reset during it doesn't take its slot away), and whether the character had never cleared it then.
 /// </summary>
 internal sealed record DutyObservation(
     uint ContentFinderConditionId,
@@ -555,7 +694,8 @@ internal sealed record DutyObservation(
     bool LevelingRouletteBelowCap,
     bool BoardRolledAtStart,
     DateTimeOffset? DailyPeriodAtStart,
-    DateTimeOffset? WeeklyPeriodAtStart);
+    DateTimeOffset? WeeklyPeriodAtStart,
+    bool FirstClear);
 
 /// <summary>The board's reset periods at one moment, and whether it was rolled for the periods current then.</summary>
 internal readonly record struct BoardPeriods(bool Rolled, DateTimeOffset? Daily, DateTimeOffset? Weekly);

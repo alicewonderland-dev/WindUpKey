@@ -65,13 +65,94 @@ public sealed class WindTimerService
             // Max wind hours may have been raised since (an owner, or the doll): the drain since the last save is taken
             // first, under the layers as they were, and only then does player overwind fill the new room. Relayering
             // first would let the drain fall on quest overwind, which an unwind would then take as normal wind.
-            return new WindLayers(
+            var stored = new WindLayers(
                 _config.NormalWindHours,
                 _config.QuestOverwindHours,
                 _config.PlayerOverwindHours,
                 asOf,
-                _config.BrokenUntilUtc).At(now).Relayer(_config.MaxWindHours);
+                _config.BrokenUntilUtc);
+            // Vacation: nothing drains, and a break's time left is kept, from the last save on.
+            return (_config.IsOnVacation ? stored.Frozen(now) : stored.At(now)).Relayer(_config.MaxWindHours);
         }
+    }
+
+    /// <summary>
+    /// A doll on vacation became a winder: vacation ends (winders never have it), with the wind kept exactly as it froze,
+    /// so it runs on from here if they become a doll again. Works with the role already changed. The relay ends its own
+    /// copy when they register as a winder.
+    /// </summary>
+    public void EndVacationForRoleChange()
+    {
+        if (_config.VacationSinceUtc is null)
+            return;
+
+        var now = DateTimeOffset.UtcNow;
+        if (_config.WindAsOfUtc is { } asOf)
+        {
+            var frozen = new WindLayers(
+                _config.NormalWindHours, _config.QuestOverwindHours, _config.PlayerOverwindHours, asOf, _config.BrokenUntilUtc)
+                .Frozen(now);
+            _config.VacationSinceUtc = null;
+            WriteLayers(frozen, now);
+            _config.WindUpdatedUtc = now;
+        }
+
+        _config.VacationSinceUtc = null;
+        _config.VacationUpdatedUtc = now;
+        _config.Save();
+    }
+
+    /// <summary>The doll is on vacation: frozen wind, free movement, and no winding, springs, Calls or quests.</summary>
+    public bool IsOnVacation => _config.IsOnVacation;
+
+    /// <summary>Raised after vacation mode turns on or off (the relay is told, and listeners refresh).</summary>
+    public event Action? VacationChanged;
+
+    /// <summary>
+    /// Turns vacation mode on or off (doll only; the doll's own choice, at any time). The wind is stored as it is now, so
+    /// on it freezes from here, and off it carries on from where it froze. <paramref name="updatedUtc"/> is the stamp for
+    /// the relay's last-write-wins sync (another PC's change); null stamps it now. Returns false when nothing changed.
+    /// </summary>
+    public bool SetVacation(bool on, DateTimeOffset? sinceUtc = null, DateTimeOffset? updatedUtc = null)
+    {
+        if (!_config.IsDoll || on == _config.IsOnVacation)
+            return false;
+
+        var now = DateTimeOffset.UtcNow;
+        if (updatedUtc is { } synced)
+        {
+            // Another PC's change: the wind isn't touched or stamped here. This PC's stored wind may be weeks stale;
+            // the relay's row, applied right after by the wind sync, is the one the other PC froze or ran on. The lock
+            // waits for it too (ApplySynced and the next tick sync it): synced now, the stale row could lock and sit them.
+            // Ending: the frozen row is first moved on to now undrained (its stamp kept, so a newer relay row still wins
+            // the wind sync). Without it, a relay that ended the vacation itself (a register as a winder) sends no newer
+            // wind, and the whole vacation would drain at once from the frozen row's time.
+            if (!on && _config.IsOnVacation && _config.WindAsOfUtc is { } asOf)
+            {
+                WriteLayers(new WindLayers(
+                    _config.NormalWindHours, _config.QuestOverwindHours, _config.PlayerOverwindHours, asOf, _config.BrokenUntilUtc), now);
+            }
+
+            _config.VacationSinceUtc = on ? sinceUtc ?? now : null;
+            _config.VacationUpdatedUtc = synced;
+            _config.Save();
+        }
+        else
+        {
+            var current = Layers;
+            _config.VacationSinceUtc = on ? now : null;
+            _config.VacationUpdatedUtc = now;
+            Save(current, now);
+        }
+
+        if (!on)
+            _wasBroken = IsBroken;
+        PluginChat.Print(
+            _chat,
+            on ? "You're on vacation. Your wind is frozen until you're back." : "Welcome back! Your wind runs again from where it froze.",
+            PluginChat.Green);
+        VacationChanged?.Invoke();
+        return true;
     }
 
     /// <summary>Locked by wind: no normal wind, or broken. Meaningful for dolls only.</summary>
@@ -93,7 +174,7 @@ public sealed class WindTimerService
     /// Movement/teleport lock policy. False while the relay safety bypass or an active
     /// owner-call travel bypass is active even if the timer is empty — ExpiryUtc is left unchanged.
     /// </summary>
-    public bool IsLocked => _config.IsDoll && IsTimerEmpty && !_relaySafetyBypass && !_callTravelBypass;
+    public bool IsLocked => _config.IsDoll && !_config.IsOnVacation && IsTimerEmpty && !_relaySafetyBypass && !_callTravelBypass;
 
     /// <summary>
     /// Called from the composition root each framework tick before <see cref="Tick"/>.
@@ -180,7 +261,7 @@ public sealed class WindTimerService
     /// <summary>A local wind that isn't another player's (the starter wind): normal wind only, up to max.</summary>
     public void AddHours(double hours)
     {
-        if (!_config.IsDoll || hours <= 0)
+        if (!_config.IsDoll || _config.IsOnVacation || hours <= 0)
             return;
 
         var now = DateTimeOffset.UtcNow;
@@ -198,7 +279,7 @@ public sealed class WindTimerService
     /// </summary>
     public PlayerWindResult AddPlayerWind(double hours, string? winderIdentity = null)
     {
-        if (!_config.IsDoll)
+        if (!_config.IsDoll || _config.IsOnVacation)
             return new PlayerWindResult(true, 0, false, false, false);
 
         var now = DateTimeOffset.UtcNow;
@@ -239,7 +320,7 @@ public sealed class WindTimerService
     /// <summary>A repair by another player: ends the break now. False when the doll wasn't broken.</summary>
     public bool Repair(string? winderIdentity = null)
     {
-        if (!IsBroken)
+        if (!IsBroken || _config.IsOnVacation)
             return false;
 
         var now = DateTimeOffset.UtcNow;
@@ -271,6 +352,10 @@ public sealed class WindTimerService
 
         _config.SafewordPausedUntilUtc = SafewordPause.Extend(_config.SafewordPausedUntilUtc, DateTimeOffset.UtcNow, hours);
         _config.Save();
+
+        // Vacation: the wind stays frozen as it was (the doll moves freely anyway); only remote control is paused.
+        if (_config.IsOnVacation)
+            return;
 
         // The safeword also ends a break at once. Then normal wind, then quest overwind with no cap: it never adds player
         // overwind, so it can't break them.
@@ -305,7 +390,7 @@ public sealed class WindTimerService
     /// </summary>
     public TimeSpan AddCommendationWind(TimeSpan bonus, int commendationsReceived)
     {
-        if (!_config.IsDoll || bonus <= TimeSpan.Zero)
+        if (!_config.IsDoll || _config.IsOnVacation || bonus <= TimeSpan.Zero)
             return TimeSpan.Zero;
 
         var now = DateTimeOffset.UtcNow;
@@ -326,7 +411,7 @@ public sealed class WindTimerService
     /// </summary>
     public void AddQuestWind(double hours)
     {
-        if (!_config.IsDoll || hours <= 0)
+        if (!_config.IsDoll || _config.IsOnVacation || hours <= 0)
             return;
 
         var now = DateTimeOffset.UtcNow;
@@ -352,7 +437,8 @@ public sealed class WindTimerService
 
     private void WriteLayers(WindLayers layers, DateTimeOffset now)
     {
-        var at = layers.At(now);
+        // Vacation: stored as they are (a synced row from before is moved on undrained, its break's time left kept).
+        var at = _config.IsOnVacation ? layers.Frozen(now) : layers.At(now);
         _config.NormalWindHours = at.Normal;
         _config.QuestOverwindHours = at.Quest;
         _config.PlayerOverwindHours = at.Player;
@@ -478,7 +564,7 @@ public sealed class WindTimerService
     /// </summary>
     public void ClearWind(string? winderIdentity = null)
     {
-        if (!_config.IsDoll)
+        if (!_config.IsDoll || _config.IsOnVacation)
             return;
 
         var now = DateTimeOffset.UtcNow;

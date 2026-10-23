@@ -85,6 +85,10 @@ public sealed class RelayClient : IDisposable
     public const string BrokenFailure = "That doll is broken. Repair them first; your springs came back.";
     public const string CostChangedFailure = "Unwinding them costs more now; your springs came back. Try again.";
     public const string UpdateRequiredFailure = "Update Wind-Up Key to wind, unwind or repair.";
+    /// <summary>The partner (a doll) is on vacation: nothing was spent.</summary>
+    public const string PartnerOnVacationFailure = "That doll is on vacation.";
+    /// <summary>This doll is on vacation: winding, unwinding, repairs and gifts wait until they're back.</summary>
+    public const string SelfOnVacationFailure = "You're on vacation. End it on the General tab to do that.";
     public static readonly TimeSpan WindRequestCooldown = TimeSpan.FromHours(1);
     private static readonly TimeSpan PresenceThrottle = TimeSpan.FromSeconds(10);
 
@@ -861,6 +865,9 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
+        if (RefuseOwnVacation())
+            return;
+
         springs = Math.Clamp(springs, 1, SpringRules.MaxSpringsPerWind);
         var hours = SpringRules.WindHours(springs, fromOwner: false);
         if (_config.IsDebugEnabled && string.Equals(PairingKeyUtil.Normalize(partnerKey), _config.PairingKey, StringComparison.Ordinal))
@@ -1069,6 +1076,9 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
+        if (RefuseOwnVacation())
+            return;
+
         if (!IsConnected)
         {
             _notifier.NotifyWinderError("Not connected yet. Try again in a moment.");
@@ -1131,6 +1141,16 @@ public sealed class RelayClient : IDisposable
         }
     }
 
+    /// <summary>A doll on vacation can't wind, unwind, repair or give springs: told so, and true.</summary>
+    private bool RefuseOwnVacation()
+    {
+        if (!_config.IsOnVacation)
+            return false;
+
+        _notifier.NotifyWinderError(SelfOnVacationFailure);
+        return true;
+    }
+
     /// <summary>Debug self-wind: applied here as a player's wind (so it can test overwind and breaking), never through the relay.</summary>
     private void WindSelfLocally(double hours) =>
         Forget(_framework.RunOnTick(() =>
@@ -1158,6 +1178,9 @@ public sealed class RelayClient : IDisposable
     public async Task SendPaidUnwindAsync(string partnerKey, int springs)
     {
         LastUnwindQuote = null;
+        if (RefuseOwnVacation())
+            return;
+
         var toKey = PairingKeyUtil.Normalize(partnerKey);
         if (_cachedIdentity is null || !IsConnected || !PairingKeyUtil.IsValid(toKey) || !PairingKeyUtil.IsValid(_config.PairingKey))
         {
@@ -1187,6 +1210,9 @@ public sealed class RelayClient : IDisposable
     /// <summary>Repairs a broken doll (free; they must let you wind them).</summary>
     public async Task SendRepairAsync(string partnerKey)
     {
+        if (RefuseOwnVacation())
+            return;
+
         var toKey = PairingKeyUtil.Normalize(partnerKey);
         if (_cachedIdentity is null || !IsConnected || !PairingKeyUtil.IsValid(toKey) || !PairingKeyUtil.IsValid(_config.PairingKey))
         {
@@ -1204,6 +1230,9 @@ public sealed class RelayClient : IDisposable
     /// <summary>Gives <paramref name="springs"/> spare springs to a paired player, up to their cap.</summary>
     public async Task SendSpringGiftAsync(string partnerKey, int springs)
     {
+        if (RefuseOwnVacation())
+            return;
+
         var toKey = PairingKeyUtil.Normalize(partnerKey);
         if (_cachedIdentity is null || !IsConnected || !PairingKeyUtil.IsValid(toKey) || !PairingKeyUtil.IsValid(_config.PairingKey))
         {
@@ -1230,7 +1259,7 @@ public sealed class RelayClient : IDisposable
     /// </summary>
     public async Task SendSpringGrantAsync(int lines, string requestId)
     {
-        if (lines <= 0 || !IsConnected)
+        if (lines <= 0 || !IsConnected || _config.IsOnVacation)
             return;
 
         await SendEnvelopeAsync(
@@ -2650,6 +2679,9 @@ public sealed class RelayClient : IDisposable
                 ? _cachedIdentity
                 : null;
 
+        if (await RefuseIfOnVacationAsync(payload.RequestId, fromKey, ct).ConfigureAwait(false))
+            return;
+
         // Spare springs: a wind can break the doll, so the safeword's pause refuses it too (the relay refunds it).
         if (await RefuseIfSafewordPausedAsync(envelope.Type, payload.RequestId, fromKey, ct).ConfigureAwait(false))
             return;
@@ -2721,6 +2753,9 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
+        if (await RefuseIfOnVacationAsync(payload.RequestId, fromKey, ct).ConfigureAwait(false))
+            return;
+
         // Only a repair that mended something says how the doll is: a free repair of an unbroken doll must not be a way to
         // read their wind again and again.
         var mended = _timer.Repair(_config.FindPairByKey(fromKey)?.GetMessageLabel());
@@ -2760,6 +2795,9 @@ public sealed class RelayClient : IDisposable
             }), ct).ConfigureAwait(false);
             return;
         }
+
+        if (await RefuseIfOnVacationAsync(payload.RequestId, fromKey, ct).ConfigureAwait(false))
+            return;
 
         if (await RefuseIfSafewordPausedAsync(envelope.Type, payload.RequestId, fromKey, ct).ConfigureAwait(false))
             return;
@@ -2824,6 +2862,26 @@ public sealed class RelayClient : IDisposable
             To = fromKey,
             Code = ErrorCodes.SafewordPaused,
             Message = SafewordPausedFailure,
+        }), ct).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>
+    /// Vacation: a wind, unwind (or its quote), repair or Call is refused with <see cref="ErrorCodes.OnVacation"/> and
+    /// nothing is applied, so the relay gives back the springs of one that was queued before vacation began. Checked
+    /// after the stealth and permission checks, as the safeword's pause is. Returns true when refused.
+    /// </summary>
+    private async Task<bool> RefuseIfOnVacationAsync(string? requestId, string fromKey, CancellationToken ct)
+    {
+        if (!_config.IsOnVacation)
+            return false;
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.Error, new ErrorPayload
+        {
+            RequestId = requestId,
+            To = fromKey,
+            Code = ErrorCodes.OnVacation,
+            Message = PartnerOnVacationFailure,
         }), ct).ConfigureAwait(false);
         return true;
     }
@@ -3041,6 +3099,7 @@ public sealed class RelayClient : IDisposable
             ErrorCodes.CostChanged => CostChangedFailure,
             ErrorCodes.UpdateRequired => UpdateRequiredFailure,
             ErrorCodes.PeerUpdateRequired => "That doll needs to update Wind-Up Key first.",
+            ErrorCodes.OnVacation => _config.IsOnVacation ? SelfOnVacationFailure : PartnerOnVacationFailure,
             ErrorCodes.TargetOffline when !string.IsNullOrEmpty(payload.RequestId) => "That doll is offline right now.",
             _ => null,
         };
@@ -3289,6 +3348,9 @@ public sealed class RelayClient : IDisposable
 
         if (_config.IsDoll)
         {
+            // Vacation first: the wind below is then stored frozen (or running again) as the doll's other PC left it.
+            needPush |= ApplySyncedVacation(payload.Vacation, now);
+
             if (RelaySyncRules.TryReadRemoteStamp(payload.WindUpdatedUtc, now, out var remoteWindUpdated))
             {
                 if (_config.WindUpdatedUtc is not { } localWindUpdated || remoteWindUpdated > localWindUpdated)
@@ -3320,6 +3382,49 @@ public sealed class RelayClient : IDisposable
 
         if (needPush)
             QueueDollStatePush();
+    }
+
+    /// <summary>
+    /// The relay's vacation row (the doll's other PC turned it on or off), merged last-write-wins by its stamp. Returns
+    /// true when this PC's own state is newer, so the relay should be told.
+    /// </summary>
+    private bool ApplySyncedVacation(VacationWire? remote, DateTimeOffset now)
+    {
+        if (remote is null || !WireLimits.IsValid(remote) || !RelaySyncRules.TryReadRemoteStamp(remote.UpdatedUtc, now, out var remoteUpdated))
+            return _config.VacationUpdatedUtc is not null;
+
+        if (_config.VacationUpdatedUtc is { } localUpdated && localUpdated >= remoteUpdated)
+            return localUpdated > remoteUpdated;
+
+        DateTimeOffset? since = SyncStamp.TryParse(remote.SinceUtc, out var parsed) ? parsed : null;
+        if (!_timer.SetVacation(since is not null, since, remoteUpdated))
+        {
+            _config.VacationUpdatedUtc = remoteUpdated;
+            _config.Save();
+        }
+
+        return false;
+    }
+
+    /// <summary>Partners last known to be dolls on vacation (from presence answers; in memory only).</summary>
+    private readonly HashSet<string> _partnersOnVacation = new(StringComparer.Ordinal);
+
+    /// <summary>The partner (a doll) is on vacation, as last heard from the relay or them.</summary>
+    public bool IsPartnerOnVacation(string partnerKey)
+    {
+        lock (_presenceLock)
+            return _partnersOnVacation.Contains(PairingKeyUtil.Normalize(partnerKey));
+    }
+
+    private void SetPartnerVacation(string peerKey, bool onVacation)
+    {
+        lock (_presenceLock)
+        {
+            if (onVacation)
+                _partnersOnVacation.Add(peerKey);
+            else
+                _partnersOnVacation.Remove(peerKey);
+        }
     }
 
     /// <summary>
@@ -3489,13 +3594,17 @@ public sealed class RelayClient : IDisposable
         }
 
         var hasWind = _config.WindUpdatedUtc is not null;
-        if (peers.Count == 0 && !hasWind)
+        var vacation = _config.VacationUpdatedUtc is { } vacationUpdated
+            ? new VacationWire { SinceUtc = _config.VacationSinceUtc?.ToString("O"), UpdatedUtc = vacationUpdated.ToString("O") }
+            : null;
+        if (peers.Count == 0 && !hasWind && vacation is null)
             return null;
 
         var layers = _timer.Layers;
         return new DollStatePushPayload
         {
             Peers = peers,
+            Vacation = vacation,
             ExpiryUtc = _config.ExpiryUtc?.ToString("O"),
             WindUpdatedUtc = _config.WindUpdatedUtc?.ToString("O"),
             ClearWind = hasWind && _config.ExpiryUtc is null,
@@ -3583,6 +3692,7 @@ public sealed class RelayClient : IDisposable
             Online = true,
             // 08-D15: unset until this connection's pairSync arrived; the local list may not be loaded from it yet.
             StillPaired = RelaySyncRules.PresenceStillPairedAnswer(stillPaired, _registerAccepted),
+            Vacation = _config.IsDoll ? _config.IsOnVacation : null,
         }), ct).ConfigureAwait(false);
     }
 
@@ -3597,6 +3707,8 @@ public sealed class RelayClient : IDisposable
             return;
 
         SetPresence(peerKey, payload.Online ? PartnerPresence.Online : PartnerPresence.Offline);
+        if (payload.Vacation is { } onVacation)
+            SetPartnerVacation(peerKey, onVacation);
 
         // 08-D19: removed here only; the relay keeps the pair, so the next pairSync brings the partner back until their own
         // queued unpair lands. Never an unpair on the relay: released clients (0.1.2.0 to 0.2.0.1) never sync their pair
@@ -3726,6 +3838,9 @@ public sealed class RelayClient : IDisposable
             }), ct).ConfigureAwait(false);
             return;
         }
+
+        if (await RefuseIfOnVacationAsync(payload.RequestId, fromKey, ct).ConfigureAwait(false))
+            return;
 
         if (await RefuseIfSafewordPausedAsync(envelope.Type, payload.RequestId, fromKey, ct).ConfigureAwait(false))
             return;

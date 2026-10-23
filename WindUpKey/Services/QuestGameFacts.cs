@@ -70,6 +70,7 @@ public sealed unsafe class QuestGameFacts
         var unlocked = new HashSet<uint>();
         var unlockable = new HashSet<uint>();
         var cleared = new HashSet<uint>();
+        var clearedHighEnd = new HashSet<uint>();
         foreach (var duty in duties)
         {
             var instance = QuestContentCatalog.InstanceContentId(_data, duty.ContentFinderConditionId);
@@ -83,13 +84,26 @@ public sealed unsafe class QuestGameFacts
                 continue;
             }
 
+            if (duty.Category is QuestDutyCategory.Extreme or QuestDutyCategory.Savage && UIState.IsInstanceContentCompleted(instance))
+                clearedHighEnd.Add(duty.ContentFinderConditionId);
+
             if (UIState.IsInstanceContentUnlocked(instance))
                 unlocked.Add(duty.ContentFinderConditionId);
             else if (duty.InMentorPool && duty.Level <= highest && CanTakeAnUnlockQuest(instance, highest))
                 unlockable.Add(duty.ContentFinderConditionId);
         }
 
-        return new QuestCharacterFacts(highest, levels.Any(l => l < cap), hasNextMsq, unlocked, unlockable, cleared);
+        return new QuestCharacterFacts(highest, levels.Any(l => l < cap), hasNextMsq, unlocked, unlockable, cleared, clearedHighEnd);
+    }
+
+    /// <summary>
+    /// The character has never cleared duty <paramref name="contentFinderConditionId"/> (false when it can't be told: a
+    /// duty the board doesn't know). Read as a duty starts: the game marks it completed only at the clear.
+    /// </summary>
+    public bool IsUncleared(uint contentFinderConditionId)
+    {
+        var instance = QuestContentCatalog.InstanceContentId(_data, contentFinderConditionId);
+        return instance != 0 && !UIState.IsInstanceContentCompleted(instance);
     }
 
     /// <summary>

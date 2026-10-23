@@ -23,7 +23,10 @@ public enum QuestDutyCategory : byte
 /// <param name="Category">What kind of duty it is.</param>
 /// <param name="Level">Its required level.</param>
 /// <param name="InMentorPool">It can come up in the Mentor Roulette.</param>
-public readonly record struct QuestDutyRow(uint ContentFinderConditionId, QuestDutyCategory Category, int Level, bool InMentorPool);
+/// <param name="SortKey">The sheet's order (a Savage tier's fights run first to last).</param>
+/// <param name="HighEnd">The sheet's current-content flag: today's Savage tier, Ultimates and the newest Extreme.</param>
+public readonly record struct QuestDutyRow(
+    uint ContentFinderConditionId, QuestDutyCategory Category, int Level, bool InMentorPool, uint SortKey = 0, bool HighEnd = false);
 
 /// <summary>What the rolls need to know about the character.</summary>
 /// <param name="HighestCombatLevel">The highest level of any combat job (limited jobs don't count).</param>
@@ -32,13 +35,21 @@ public readonly record struct QuestDutyRow(uint ContentFinderConditionId, QuestD
 /// <param name="UnlockedDuties">The duties (ContentFinderCondition rows) the character has unlocked.</param>
 /// <param name="UnlockableDuties">The locked duties whose unlock quest the character can take now.</param>
 /// <param name="ClearedUltimates">The Ultimate raids the character has cleared.</param>
+/// <param name="ClearedHighEnd">The Extremes and Savage raids the character has cleared.</param>
 public sealed record QuestCharacterFacts(
     int HighestCombatLevel,
     bool HasCombatJobBelowCap,
     bool HasNextMsq,
     IReadOnlySet<uint> UnlockedDuties,
     IReadOnlySet<uint> UnlockableDuties,
-    IReadOnlySet<uint> ClearedUltimates);
+    IReadOnlySet<uint> ClearedUltimates,
+    IReadOnlySet<uint>? ClearedHighEnd = null)
+{
+    private static readonly IReadOnlySet<uint> None = new HashSet<uint>();
+
+    /// <summary>Whether the character has cleared Extreme or Savage <paramref name="contentFinderConditionId"/>.</summary>
+    public bool HasCleared(uint contentFinderConditionId) => (ClearedHighEnd ?? None).Contains(contentFinderConditionId);
+}
 
 /// <summary>Rolling and rerolling the board's slots. No Dalamud dependency.</summary>
 public static class QuestRollRules
@@ -115,26 +126,147 @@ public static class QuestRollRules
         return bracket is { } level ? extremes.Where(d => d.Level == level).ToList() : [];
     }
 
-    /// <summary>The Hard pool: the Savage raids of the highest bracket the character's level reaches, plus every Ultimate they've cleared.</summary>
-    public static List<QuestDutyRow> HardPool(IReadOnlyList<QuestDutyRow> duties, QuestCharacterFacts facts)
+    /// <summary>A Savage tier's fights; older tiers are told apart by the sheet's order in runs of this many.</summary>
+    public const int SavageFightsPerTier = 4;
+
+    /// <summary>A cleared Ultimate's weight in a Hard draw, against 1 for each Savage fight.</summary>
+    public const double UltimateWeight = 0.25;
+
+    /// <summary>
+    /// The newest Savage tier in the highest bracket the character's level reaches, first fight to last: the tier the game
+    /// marks as current (<see cref="QuestDutyRow.HighEnd"/>), or else the last <see cref="SavageFightsPerTier"/> fights
+    /// of the bracket in the sheet's order (a character below the level cap).
+    /// </summary>
+    public static List<QuestDutyRow> NewestSavageTier(IReadOnlyList<QuestDutyRow> duties, QuestCharacterFacts facts)
     {
         var savage = duties.Where(d => d.Category == QuestDutyCategory.Savage).ToList();
-        var bracket = Bracket(savage.Select(d => d.Level), facts.HighestCombatLevel);
-        var pool = bracket is { } level ? savage.Where(d => d.Level == level).ToList() : [];
-        pool.AddRange(duties.Where(d => d.Category == QuestDutyCategory.Ultimate
-                                        && facts.ClearedUltimates.Contains(d.ContentFinderConditionId)));
+        if (Bracket(savage.Select(d => d.Level), facts.HighestCombatLevel) is not { } level)
+            return [];
+
+        var bracket = savage
+            .Where(d => d.Level == level)
+            .DistinctBy(d => d.ContentFinderConditionId)
+            .OrderBy(d => d.SortKey)
+            .ThenBy(d => d.ContentFinderConditionId)
+            .ToList();
+        var current = bracket.Where(d => d.HighEnd).ToList();
+        return current.Count > 0 ? current : bracket.Skip(Math.Max(0, bracket.Count - SavageFightsPerTier)).ToList();
+    }
+
+    /// <summary>The Ultimate raids the character has cleared.</summary>
+    public static List<QuestDutyRow> ClearedUltimates(IReadOnlyList<QuestDutyRow> duties, QuestCharacterFacts facts) =>
+        duties.Where(d => d.Category == QuestDutyCategory.Ultimate && facts.ClearedUltimates.Contains(d.ContentFinderConditionId))
+            .DistinctBy(d => d.ContentFinderConditionId)
+            .ToList();
+
+    /// <summary>The Hard pool: the newest Savage tier, plus every Ultimate the character has cleared.</summary>
+    public static List<QuestDutyRow> HardPool(IReadOnlyList<QuestDutyRow> duties, QuestCharacterFacts facts)
+    {
+        var pool = NewestSavageTier(duties, facts);
+        pool.AddRange(ClearedUltimates(duties, facts));
         return pool;
     }
+
+    private static readonly IReadOnlySet<uint> NoDuties = new HashSet<uint>();
 
     /// <summary>The week's Medium and Hard slots.</summary>
     public static List<QuestSlot> RollWeekly(IReadOnlyList<QuestDutyRow> duties, QuestCharacterFacts facts, Random rng)
     {
-        var slots = Pick(MediumPool(duties, facts), MediumSlots, rng)
+        var slots = PickMedium(MediumPool(duties, facts), facts, MediumSlots, NoDuties, NoDuties, needCleared: true, rng)
             .Select(d => DutySlot(QuestDifficulty.Medium, QuestSlotKind.Extreme, d))
             .ToList();
-        slots.AddRange(Pick(HardPool(duties, facts), HardSlots, rng)
+        slots.AddRange(PickHard(duties, facts, HardSlots, NoDuties, NoDuties, needCleared: true, rng)
             .Select(d => DutySlot(QuestDifficulty.Hard, KindForHard(d.Category), d)));
         return slots;
+    }
+
+    /// <summary>
+    /// Up to <paramref name="count"/> Extremes from <paramref name="pool"/>: one the character has cleared first when
+    /// <paramref name="needCleared"/> (if any), then random others. Never one in <paramref name="taken"/>; one in
+    /// <paramref name="avoid"/> only when nothing else is left.
+    /// </summary>
+    public static List<QuestDutyRow> PickMedium(
+        List<QuestDutyRow> pool,
+        QuestCharacterFacts facts,
+        int count,
+        IReadOnlySet<uint> taken,
+        IReadOnlySet<uint> avoid,
+        bool needCleared,
+        Random rng)
+    {
+        var chosen = new List<QuestDutyRow>();
+        bool Free(QuestDutyRow d) => !taken.Contains(d.ContentFinderConditionId) && chosen.All(c => c.ContentFinderConditionId != d.ContentFinderConditionId);
+
+        if (needCleared && count > 0
+            && PreferNotAvoided(pool.Where(d => Free(d) && facts.HasCleared(d.ContentFinderConditionId)), avoid) is { Count: > 0 } cleared)
+            chosen.Add(cleared[rng.Next(cleared.Count)]);
+
+        while (chosen.Count < count && PreferNotAvoided(pool.Where(Free), avoid) is { Count: > 0 } rest)
+            chosen.Add(rest[rng.Next(rest.Count)]);
+
+        return chosen;
+    }
+
+    /// <summary>
+    /// Up to <paramref name="count"/> Hard duties. First, when <paramref name="needCleared"/>, a Savage of the newest tier
+    /// the character has cleared (random among them, if any). Every other pick is one weighted draw: "a Savage" weighs 1
+    /// for each tier fight still free, and each cleared Ultimate <see cref="UltimateWeight"/>. A Savage pick is the earliest
+    /// fight not cleared yet, or a random one once all are cleared. Never one in <paramref name="taken"/>; one in
+    /// <paramref name="avoid"/> only when nothing else is left.
+    /// </summary>
+    public static List<QuestDutyRow> PickHard(
+        IReadOnlyList<QuestDutyRow> duties,
+        QuestCharacterFacts facts,
+        int count,
+        IReadOnlySet<uint> taken,
+        IReadOnlySet<uint> avoid,
+        bool needCleared,
+        Random rng)
+    {
+        var tier = NewestSavageTier(duties, facts);
+        var ultimates = ClearedUltimates(duties, facts);
+        var chosen = new List<QuestDutyRow>();
+        bool Free(QuestDutyRow d) => !taken.Contains(d.ContentFinderConditionId) && chosen.All(c => c.ContentFinderConditionId != d.ContentFinderConditionId);
+
+        if (needCleared && count > 0
+            && PreferNotAvoided(tier.Where(d => Free(d) && facts.HasCleared(d.ContentFinderConditionId)), avoid) is { Count: > 0 } cleared)
+            chosen.Add(cleared[rng.Next(cleared.Count)]);
+
+        while (chosen.Count < count)
+        {
+            // Avoided duties come back only when neither kind has anything else left.
+            var savages = tier.Where(d => Free(d) && !avoid.Contains(d.ContentFinderConditionId)).ToList();
+            var ults = ultimates.Where(d => Free(d) && !avoid.Contains(d.ContentFinderConditionId)).ToList();
+            if (savages.Count == 0 && ults.Count == 0)
+            {
+                savages = tier.Where(Free).ToList();
+                ults = ultimates.Where(Free).ToList();
+            }
+
+            if (savages.Count == 0 && ults.Count == 0)
+                break;
+
+            var draw = rng.NextDouble() * (savages.Count + UltimateWeight * ults.Count);
+            if (draw < savages.Count)
+            {
+                var uncleared = savages.FirstOrDefault(d => !facts.HasCleared(d.ContentFinderConditionId));
+                chosen.Add(uncleared.ContentFinderConditionId != 0 ? uncleared : savages[rng.Next(savages.Count)]);
+            }
+            else
+            {
+                chosen.Add(ults[rng.Next(ults.Count)]);
+            }
+        }
+
+        return chosen;
+    }
+
+    /// <summary>The candidates not in <paramref name="avoid"/>, or all of them when every one is.</summary>
+    private static List<QuestDutyRow> PreferNotAvoided(IEnumerable<QuestDutyRow> candidates, IReadOnlySet<uint> avoid)
+    {
+        var all = candidates.DistinctBy(d => d.ContentFinderConditionId).ToList();
+        var preferred = all.Where(d => !avoid.Contains(d.ContentFinderConditionId)).ToList();
+        return preferred.Count > 0 ? preferred : all;
     }
 
     public static bool IsRerollUsed(QuestBoardState state, QuestDifficulty difficulty) => difficulty switch
@@ -150,9 +282,11 @@ public static class QuestRollRules
 
     /// <summary>
     /// Replaces every open slot of <paramref name="difficulty"/> (Medium or Hard) and uses up its weekly reroll. Completed
-    /// slots stay as they are, so the week still allows at most 3 Medium and 2 Hard completions. The new duties avoid both
-    /// the replaced and the completed ones when the pool has enough others; when it doesn't, a replaced duty may come back,
-    /// but a completed one never does. Returns false (and changes nothing) when no reroll is allowed.
+    /// slots stay as they are, so the week still allows at most 3 Medium and 2 Hard completions. The new duties follow the
+    /// roll's rules (<see cref="PickMedium"/>, <see cref="PickHard"/>): a cleared one is kept on the board unless a
+    /// completed slot already is one, and they avoid the replaced duties when the pool has others; when it doesn't, a
+    /// replaced duty may come back, but a completed one never does. Returns false (and changes nothing) when no reroll is
+    /// allowed.
     /// </summary>
     public static bool Reroll(
         QuestBoardState state, QuestDifficulty difficulty, IReadOnlyList<QuestDutyRow> duties, QuestCharacterFacts facts, Random rng)
@@ -162,18 +296,16 @@ public static class QuestRollRules
 
         var current = state.SlotsOf(difficulty).ToList();
         var open = current.Where(s => !s.Completed).ToList();
-        var completedIds = current.Where(s => s.Completed).Select(s => s.ContentFinderConditionId).ToHashSet();
+        var completed = current.Where(s => s.Completed).ToList();
+        var completedIds = completed.Select(s => s.ContentFinderConditionId).ToHashSet();
         var openIds = open.Select(s => s.ContentFinderConditionId).ToHashSet();
-        var pool = (difficulty == QuestDifficulty.Medium ? MediumPool(duties, facts) : HardPool(duties, facts))
-            .Where(d => !completedIds.Contains(d.ContentFinderConditionId))
-            .ToList();
-
-        var fresh = Pick(pool.Where(d => !openIds.Contains(d.ContentFinderConditionId)).ToList(), open.Count, rng);
-        if (fresh.Count < open.Count)
-        {
-            var chosen = fresh.Select(d => d.ContentFinderConditionId).ToHashSet();
-            fresh.AddRange(Pick(pool.Where(d => !chosen.Contains(d.ContentFinderConditionId)).ToList(), open.Count - fresh.Count, rng));
-        }
+        var fresh = difficulty == QuestDifficulty.Medium
+            ? PickMedium(
+                MediumPool(duties, facts), facts, open.Count, completedIds, openIds,
+                needCleared: !completed.Any(s => facts.HasCleared(s.ContentFinderConditionId)), rng)
+            : PickHard(
+                duties, facts, open.Count, completedIds, openIds,
+                needCleared: !completed.Any(s => s.Kind == QuestSlotKind.Savage && facts.HasCleared(s.ContentFinderConditionId)), rng);
 
         // Each open slot is replaced where it stands; one the pool can't refill is dropped.
         var next = 0;
@@ -198,6 +330,13 @@ public static class QuestRollRules
         else
             state.HardRerollUsed = true;
         return true;
+    }
+
+    /// <summary>The board has Easy slots and every one is done (a full clear rolls a new set before the daily reset).</summary>
+    public static bool AllEasyDone(QuestBoardState state)
+    {
+        var easy = state.SlotsOf(QuestDifficulty.Easy).ToList();
+        return easy.Count > 0 && easy.All(s => s.Completed);
     }
 
     /// <summary>Puts this reset's Easy slots in place of the old ones (Easy stays first).</summary>

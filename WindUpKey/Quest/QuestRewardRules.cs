@@ -22,6 +22,30 @@ public static class QuestRewardRules
     /// <summary>A Medium or Hard clear done unsynced gives this share of its wind, and no stickers.</summary>
     public const double UnsyncedShare = 0.25;
 
+    /// <summary>A duty slot the character had never cleared before gives this many times its wind.</summary>
+    public const double FirstClearMultiplier = 3;
+
+    /// <summary>An Ultimate slot gives this many times a Hard slot's wind (its stickers stay 3).</summary>
+    public const double UltimateMultiplier = 3;
+
+    /// <summary>A paired partner in the party when the duty or turn-in completes.</summary>
+    public const double PartnerPartyMultiplier = 1.5;
+
+    /// <summary>One of the doll's owners in the party (instead of <see cref="PartnerPartyMultiplier"/>).</summary>
+    public const double OwnerPartyMultiplier = 2;
+
+    /// <summary>The wind multiplier for who was in the party.</summary>
+    public static double PartyMultiplier(QuestPartyBonus bonus) => bonus switch
+    {
+        QuestPartyBonus.Owner => OwnerPartyMultiplier,
+        QuestPartyBonus.Partner => PartnerPartyMultiplier,
+        _ => 1,
+    };
+
+    /// <summary>Whether a slot can give the first-clear bonus: a duty slot (not an MSQ turn-in or the Leveling Roulette).</summary>
+    public static bool CanBeFirstClear(QuestSlotKind kind) =>
+        kind is QuestSlotKind.Duty or QuestSlotKind.Unlock or QuestSlotKind.Extreme or QuestSlotKind.Savage or QuestSlotKind.Ultimate;
+
     /// <summary>What one completed slot gives.</summary>
     public readonly record struct SlotReward(int Stickers, double Hours);
 
@@ -39,12 +63,18 @@ public static class QuestRewardRules
 
     /// <summary>
     /// A duty clear that matched <paramref name="slot"/>: Easy needs it synced (else nothing), and an Easy trial or normal
-    /// raid gives half wind; an unsynced Medium or Hard clear gives a quarter of the wind and no stickers.
+    /// raid gives half wind; an unsynced Medium or Hard clear gives a quarter of the wind and no stickers. An Ultimate's
+    /// wind is <see cref="UltimateMultiplier"/>×, and a <paramref name="firstClear"/> of a duty slot
+    /// <see cref="FirstClearMultiplier"/>× on top (the multipliers apply to the wind only, and multiply together).
     /// </summary>
-    public static SlotReward ForDutyClear(QuestSlot slot, bool synced)
+    public static SlotReward ForDutyClear(QuestSlot slot, bool synced, bool firstClear = false)
     {
         var stickers = StickersFor(slot.Difficulty);
         var hours = stickers * HoursPerSticker;
+        if (slot.Kind == QuestSlotKind.Ultimate)
+            hours *= UltimateMultiplier;
+        if (firstClear && CanBeFirstClear(slot.Kind))
+            hours *= FirstClearMultiplier;
         if (slot.Difficulty == QuestDifficulty.Easy)
         {
             if (!synced)
@@ -70,4 +100,16 @@ public static class QuestRewardRules
     /// <param name="Hours">Wind added (when not <paramref name="FillToCap"/>).</param>
     /// <param name="FillToCap">Three or more lines at once: wind goes to the overwind cap.</param>
     public readonly record struct LineBonus(double Hours, bool FillToCap);
+}
+
+/// <summary>Who was in the doll's party when a duty or turn-in completed.</summary>
+public enum QuestPartyBonus : byte
+{
+    None = 0,
+
+    /// <summary>A paired partner (doll or winder).</summary>
+    Partner = 1,
+
+    /// <summary>One of the doll's owners.</summary>
+    Owner = 2,
 }

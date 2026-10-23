@@ -136,6 +136,9 @@ public class Configuration : IPluginConfiguration
     /// </summary>
     public bool MoodlesStatusEnabled { get; set; }
 
+    /// <summary>The one-time Discord invite pop-up was shown (for every character on this PC).</summary>
+    public bool DiscordPromptShown { get; set; }
+
     /// <summary>
     /// When true, re-run Moodles' own automation after each area change. Moodles only runs it
     /// on login and job change, so automation moodles removed by hand otherwise stay off.
@@ -178,6 +181,16 @@ public class Configuration : IPluginConfiguration
 
     public int BrokenRecoveryMinutes { get; set; } = WindLayers.DefaultRecoveryMinutes;
 
+    /// <summary>
+    /// Vacation mode: when it began, or null when off (per character, mirrored like the fields above). While on, the
+    /// doll's wind is frozen (as of then), they move freely, and winding, unwinding, repairs, springs, Calls and the quest
+    /// board are refused. Only the doll turns it on or off.
+    /// </summary>
+    public DateTimeOffset? VacationSinceUtc { get; set; }
+
+    /// <summary>Last-write-wins stamp for <see cref="VacationSinceUtc"/> sync with the relay (the doll's other PCs).</summary>
+    public DateTimeOffset? VacationUpdatedUtc { get; set; }
+
     /// <summary>Last paired-partner wind request sent by this doll; shared across all partners.</summary>
     public DateTimeOffset? LastWindRequestUtc { get; set; }
 
@@ -207,6 +220,9 @@ public class Configuration : IPluginConfiguration
 
     public bool IsDoll => Role == PlayerRole.Doll;
     public bool IsWinder => Role == PlayerRole.Winder;
+
+    /// <summary>A doll on vacation (<see cref="VacationSinceUtc"/>): winders never are.</summary>
+    public bool IsOnVacation => IsDoll && VacationSinceUtc is not null;
     public bool HasChosenRole => Role is PlayerRole.Doll or PlayerRole.Winder;
 
     public static string FormatContentId(ulong contentId) => contentId.ToString("X16");
@@ -365,6 +381,8 @@ public class Configuration : IPluginConfiguration
             WindAsOfUtc = WindAsOfUtc,
             BrokenUntilUtc = BrokenUntilUtc,
             BrokenRecoveryMinutes = BrokenRecoveryMinutes,
+            VacationSinceUtc = VacationSinceUtc,
+            VacationUpdatedUtc = VacationUpdatedUtc,
             LastWindRequestUtc = LastWindRequestUtc,
             LowWindWarningsFired = LowWindWarningsFired,
             LowWindTriggerHighSeconds = LowWindTriggerHighSeconds,
@@ -407,6 +425,8 @@ public class Configuration : IPluginConfiguration
         WindAsOfUtc = profile.WindAsOfUtc;
         BrokenUntilUtc = profile.BrokenUntilUtc;
         BrokenRecoveryMinutes = WindLayers.ClampRecoveryMinutes(profile.BrokenRecoveryMinutes <= 0 ? WindLayers.DefaultRecoveryMinutes : profile.BrokenRecoveryMinutes);
+        VacationSinceUtc = profile.VacationSinceUtc;
+        VacationUpdatedUtc = profile.VacationUpdatedUtc;
         LastWindRequestUtc = profile.LastWindRequestUtc;
         LowWindWarningsFired = profile.LowWindWarningsFired;
         LowWindTriggerHighSeconds = profile.LowWindTriggerHighSeconds;

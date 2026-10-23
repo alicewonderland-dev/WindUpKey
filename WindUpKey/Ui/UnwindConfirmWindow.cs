@@ -20,11 +20,20 @@ public sealed class UnwindConfirmWindow : Window
         IsOpen = false;
     }
 
-    /// <summary>Framework thread, each tick: open while there's a quote to answer.</summary>
+    /// <summary>The quote this window was last opened for, so closing it (Cancel or the X) never reopens it.</summary>
+    private object? _shownQuote;
+
+    /// <summary>
+    /// Framework thread, each tick: opens once for each new quote. Dalamud calls <see cref="OnClose"/> only on the next
+    /// draw, after this tick, so reopening on any quote still there would bring back one the player just closed.
+    /// </summary>
     public void Sync()
     {
-        if (_relay.LastUnwindQuote is not null && !IsOpen)
+        if (_relay.LastUnwindQuote is { } quote && !ReferenceEquals(quote, _shownQuote))
+        {
+            _shownQuote = quote;
             IsOpen = true;
+        }
     }
 
     public override void OnClose() => _relay.ClearUnwindQuote();
@@ -69,6 +78,9 @@ public sealed class UnwindConfirmWindow : Window
 
         ImGui.SameLine();
         if (ImGui.Button("Cancel", new Vector2(120, 0)))
+        {
+            _relay.ClearUnwindQuote();
             IsOpen = false;
+        }
     }
 }

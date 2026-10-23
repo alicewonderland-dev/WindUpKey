@@ -170,7 +170,7 @@ public static class QuestContentCatalog
                 if (category == QuestDutyCategory.Other)
                     continue;
 
-                duties.Add(new QuestDutyRow(row.RowId, category, row.ClassJobLevelRequired, row.MentorRoulette));
+                duties.Add(new QuestDutyRow(row.RowId, category, row.ClassJobLevelRequired, row.MentorRoulette, row.SortKey, row.HighEndDuty));
                 instances[row.RowId] = row.Content.RowId;
             }
         }

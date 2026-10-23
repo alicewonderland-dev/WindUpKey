@@ -65,13 +65,21 @@ public sealed class QuestBoardTab
         ImGui.Separator();
         ImGui.TextWrapped(_quests.ForDoll
             ? "Clear duties for stickers: Easy duties give 1, Medium 2 and Hard 3, and every sticker winds your key. " +
-              "Finish a line (row, column or diagonal) for bonus wind and a spare spring; the board then clears. Quest " +
-              "wind can take you past your max wind hours, up to twice the max. Easy duties reset daily, Medium and Hard weekly."
+              "Finish a line (row, column or diagonal) for bonus wind and a spare spring; that line is then wiped, and the " +
+              "rest of the board stays. A first clear gives triple wind, and so does an Ultimate; a partner in your " +
+              "party adds half again, or your owner doubles it. Quest wind can take you past your max wind hours, up to " +
+              "twice the max. Easy duties reset daily (or as soon as you finish them all), Medium and Hard weekly."
             : "Clear duties for stickers: Easy duties give 1, Medium 2 and Hard 3. Finish a line (row, column or " +
-              "diagonal) for 2 spare springs; the board then clears. Easy duties reset daily, Medium and Hard weekly.");
+              "diagonal) for 2 spare springs; that line is then wiped, and the rest of the board stays. Easy duties " +
+              "reset daily (or as soon as you finish them all), Medium and Hard weekly.");
         ImGui.Spacing();
 
-        if (!_quests.IsRolled)
+        if (_quests.OnVacation)
+        {
+            ImGui.TextColored(UnsyncedColor, "You're on vacation: the board is paused until you're back.");
+            ImGui.Spacing();
+        }
+        else if (!_quests.IsRolled)
         {
             ImGui.TextDisabled("The board is getting today's duties ready…");
             ImGui.Spacing();
@@ -126,6 +134,7 @@ public sealed class QuestBoardTab
                 fade = 1f - (float)(elapsed / ClearAnimation);
         }
 
+        // A finished line's stickers flash and fade out as it's wiped; the rest of the board stays.
         for (var i = 0; i < StickerBoard.CellCount; i++)
         {
             var (min, max) = CellRect(origin, unit, i);

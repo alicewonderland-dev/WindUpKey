@@ -1,6 +1,6 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
     <PropertyGroup>
-    <Version>0.2.8.0</Version>
+    <Version>0.2.9.0</Version>
     <Description></Description>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -9,7 +9,7 @@
 
   <!-- 11-D2: Testing is the same version as Release (same commit); it adds the self-test and its diagnostics. The catalog has no Testing link. -->
   <PropertyGroup Condition="'$(Configuration)' == 'Testing'">
-    <Version>0.2.8.0</Version>
+    <Version>0.2.9.0</Version>
     <DefineConstants>$(DefineConstants);WINDUP_TESTING</DefineConstants>
   </PropertyGroup>
 

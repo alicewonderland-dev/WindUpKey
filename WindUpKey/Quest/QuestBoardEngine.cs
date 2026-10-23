@@ -1,13 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using WindUpKey.Protocol;
 
 namespace WindUpKey.Quest;
 
-/// <summary>One sticker put on the board, and the lines it finished (the board clears when there are any).</summary>
+/// <summary>One sticker put on the board, and the lines it finished (their cells are wiped; the rest stays).</summary>
 /// <param name="Cell">The cell it went in (row * 4 + column).</param>
 /// <param name="Lines">How many lines it finished.</param>
-/// <param name="BoardBefore">The board with this sticker, before a line cleared it (for the clear's animation).</param>
+/// <param name="BoardBefore">The board with this sticker, before its lines were wiped (for the line animation).</param>
 /// <param name="LineCells">The cells of the finished lines (0 when none).</param>
 public readonly record struct StickerPlacement(int Cell, int Lines, ushort BoardBefore, ushort LineCells);
 
@@ -27,7 +28,8 @@ public sealed record QuestAward(double Hours, bool FillToCap, IReadOnlyList<Stic
 /// <param name="ContentFinderConditionId">The duty.</param>
 /// <param name="Synced">Level-synced (or at or below the duty's sync level).</param>
 /// <param name="LevelingRouletteBelowCap">Entered through the Leveling Roulette on a job below the level cap.</param>
-public readonly record struct QuestDutyClear(uint ContentFinderConditionId, bool Synced, bool LevelingRouletteBelowCap);
+/// <param name="FirstClear">The character had never cleared the duty when it started.</param>
+public readonly record struct QuestDutyClear(uint ContentFinderConditionId, bool Synced, bool LevelingRouletteBelowCap, bool FirstClear = false);
 
 /// <summary>A slot a clear completed (null for an MSQ turn-in on a day without an MSQ slot), and its reward.</summary>
 public readonly record struct QuestSlotCredit(QuestSlot? Slot, QuestRewardRules.SlotReward Reward);
@@ -60,7 +62,7 @@ public static class QuestBoardEngine
 
             slot.Completed = true;
             slot.CompletedUnsynced = !clear.Synced;
-            credits.Add(new QuestSlotCredit(slot, QuestRewardRules.ForDutyClear(slot, clear.Synced)));
+            credits.Add(new QuestSlotCredit(slot, QuestRewardRules.ForDutyClear(slot, clear.Synced, clear.FirstClear)));
         }
 
         return new QuestDutyCredit(credits, unsyncedEasy);
@@ -120,7 +122,7 @@ public static class QuestBoardEngine
     /// later, so replaying the story in New Game+ earns nothing. Returns false when it was already done.
     /// </summary>
     /// <summary>The most lines one spring grant may carry (the relay refuses more as malformed).</summary>
-    public const int MaxLinesPerGrant = 9;
+    public const int MaxLinesPerGrant = SpringRules.MaxLinesPerGrant;
 
     /// <summary>
     /// Lines just completed, to be paid in springs: they join the newest batch not sent yet (up to
@@ -169,8 +171,8 @@ public static class QuestBoardEngine
 
     /// <summary>
     /// Puts <paramref name="stickers"/> on the board one at a time in random empty cells (<paramref name="nextIndex"/>
-    /// returns 0 ≤ i &lt; n for n empty cells). Lines are checked after each sticker: any line clears the board at once,
-    /// and the stickers left go on the fresh board. <paramref name="baseHours"/> is the slots' wind; line bonuses add to it.
+    /// returns 0 ≤ i &lt; n for n empty cells). After each sticker, the lines it finished earn their bonus and their cells
+    /// are wiped; the rest of the board stays. <paramref name="baseHours"/> is the slots' wind; line bonuses add to it.
     /// </summary>
     public static QuestAward PlaceStickers(QuestBoardState state, int stickers, double baseHours, Func<int, int> nextIndex)
     {
@@ -179,14 +181,16 @@ public static class QuestBoardEngine
         var placements = new List<StickerPlacement>();
         for (var i = 0; i < stickers; i++)
         {
-            // Can't happen (a full board always has a line), but never loop on a damaged config.
+            // Can't happen (a full board always has a line, which is wiped), but never loop on a damaged config.
             if (StickerBoard.EmptyCount(state.Stickers) == 0)
                 state.Stickers = 0;
 
             var board = StickerBoard.Place(state.Stickers, nextIndex(StickerBoard.EmptyCount(state.Stickers)), out var cell);
             var lines = StickerBoard.CompletedLines(board);
-            placements.Add(new StickerPlacement(cell, lines, board, StickerBoard.CompletedLineCells(board)));
-            state.Stickers = lines == 0 ? board : (ushort)0;
+            var lineCells = StickerBoard.CompletedLineCells(board);
+            placements.Add(new StickerPlacement(cell, lines, board, lineCells));
+            // Only the finished lines are wiped; the rest of the board stays.
+            state.Stickers = (ushort)(board & ~lineCells);
             if (lines == 0)
                 continue;
 

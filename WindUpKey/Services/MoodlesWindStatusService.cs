@@ -378,20 +378,22 @@ public sealed class MoodlesWindStatusService : IDisposable
             forceApply = true;
         }
 
-        // Turned off by any path, or the role changed (switched to winder, remote settings): ask for the clear below.
-        var wanted = _config.MoodlesStatusEnabled && _config.IsDoll;
+        // Turned off by any path, or the role changed (switched to winder, remote settings), or vacation began: ask for the
+        // clear below. Vacation counts as off: the wind moodles go while the doll is away.
+        var enabled = _config.MoodlesStatusEnabled && !_config.IsOnVacation;
+        var wanted = enabled && _config.IsDoll;
         if (_wasWanted && !wanted)
             _gate.RequestClear();
         _wasWanted = wanted;
 
         // 06-A13: turned off in the UI: one probe and clear, even of a status we don't remember applying.
-        if (_gate.TakeClearRequest(_config.MoodlesStatusEnabled, _config.IsDoll, _clientState.IsLoggedIn))
+        if (_gate.TakeClearRequest(enabled, _config.IsDoll, _clientState.IsLoggedIn))
             ClearAfterTurnedOff();
 
         // 06-A3: the settings, the role and the login are checked before any IPC probe, and a probe runs at most
         // every 10 s while Moodles is unavailable.
         var now = DateTime.UtcNow;
-        var step = _gate.Next(_config.MoodlesStatusEnabled, _config.IsDoll, _clientState.IsLoggedIn, _moodlesAvailable, now);
+        var step = _gate.Next(enabled, _config.IsDoll, _clientState.IsLoggedIn, _moodlesAvailable, now);
         if (step == MoodlesStep.Off)
         {
             ClearApplied();

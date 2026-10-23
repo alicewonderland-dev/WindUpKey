@@ -202,7 +202,7 @@ public sealed class WindLayersTests
     {
         var timer = ProfileSettingsTests.PluginSource(Path.Combine("Services", "WindTimerService.cs"));
 
-        Assert.Contains("_config.BrokenUntilUtc).At(now).Relayer(_config.MaxWindHours);", timer);
+        Assert.Contains("(_config.IsOnVacation ? stored.Frozen(now) : stored.At(now)).Relayer(_config.MaxWindHours);", timer);
     }
 
     [Fact]
