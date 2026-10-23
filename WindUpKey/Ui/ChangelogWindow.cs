@@ -12,6 +12,16 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.7.0 — Quest board (Testing)",
+            [
+                "The quest board replaces daily quests: 5 Easy duties a day, and 3 Medium and 2 Hard duties a week.",
+                "Easy duties give 1 sticker, Medium 2 and Hard 3, and every sticker winds your key. Finish a line on the 4×4 board for bonus wind.",
+                "Quest wind can take you past your max wind hours, up to twice the max.",
+                "Duties must be done synced. Medium and Hard done unsynced give a quarter of the wind and no stickers.",
+                "One Medium and one Hard reroll a week; completed duties stay.",
+                "Any daily quest in progress is dropped when you update.",
+            ]),
+        new(
             "0.2.6.1 — Moodle fix and Discord link",
             [
                 "The wind charge Moodle is now off by default for new installs. Your current setting is kept.",

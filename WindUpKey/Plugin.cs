@@ -110,8 +110,8 @@ public sealed class Plugin : IDalamudPlugin
         _timer = new WindTimerService(Configuration, _lockController, commands, ObjectTable, Condition, _lowWind, ChatGui);
         _consent = new ConsentService(Configuration);
         _notifier = new ChatWindNotifier(ChatGui);
-        var quests = new QuestWindService(
-            Configuration, _timer, DutyState, DataManager, ClientState, ChatGui, Log);
+        var quests = new QuestBoardService(
+            Configuration, _timer, DutyState, DataManager, ClientState, Condition, Framework, PlayerState, ChatGui, Log);
         _relay = new RelayClient(
             Configuration, ClientState, ObjectTable, Condition, Framework, Log, ChatGui, DataManager, PluginInterface, _consent, _timer, _notifier, _sounds, commands);
         _moodlesStatus = new MoodlesWindStatusService(

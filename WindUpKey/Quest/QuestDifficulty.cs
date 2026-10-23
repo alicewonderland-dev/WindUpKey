@@ -1,6 +1,9 @@
 namespace WindUpKey.Quest;
 
-/// <summary>Doll self-quest difficulty. <see cref="None"/> means no active quest.</summary>
+/// <summary>
+/// The tier of a quest board slot: Easy slots reset daily, Medium and Hard weekly. <see cref="None"/> is never a valid
+/// slot (a config with it drops the slot).
+/// </summary>
 public enum QuestDifficulty : byte
 {
     None = 0,

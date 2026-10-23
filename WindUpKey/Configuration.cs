@@ -13,9 +13,10 @@ public class Configuration : IPluginConfiguration
 {
     /// <summary>
     /// 12: per-character lock emote (06-A1). 06-B1's <see cref="SafewordPausedUntilUtc"/> needs no bump: absent means no
-    /// pause.
+    /// pause. 13: the quest board (<see cref="QuestBoard"/>, <see cref="Achievements"/>) replaced the daily quest fields,
+    /// which are dropped without reward.
     /// </summary>
-    public const int CurrentVersion = 12;
+    public const int CurrentVersion = 13;
 
     /// <summary>Orphan profile from pre-v6 flat config until the first logged-in ContentId claims it.</summary>
     public const string PendingProfileKey = "pending";
@@ -181,23 +182,11 @@ public class Configuration : IPluginConfiguration
     /// <summary>UTC time of the last low-wind chat echo (any band or expiry).</summary>
     public DateTimeOffset? LowWindLastWarningUtc { get; set; }
 
-    /// <summary>Active daily quest difficulty, or <see cref="QuestDifficulty.None"/>.</summary>
-    public QuestDifficulty QuestDifficulty { get; set; } = QuestDifficulty.None;
+    /// <summary>The active character's quest board (per character, mirrored like the fields above).</summary>
+    public QuestBoardState QuestBoard { get; set; } = new();
 
-    /// <summary>When the current quest difficulty was accepted (UTC).</summary>
-    public DateTimeOffset? QuestAcceptedAtUtc { get; set; }
-
-    /// <summary>Eligible roulette clears credited toward Easy (0–2).</summary>
-    public int QuestRouletteClears { get; set; }
-
-    /// <summary>Current-expansion Extreme clears credited toward Medium.</summary>
-    public int QuestExtremeClears { get; set; }
-
-    /// <summary>True after a current-tier Savage clear credited toward Hard.</summary>
-    public bool QuestSavageCleared { get; set; }
-
-    /// <summary>True after the quest reward has been granted for this accept.</summary>
-    public bool QuestRewardClaimed { get; set; }
+    /// <summary>The active character's achievement flags (<see cref="AchievementFlags"/>), mirrored like the fields above.</summary>
+    public Dictionary<string, DateTimeOffset> Achievements { get; set; } = new(StringComparer.Ordinal);
 
     public bool IsDoll => Role == PlayerRole.Doll;
     public bool IsWinder => Role == PlayerRole.Winder;
@@ -223,12 +212,9 @@ public class Configuration : IPluginConfiguration
                 NormalizePartnerLabels(profile.PairedPartners);
             if (profile is null)
                 continue;
-            profile.QuestRouletteClears = Math.Clamp(
-                profile.QuestRouletteClears, 0, QuestContentCatalog.EasyRouletteRequired);
-            if (profile.QuestExtremeClears < 0)
-                profile.QuestExtremeClears = 0;
-            if (profile.QuestDifficulty is < QuestDifficulty.None or > QuestDifficulty.Hard)
-                profile.QuestDifficulty = QuestDifficulty.None;
+            profile.QuestBoard ??= new QuestBoardState();
+            profile.QuestBoard.Normalize();
+            profile.Achievements = NormalizeAchievements(profile.Achievements);
         }
 
         if (MaxWindHours <= 0)
@@ -256,11 +242,10 @@ public class Configuration : IPluginConfiguration
 
         NormalizePendingKeys();
 
-        QuestRouletteClears = Math.Clamp(QuestRouletteClears, 0, QuestContentCatalog.EasyRouletteRequired);
-        if (QuestExtremeClears < 0)
-            QuestExtremeClears = 0;
-        if (QuestDifficulty is < QuestDifficulty.None or > QuestDifficulty.Hard)
-            QuestDifficulty = QuestDifficulty.None;
+        // 13: the quest board replaced the daily quests; their old fields are simply not read any more.
+        QuestBoard ??= new QuestBoardState();
+        QuestBoard.Normalize();
+        Achievements = NormalizeAchievements(Achievements);
 
         // Always force compiled-in relay endpoint so users cannot drift or see/edit it.
         ApplyRelayDefaults();
@@ -349,12 +334,8 @@ public class Configuration : IPluginConfiguration
             LowWindTriggerMidSeconds = LowWindTriggerMidSeconds,
             LowWindTriggerLowSeconds = LowWindTriggerLowSeconds,
             LowWindLastWarningUtc = LowWindLastWarningUtc,
-            QuestDifficulty = QuestDifficulty,
-            QuestAcceptedAtUtc = QuestAcceptedAtUtc,
-            QuestRouletteClears = QuestRouletteClears,
-            QuestExtremeClears = QuestExtremeClears,
-            QuestSavageCleared = QuestSavageCleared,
-            QuestRewardClaimed = QuestRewardClaimed,
+            QuestBoard = (QuestBoard ?? new QuestBoardState()).Clone(),
+            Achievements = NormalizeAchievements(Achievements),
         };
     }
 
@@ -389,12 +370,9 @@ public class Configuration : IPluginConfiguration
         LowWindTriggerMidSeconds = profile.LowWindTriggerMidSeconds;
         LowWindTriggerLowSeconds = profile.LowWindTriggerLowSeconds;
         LowWindLastWarningUtc = profile.LowWindLastWarningUtc;
-        QuestDifficulty = profile.QuestDifficulty;
-        QuestAcceptedAtUtc = profile.QuestAcceptedAtUtc;
-        QuestRouletteClears = Math.Clamp(profile.QuestRouletteClears, 0, QuestContentCatalog.EasyRouletteRequired);
-        QuestExtremeClears = Math.Max(0, profile.QuestExtremeClears);
-        QuestSavageCleared = profile.QuestSavageCleared;
-        QuestRewardClaimed = profile.QuestRewardClaimed;
+        QuestBoard = profile.QuestBoard?.Clone() ?? new QuestBoardState();
+        QuestBoard.Normalize();
+        Achievements = NormalizeAchievements(profile.Achievements);
 
         if (HardcoreMode)
         {
@@ -443,6 +421,19 @@ public class Configuration : IPluginConfiguration
             .GroupBy(d => d.DollKey, StringComparer.Ordinal)
             .Select(g => g.First())
             .ToList();
+    }
+
+    /// <summary>A copy with the ordinal comparer, without blank ids (a missing or damaged config gives an empty one).</summary>
+    private static Dictionary<string, DateTimeOffset> NormalizeAchievements(Dictionary<string, DateTimeOffset>? flags)
+    {
+        var normalized = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+        foreach (var (id, earned) in flags ?? [])
+        {
+            if (!string.IsNullOrWhiteSpace(id))
+                normalized.TryAdd(id, earned);
+        }
+
+        return normalized;
     }
 
     private static void NormalizePartnerLabels(List<PairedPartner> partners)

@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 namespace WindUpKey.Tests;
 
 /// <summary>
-/// Issue 11: Call and the daily quests ship in Release; only the self-test and its diagnostics stay behind
+/// Issue 11: Call and the quests (now the quest board) ship in Release; only the self-test and its diagnostics stay behind
 /// <c>WINDUP_TESTING</c>. <c>CallTravelService</c>, <c>ConfigWindow</c> and the quest files need Dalamud, so these read
 /// their source.
 /// </summary>
@@ -93,17 +93,23 @@ public sealed class ReleaseGatingTests
     public void QuestSheetReads_ThatMatchNames_AreEnglish()
     {
         var catalog = ProfileSettingsTests.PluginSource(Path.Combine("Quest", "QuestContentCatalog.cs"));
-        var reads = Regex.Matches(catalog, @"GetExcelSheet<(\w+)>\(([^)]*)\)").ToList();
-        Assert.Equal(["ContentRoulette", "ContentFinderCondition"], reads.Select(m => m.Groups[1].Value));
+        var reads = Regex.Matches(catalog, @"GetExcelSheet<([\w.]+)>\(([^)]*)\)").ToList();
+        Assert.Equal(
+            ["ContentFinderCondition", "ContentRoulette", "JournalSection", "Lumina.Excel.Sheets.Quest"],
+            reads.Select(m => m.Groups[1].Value).Distinct().Order());
         Assert.All(reads, m => Assert.Equal("ClientLanguage.English", m.Groups[2].Value));
 
-        // The quest service only looks a row up by ID, so it may keep the client language.
-        var quests = ProfileSettingsTests.PluginSource(Path.Combine("Services", "QuestWindService.cs"));
-        var lookups = Regex.Matches(quests, @"GetExcelSheet<\w+>\(([^)]*)\)(\?\.\w+)?").ToList();
-        Assert.NotEmpty(lookups);
-        Assert.All(lookups, m => Assert.True(
-            m.Groups[1].Value == "ClientLanguage.English" || m.Groups[2].Value == "?.TryGetRow",
-            $"'{m.Value}' reads names in the client language"));
+        // The board service and its game reads only look rows up by ID (display names), so they may keep the client
+        // language; anything else they read is English.
+        foreach (var file in new[] { "QuestBoardService.cs", "QuestGameFacts.cs" })
+        {
+            var source = ProfileSettingsTests.PluginSource(Path.Combine("Services", file));
+            var lookups = Regex.Matches(source, @"GetExcelSheet<[\w.]+>\(([^)]*)\)(\?\.\w+)?").ToList();
+            Assert.NotEmpty(lookups);
+            Assert.All(lookups, m => Assert.True(
+                m.Groups[1].Value == "ClientLanguage.English" || m.Groups[2].Value == "?.TryGetRow",
+                $"{file}: '{m.Value}' reads names in the client language"));
+        }
     }
 
     // ---------- 11 Part A: what WINDUP_TESTING still gates ----------
@@ -140,8 +146,17 @@ public sealed class ReleaseGatingTests
         Path.Combine("Services", "CallTravelDebugLog.cs"),
         Path.Combine("Ui", "CallPromptWindow.cs"),
         Path.Combine("Quest", "QuestDifficulty.cs"),
+        Path.Combine("Quest", "QuestSlot.cs"),
+        Path.Combine("Quest", "QuestBoardState.cs"),
+        Path.Combine("Quest", "QuestResetClock.cs"),
+        Path.Combine("Quest", "StickerBoard.cs"),
+        Path.Combine("Quest", "QuestRewardRules.cs"),
+        Path.Combine("Quest", "QuestBoardEngine.cs"),
+        Path.Combine("Quest", "QuestRollRules.cs"),
         Path.Combine("Quest", "QuestContentCatalog.cs"),
-        Path.Combine("Services", "QuestWindService.cs"),
+        Path.Combine("Services", "QuestGameFacts.cs"),
+        Path.Combine("Services", "QuestBoardService.cs"),
+        Path.Combine("Ui", "QuestBoardTab.cs"),
     ];
 
     [Fact]
@@ -202,7 +217,7 @@ public sealed class ReleaseGatingTests
     private static readonly Regex CallAndQuestCode = new(
         @"\b(CancelActiveCall|TickCallTravel|AttachCallTravel|_callTravel|_callPrompt|CallPromptWindow|CallTravelService"
         + @"|SendCall\w*|RequestDeclineActiveCall|\w*DebugCallPoint|I?PartyList|_pendingCalls|HandleInboundCall|HandleCall\w*"
-        + @"|MessageTypes\.Call\w*|QuestWindService|quests|AddQuestWind|stopcall)\b");
+        + @"|MessageTypes\.Call\w*|QuestBoardService|QuestBoardTab|quests|AddQuestWind|stopcall)\b");
 
     /// <summary>What the self-test's constructor lambdas read from the Call service (Plugin.cs).</summary>
     private static readonly string[] SelfTestCallReads =
@@ -218,7 +233,7 @@ public sealed class ReleaseGatingTests
         "[PluginService] internal static IPartyList PartyList { get; private set; } = null!;",
         "private readonly CallPromptWindow _callPrompt;",
         "private readonly CallTravelService _callTravel;",
-        "var quests = new QuestWindService(",
+        "var quests = new QuestBoardService(",
         "_callPrompt = new CallPromptWindow();",
         "_callTravel = new CallTravelService(",
         "_relay.AttachCallTravel(_callTravel);",

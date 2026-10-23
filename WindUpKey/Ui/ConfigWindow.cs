@@ -7,7 +7,6 @@ using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin.Services;
 using WindUpKey.Protocol;
-using WindUpKey.Quest;
 using WindUpKey.Services;
 
 namespace WindUpKey.Ui;
@@ -17,7 +16,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly Configuration _config;
     private readonly RelayClient _relay;
     private readonly WindTimerService _timer;
-    private readonly QuestWindService _quests;
+    private readonly QuestBoardTab _questTab;
     private readonly ITargetManager _targets;
     private readonly GameCommandRunner _commands;
     private readonly MoodlesWindStatusService _moodlesStatus;
@@ -54,7 +53,6 @@ public sealed class ConfigWindow : Window, IDisposable
 
     /// <summary>06-A4: the safeword being typed, until the edit ends (null when not editing).</summary>
     private string? _safewordDraft;
-    private QuestDifficulty? _questConfirmDifficulty;
     private string? _pairLabelsKey;
     private Vector2 _pairLabelsPos;
     private string? _pairPermsKey;
@@ -78,7 +76,7 @@ public sealed class ConfigWindow : Window, IDisposable
         Configuration config,
         RelayClient relay,
         WindTimerService timer,
-        QuestWindService quests,
+        QuestBoardService quests,
         ITargetManager targets,
         GameCommandRunner commands,
         MoodlesWindStatusService moodlesStatus,
@@ -91,7 +89,7 @@ public sealed class ConfigWindow : Window, IDisposable
         _config = config;
         _relay = relay;
         _timer = timer;
-        _quests = quests;
+        _questTab = new QuestBoardTab(quests, textures);
         _targets = targets;
         _commands = commands;
         _moodlesStatus = moodlesStatus;
@@ -145,7 +143,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
         if (_config.IsDoll && ImGui.BeginTabItem("Quests"))
         {
-            DrawQuestsTab();
+            _questTab.Draw();
             ImGui.EndTabItem();
         }
 
@@ -1455,177 +1453,6 @@ public sealed class ConfigWindow : Window, IDisposable
                 onClick(hours);
             ImGui.SameLine();
         }
-    }
-
-    private void DrawQuestsTab()
-    {
-        ImGui.Spacing();
-        ImGui.TextUnformatted("Daily Quests");
-        ImGui.Separator();
-        ImGui.TextWrapped(
-            "Pick a difficulty once. You are locked into that choice for 24 hours " +
-            "(no completion deadline). Changing difficulty after the lock ends wipes progress. " +
-            "Quest rewards can push you above your max wind hours; you cannot accept a new quest while already above the max.");
-        ImGui.Spacing();
-
-        if (_timer.IsAboveMaxWind())
-        {
-            ImGui.TextColored(new Vector4(1f, 0.55f, 0.2f, 1f), "Above max wind — quests unavailable until you are at or under your cap.");
-            ImGui.Spacing();
-        }
-
-        var canSelect = _quests.CanSelectDifficulty(out var blockReason);
-        var hasQuest = _quests.HasActiveQuest;
-
-        if (hasQuest)
-        {
-            var difficulty = _config.QuestDifficulty;
-            ImGui.TextUnformatted($"Active: {QuestWindService.DifficultyLabel(difficulty)}");
-            if (_config.QuestRewardClaimed)
-                ImGui.TextColored(new Vector4(0.4f, 0.85f, 0.45f, 1f), "Reward claimed.");
-            else
-                ImGui.TextDisabled($"Reward: {QuestContentCatalog.RewardHours(difficulty):0} hours when complete");
-
-            var lockRemaining = _quests.QuestLockRemaining();
-            if (lockRemaining > TimeSpan.Zero)
-            {
-                ImGui.TextDisabled(
-                    $"Difficulty lock: {FormatQuestLock(lockRemaining)} remaining before you can switch.");
-            }
-            else
-            {
-                ImGui.TextDisabled("Difficulty lock ended — you may select a new quest (progress will reset).");
-            }
-
-            ImGui.Spacing();
-            ImGui.TextUnformatted("Progress");
-            ImGui.Separator();
-            DrawQuestChecklist(difficulty);
-            ImGui.Spacing();
-        }
-
-        if (canSelect)
-        {
-            if (hasQuest && _quests.IsQuestLockExpired())
-            {
-                ImGui.TextWrapped("Selecting a difficulty below starts a new quest and clears current progress.");
-                ImGui.Spacing();
-            }
-            else if (!hasQuest)
-            {
-                ImGui.TextUnformatted("Choose a difficulty:");
-                ImGui.Spacing();
-            }
-
-            DrawQuestDifficultyButton(
-                QuestDifficulty.Easy,
-                "Easy — 24h",
-                "Complete 2 roulettes from Expert, Level Cap, Leveling, MSQ, or Alliance Raid.");
-            DrawQuestDifficultyButton(
-                QuestDifficulty.Medium,
-                "Medium — 36h",
-                "Easy requirements, plus 3 current-expansion Extreme clears.");
-            DrawQuestDifficultyButton(
-                QuestDifficulty.Hard,
-                "Hard — 48h",
-                "Easy and Medium requirements, plus 1 current-tier Savage clear (Heavyweight M9S–M12S).");
-        }
-        else if (!string.IsNullOrEmpty(blockReason) && !hasQuest)
-        {
-            ImGui.TextDisabled(blockReason);
-        }
-        else if (!canSelect && hasQuest && !string.IsNullOrEmpty(blockReason))
-        {
-            ImGui.TextDisabled(blockReason);
-        }
-
-        if (_questConfirmDifficulty is { } pending)
-        {
-            ImGui.OpenPopup("ConfirmQuest###WindUpKeyQuestConfirm");
-            var open = true;
-            if (ImGui.BeginPopupModal(
-                    "ConfirmQuest###WindUpKeyQuestConfirm",
-                    ref open,
-                    ImGuiWindowFlags.AlwaysAutoResize))
-            {
-                ImGui.TextWrapped(
-                    $"Start {QuestWindService.DifficultyLabel(pending)}? " +
-                    "This wipes any current quest progress and locks the new difficulty for 24 hours.");
-                ImGui.Spacing();
-                if (ImGui.Button("Confirm", new Vector2(120, 0)))
-                {
-                    _quests.TryAccept(pending, out _);
-                    _questConfirmDifficulty = null;
-                    ImGui.CloseCurrentPopup();
-                }
-
-                ImGui.SameLine();
-                if (ImGui.Button("Cancel", new Vector2(120, 0)))
-                {
-                    _questConfirmDifficulty = null;
-                    ImGui.CloseCurrentPopup();
-                }
-
-                ImGui.EndPopup();
-            }
-
-            if (!open)
-                _questConfirmDifficulty = null;
-        }
-    }
-
-    private void DrawQuestDifficultyButton(QuestDifficulty difficulty, string label, string description)
-    {
-        var sameAsActive = _config.QuestDifficulty == difficulty
-            && _quests.HasActiveQuest
-            && !_quests.IsQuestLockExpired();
-        if (sameAsActive)
-            ImGui.BeginDisabled();
-
-        if (ImGui.Button(label, new Vector2(280, 0)))
-        {
-            if (_quests.HasActiveQuest)
-                _questConfirmDifficulty = difficulty;
-            else
-                _quests.TryAccept(difficulty, out _);
-        }
-
-        if (sameAsActive)
-            ImGui.EndDisabled();
-
-        ImGui.TextWrapped(description);
-        ImGui.Spacing();
-    }
-
-    private void DrawQuestChecklist(QuestDifficulty difficulty)
-    {
-        var rouletteDone = _config.QuestRouletteClears >= QuestContentCatalog.EasyRouletteRequired;
-        ImGui.TextUnformatted(
-            $"{(rouletteDone ? "[x]" : "[ ]")} Roulettes: {_config.QuestRouletteClears}/{QuestContentCatalog.EasyRouletteRequired} " +
-            "(Expert / Level Cap / Leveling / MSQ / Alliance)");
-
-        if (difficulty >= QuestDifficulty.Medium)
-        {
-            var exDone = _config.QuestExtremeClears >= QuestContentCatalog.MediumExtremeRequired;
-            ImGui.TextUnformatted(
-                $"{(exDone ? "[x]" : "[ ]")} Extremes: {_config.QuestExtremeClears}/{QuestContentCatalog.MediumExtremeRequired} " +
-                "(current expansion)");
-        }
-
-        if (difficulty >= QuestDifficulty.Hard)
-        {
-            ImGui.TextUnformatted(
-                $"{(_config.QuestSavageCleared ? "[x]" : "[ ]")} Savage: current tier (Heavyweight M9S–M12S)");
-        }
-    }
-
-    private static string FormatQuestLock(TimeSpan remaining)
-    {
-        if (remaining.TotalHours >= 1)
-            return $"{(int)remaining.TotalHours}h {remaining.Minutes}m";
-        if (remaining.TotalMinutes >= 1)
-            return $"{(int)remaining.TotalMinutes}m";
-        return $"{Math.Max(1, (int)remaining.TotalSeconds)}s";
     }
 
     private void DrawSafewordTab()

@@ -17,8 +17,8 @@ public static class WindMath
     /// Adds <paramref name="amount"/> to the current expiry (or to <paramref name="now"/> when it is empty or past).
     /// With a cap (<paramref name="maxWindHours"/> not null) the result is at most <c>now + maxWindHours</c>, but
     /// 06-A8: a wind never shortens the timer, so an expiry already past the cap (after a quest wind, or after an owner
-    /// lowered max hours) is kept as it is: <c>max(current, min(current + amount, cap))</c>. A null cap adds the full
-    /// amount (the quest reward).
+    /// lowered max hours) is kept as it is: <c>max(current, min(current + amount, cap))</c>. Quest wind passes twice the
+    /// max (the overwind cap); a null cap adds the full amount (the safeword).
     /// </summary>
     public static WindResult Add(DateTimeOffset now, DateTimeOffset? currentExpiry, TimeSpan amount, double? maxWindHours)
     {

@@ -2,6 +2,7 @@ using System;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
 using WindUpKey.Protocol;
+using WindUpKey.Quest;
 
 namespace WindUpKey.Services;
 
@@ -215,44 +216,35 @@ public sealed class WindTimerService
     }
 
     /// <summary>
-    /// True when remaining wind is strictly above <see cref="Configuration.MaxWindHours"/>.
-    /// Used to block accepting a new daily quest while already over the configured cap.
-    /// </summary>
-    public bool IsAboveMaxWind()
-    {
-        if (!_config.IsDoll)
-            return false;
-
-        var maxHours = Math.Max(0.01, _config.MaxWindHours);
-        return RemainingForWinder().TotalHours > maxHours;
-    }
-
-    /// <summary>
-    /// Quest reward path: extends the timer by the full amount with no MaxWindHours clamp.
-    /// Still emits the vague wound RP echo. Returns the time actually added.
+    /// Quest board path: extends the timer up to the overwind cap (<see cref="QuestRewardRules.OverwindCapHours"/>, twice
+    /// <see cref="Configuration.MaxWindHours"/>), never shortening a longer timer (06-A8). Still emits the vague wound RP
+    /// echo. Returns the time actually added.
     /// </summary>
     public TimeSpan AddQuestWind(double hours)
     {
         if (!_config.IsDoll || hours <= 0)
             return TimeSpan.Zero;
 
-        var actualAdded = AddWind(TimeSpan.FromHours(hours), ignoreMaxCap: true);
-        if (actualAdded > TimeSpan.Zero)
-            _lowWind.OnWoundReceived(actualAdded);
+        var actualAdded = AddWind(TimeSpan.FromHours(hours), capHours: QuestRewardRules.OverwindCapHours(_config.MaxWindHours));
+        // The echo is sized to what the quest gave, not what fit under the cap: the board shows each reward's hours, so a
+        // smaller echo (or none) would tell the doll the timer just reached the cap.
+        _lowWind.OnWoundReceived(TimeSpan.FromHours(hours));
         return actualAdded;
     }
 
-    private TimeSpan AddWind(TimeSpan amount, bool ignoreMaxCap = false)
+    /// <param name="ignoreMaxCap">No cap at all (the safeword).</param>
+    /// <param name="capHours">A cap other than <see cref="Configuration.MaxWindHours"/> (quest overwind).</param>
+    private TimeSpan AddWind(TimeSpan amount, bool ignoreMaxCap = false, double? capHours = null)
     {
         if (!_config.IsDoll || amount <= TimeSpan.Zero)
             return TimeSpan.Zero;
 
-        // 06-A8: capped at MaxWindHours from now, but never shorter than the current expiry.
+        // 06-A8: capped at MaxWindHours (or capHours) from now, but never shorter than the current expiry.
         var (proposed, actualAdded) = WindMath.Add(
             DateTimeOffset.UtcNow,
             _config.ExpiryUtc,
             amount,
-            ignoreMaxCap ? null : _config.MaxWindHours);
+            ignoreMaxCap ? null : capHours ?? _config.MaxWindHours);
         _config.ExpiryUtc = proposed;
         _config.WindUpdatedUtc = DateTimeOffset.UtcNow;
         _config.Save();

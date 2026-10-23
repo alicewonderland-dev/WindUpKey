@@ -87,21 +87,12 @@ public sealed class CharacterProfile
 
     public DateTimeOffset? LowWindLastWarningUtc { get; set; }
 
-    /// <summary>Active daily quest difficulty, or <see cref="QuestDifficulty.None"/>.</summary>
-    public QuestDifficulty QuestDifficulty { get; set; } = QuestDifficulty.None;
+    /// <summary>
+    /// The doll's quest board (stickers, this reset's slots, the weekly rerolls). Config version 13 replaced the daily
+    /// quest fields with it; their values are dropped when loaded (an older build drops this when it saves).
+    /// </summary>
+    public QuestBoardState QuestBoard { get; set; } = new();
 
-    /// <summary>When the current quest difficulty was accepted (UTC).</summary>
-    public DateTimeOffset? QuestAcceptedAtUtc { get; set; }
-
-    /// <summary>Eligible roulette clears credited toward Easy (0–2).</summary>
-    public int QuestRouletteClears { get; set; }
-
-    /// <summary>Current-expansion Extreme clears credited toward Medium.</summary>
-    public int QuestExtremeClears { get; set; }
-
-    /// <summary>True after a current-tier Savage clear credited toward Hard.</summary>
-    public bool QuestSavageCleared { get; set; }
-
-    /// <summary>True after the quest reward has been granted for this accept.</summary>
-    public bool QuestRewardClaimed { get; set; }
+    /// <summary>Achievement flags (<see cref="AchievementFlags"/>) and when each was first earned.</summary>
+    public Dictionary<string, DateTimeOffset> Achievements { get; set; } = new(StringComparer.Ordinal);
 }

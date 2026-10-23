@@ -75,7 +75,9 @@ public sealed class ProfileSettingsTests
         Assert.Contains("LockEmoteId = ProfileMigration.NewProfileLockEmoteId,", activate);
         Assert.True(ProfileMigration.NewProfileAutoGroundSit);
         Assert.Equal((ushort)52, ProfileMigration.NewProfileLockEmoteId);
-        Assert.Matches(@"public const int CurrentVersion = 12;", ConfigurationSource);
+        Assert.Matches(@"public const int CurrentVersion = 13;", ConfigurationSource);
+        // 13: every profile's quest board is normalised, never gated on Version either.
+        Assert.Contains("profile.QuestBoard.Normalize();", migrate);
     }
 
     // ---------- 06-A1: the four places a per-character field is written ----------
@@ -93,7 +95,8 @@ public sealed class ProfileSettingsTests
         Assert.Contains("LockEmoteId", names);
         // 06-B1: the safeword pause follows the same pattern.
         Assert.Contains("SafewordPausedUntilUtc", names);
-        Assert.Contains("QuestDifficulty", names);
+        Assert.Contains("QuestBoard", names);
+        Assert.Contains("Achievements", names);
 
         var capture = MethodBody(ConfigurationSource, "public CharacterProfile CaptureActiveAsProfile()");
         var apply = MethodBody(ConfigurationSource, "public void ApplyProfile(CharacterProfile profile)");
@@ -331,7 +334,11 @@ public sealed class ProfileSettingsTests
         var timer = PluginSource(Path.Combine("Services", "WindTimerService.cs"));
         var addWind = MethodBody(timer, "    private TimeSpan AddWind(");
         Assert.Contains("WindMath.Add(", addWind);
-        Assert.Contains("ignoreMaxCap ? null : _config.MaxWindHours);", addWind);
+        Assert.Contains("ignoreMaxCap ? null : capHours ?? _config.MaxWindHours);", addWind);
+        // The quest board overwinds up to twice the max, never uncapped.
+        var questWind = MethodBody(timer, "    public TimeSpan AddQuestWind(");
+        Assert.Contains("capHours: QuestRewardRules.OverwindCapHours(_config.MaxWindHours)", questWind);
+        Assert.DoesNotContain("ignoreMaxCap", questWind);
         Assert.DoesNotContain("maxExpiry", addWind);
     }
 

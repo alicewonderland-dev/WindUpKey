@@ -18,7 +18,7 @@
     <GenerateProgramFile>false</GenerateProgramFile>
     <!-- 04-D1: the self-test units are compiled into the plugin only under WINDUP_TESTING; here they always are. -->
     <DefineConstants>$(DefineConstants);WINDUP_SELFTEST_UNITS</DefineConstants>
-    <!-- 11: Call and the daily quests ship in Release, so their files need no define here. -->
+    <!-- 11: Call and the quests (now the quest board) ship in Release, so their files need no define here. -->
   </PropertyGroup>
 
   <ItemGroup>
@@ -42,8 +42,16 @@
     <Compile Include="..\WindUpKey\Services\RelayWireRules.cs" Link="Plugin\RelayWireRules.cs" />
     <!-- 06 Part A: the profile, and the Dalamud-free rules of the review fixes. -->
     <Compile Include="..\WindUpKey\CharacterProfile.cs" Link="Plugin\CharacterProfile.cs" />
-    <!-- 11: the profile's daily quest fields. -->
-    <Compile Include="..\WindUpKey\Quest\QuestDifficulty.cs" Link="Plugin\QuestDifficulty.cs" />
+    <!-- The quest board's Dalamud-free rules and saved state (QuestContentCatalog, QuestGameFacts and QuestBoardService need Dalamud). -->
+    <Compile Include="..\WindUpKey\Quest\QuestDifficulty.cs" Link="Plugin\Quest\QuestDifficulty.cs" />
+    <Compile Include="..\WindUpKey\Quest\QuestSlot.cs" Link="Plugin\Quest\QuestSlot.cs" />
+    <Compile Include="..\WindUpKey\Quest\QuestBoardState.cs" Link="Plugin\Quest\QuestBoardState.cs" />
+    <Compile Include="..\WindUpKey\Quest\QuestResetClock.cs" Link="Plugin\Quest\QuestResetClock.cs" />
+    <Compile Include="..\WindUpKey\Quest\StickerBoard.cs" Link="Plugin\Quest\StickerBoard.cs" />
+    <Compile Include="..\WindUpKey\Quest\QuestRewardRules.cs" Link="Plugin\Quest\QuestRewardRules.cs" />
+    <Compile Include="..\WindUpKey\Quest\QuestBoardEngine.cs" Link="Plugin\Quest\QuestBoardEngine.cs" />
+    <Compile Include="..\WindUpKey\Quest\QuestRollRules.cs" Link="Plugin\Quest\QuestRollRules.cs" />
+    <Compile Include="..\WindUpKey\AchievementFlags.cs" Link="Plugin\AchievementFlags.cs" />
     <Compile Include="..\WindUpKey\PlayerRole.cs" Link="Plugin\PlayerRole.cs" />
     <Compile Include="..\WindUpKey\ProfileMigration.cs" Link="Plugin\ProfileMigration.cs" />
     <Compile Include="..\WindUpKey\Ui\LockEmoteDisplay.cs" Link="Plugin\LockEmoteDisplay.cs" />
