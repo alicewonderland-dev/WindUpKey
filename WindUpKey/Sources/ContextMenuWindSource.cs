@@ -103,7 +103,7 @@ public sealed class ContextMenuWindSource : IWindUpSource
                     var n = springs;
                     items.Add(new MenuItem
                     {
-                        Name = $"{n} spring{(n == 1 ? string.Empty : "s")} ({SpringRules.WindHours(n, fromOwner: false):0}h)",
+                        Name = $"{n} spring{(n == 1 ? string.Empty : "s")}",
                         UseDefaultPrefix = true,
                         OnClicked = _ => StartWind(identity, n),
                     });

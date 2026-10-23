@@ -43,6 +43,8 @@ The doll's wind becomes a stack. Time drains from the **top** down:
 2. Put the rest into player overwind.
 3. If player overwind reaches max wind hours, the doll **breaks** (§4): all player overwind is lost.
 
+   **Changed after review:** the wind that first overwinds a doll never breaks them, however much it is. Only a wind that lands while they are already overwound (player overwind above 0) can break them, when it takes player overwind to max. This lets dolls whose max is under a spring's 8h (or an owner's 12h) be wound at all.
+
 ### Quest wind (board stickers, lines, MSQ)
 
 1. Fill normal wind up to 100%.

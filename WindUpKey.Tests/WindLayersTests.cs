@@ -48,6 +48,42 @@ public sealed class WindLayersTests
         Assert.Equal(100, outcome.Layers.PercentOfMax(Now, Max));
     }
 
+    [Theory]
+    // However much the wind that first overwinds them is, it never breaks them: even past max, or with a max under a spring.
+    [InlineData(72, 72, 80, 72, 80)]
+    [InlineData(72, 60, 240, 72, 228)]
+    [InlineData(4, 0, 8, 4, 4)]
+    [InlineData(4, 4, 24, 4, 24)]
+    public void TheFirstOverwind_NeverBreaksTheDoll(double max, double normal, double hours, double normalAfter, double playerAfter)
+    {
+        var outcome = Layers(normal).AddPlayer(hours, max, Now, 30);
+
+        Assert.False(outcome.Broke);
+        Assert.Equal((normalAfter, 0.0, playerAfter), Parts(outcome.Layers));
+        Assert.True(outcome.Layers.IsOverwound);
+    }
+
+    [Fact]
+    public void ALowMaxDoll_BreaksOnTheNextWindWhileOverwound()
+    {
+        var once = Layers(0).AddPlayer(8, 4, Now, 30);
+        var twice = once.Layers.AddPlayer(8, 4, Now, 30);
+
+        Assert.False(once.Broke);
+        Assert.True(twice.Broke);
+        Assert.Equal((4.0, 0.0, 0.0), Parts(twice.Layers));
+    }
+
+    [Fact]
+    public void OnceOverwindHasDrained_TheNextOverwindIsFreeAgain()
+    {
+        var overwound = Layers(4).AddPlayer(8, 4, Now, 30).Layers;
+        var drained = overwound.At(Now.AddHours(9));
+
+        Assert.False(drained.IsOverwound);
+        Assert.False(drained.AddPlayer(8, 4, Now.AddHours(9), 30).Broke);
+    }
+
     [Fact]
     public void PlayerOverwindReachingMax_BreaksTheDoll_AndIsLost_ButQuestOverwindStays()
     {

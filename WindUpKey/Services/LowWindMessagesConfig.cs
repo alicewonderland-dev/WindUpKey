@@ -101,7 +101,7 @@ public sealed class LowWindMessagesConfig
 
     public const string DefaultMoodleOverwoundTitle = "Overwound";
     public const string DefaultMoodleOverwoundDescription =
-        "Your springs are strained past their limit and creak with every step. Wind them much further and something may break.";
+        "Your springs are strained past their limit and creak with every step. Wind them any further and something may break.";
 
     public const string DefaultMoodleBrokenTitle = "Broken";
     public const string DefaultMoodleBrokenDescription =

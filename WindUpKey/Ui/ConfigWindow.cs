@@ -609,7 +609,6 @@ public sealed class ConfigWindow : Window, IDisposable
                         ImGui.BeginDisabled();
                     DrawWindSpringButtons(
                         springs => _relay.Forget(_relay.SendWindByKeyAsync(actionPartnerKey, springs), "wind"),
-                        fromOwner: isOwnedDoll,
                         smallButtons: true);
 
                     // Unwinding asks the doll for its cost first; the confirm popup shows it.
@@ -1534,20 +1533,22 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.EndCombo();
     }
 
-    /// <summary>1, 2 or 3 spare springs, labelled with the hours each gives (12h a spring from the doll's owner).</summary>
-    private static void DrawWindSpringButtons(Action<int> onClick, bool fromOwner, bool smallButtons)
+    /// <summary>1, 2 or 3 spare springs, labelled with the springs spent (the relay sets the hours they give).</summary>
+    private static void DrawWindSpringButtons(Action<int> onClick, bool smallButtons)
     {
         foreach (var springs in WindSpringPresets)
         {
-            var label = $"{springs} ({SpringRules.WindHours(springs, fromOwner):0}h)###wind{springs}";
+            var label = $"{SpringLabel(springs)}###wind{springs}";
             var clicked = smallButtons ? ImGui.SmallButton(label) : ImGui.Button(label);
             if (clicked)
                 onClick(springs);
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip($"Spend {springs} spare spring{(springs == 1 ? string.Empty : "s")}.");
+                ImGui.SetTooltip($"Spend {SpringLabel(springs)}.");
             ImGui.SameLine();
         }
     }
+
+    private static string SpringLabel(int springs) => $"{springs} spring{(springs == 1 ? string.Empty : "s")}";
 
     private void DrawSafewordTab()
     {
@@ -1717,7 +1718,6 @@ public sealed class ConfigWindow : Window, IDisposable
                 if (EnsureDebugSelfPair(canWind: true, canUnwind: false))
                     _relay.Forget(_relay.SendWindByKeyAsync(_config.PairingKey, springs), "debug self-wind");
             },
-            fromOwner: false,
             smallButtons: false);
 
         if (ImGui.Button("Unwind") && EnsureDebugSelfPair(canWind: false, canUnwind: true))

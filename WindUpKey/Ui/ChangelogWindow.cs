@@ -17,7 +17,7 @@ public sealed class ChangelogWindow : Window
                 "Winding now costs spare springs: each spring winds a partner for 8 hours, or 12 from a doll's owner. Dolls hold up to 10 springs and winders up to 20.",
                 "You get free springs on your first login each day (winders get two), and more for each quest board line. Winders can now use the quest board too.",
                 "Dolls can wind other dolls with springs, and anyone can give springs to a paired player.",
-                "Other players can overwind a doll past 100%. Wound too far, the doll breaks until someone repairs them or they recover by themselves.",
+                "Other players can overwind a doll past 100%. The first overwind is always safe; wind an overwound doll too far and they break until someone repairs them or they recover by themselves.",
                 "Unwinding costs a spring per 8 hours of the doll's wind (free for their owner), and never takes quest overwind.",
                 "The wind Moodle now follows a percentage of your wind, and winders see a percentage instead of the exact time.",
                 "Everyone needs this version to wind, unwind or repair.",

@@ -25,6 +25,9 @@ public readonly record struct WindLayers(double Normal, double Quest, double Pla
     public const int MaxRecoveryMinutes = 240;
     public const int DefaultRecoveryMinutes = 30;
 
+    /// <summary>Player overwind under this (a rounding remainder) doesn't count as overwound.</summary>
+    private const double OverwoundEpsilon = 1e-6;
+
     public static WindLayers Empty(DateTimeOffset now) => new(0, 0, 0, now, null);
 
     public static int ClampRecoveryMinutes(int minutes) => Math.Clamp(minutes, MinRecoveryMinutes, MaxRecoveryMinutes);
@@ -41,6 +44,9 @@ public readonly record struct WindLayers(double Normal, double Quest, double Pla
     }
 
     public bool IsBrokenAt(DateTimeOffset now) => BrokenUntil is { } until && now < until;
+
+    /// <summary>Has player overwind: another player's wind may now break them.</summary>
+    public bool IsOverwound => Player > OverwoundEpsilon;
 
     /// <summary>The layers at <paramref name="now"/>: elapsed time drained top-down, except while broken or frozen.</summary>
     public WindLayers At(DateTimeOffset now)
@@ -108,8 +114,10 @@ public readonly record struct WindLayers(double Normal, double Quest, double Pla
     }
 
     /// <summary>
-    /// A wind from another player: normal wind up to max, then player overwind. Player overwind reaching max wind hours
-    /// breaks the doll: it is lost, and the break lasts <paramref name="recoveryMinutes"/>. Never call it on a broken doll.
+    /// A wind from another player: normal wind up to max, then player overwind. The wind that first overwinds the doll
+    /// never breaks them, however much it is (so a doll whose max is under a spring's hours can still be wound). Once
+    /// overwound, a wind that takes player overwind to max wind hours breaks the doll: it is lost, and the break lasts
+    /// <paramref name="recoveryMinutes"/>. Never call it on a broken doll.
     /// </summary>
     public PlayerWindOutcome AddPlayer(double hours, double maxWindHours, DateTimeOffset now, int recoveryMinutes)
     {
@@ -121,7 +129,8 @@ public readonly record struct WindLayers(double Normal, double Quest, double Pla
         var toNormal = Math.Min(hours, room);
         var player = at.Player + (hours - toNormal);
         var next = at with { Normal = at.Normal + toNormal, Player = player };
-        if (maxWindHours > 0 && player >= maxWindHours - 1e-9)
+        var wasOverwound = at.IsOverwound;
+        if (wasOverwound && maxWindHours > 0 && player >= maxWindHours - 1e-9)
             return new PlayerWindOutcome(next with { Player = 0, BrokenUntil = now.AddMinutes(ClampRecoveryMinutes(recoveryMinutes)) }, true);
         return new PlayerWindOutcome(next, false);
     }

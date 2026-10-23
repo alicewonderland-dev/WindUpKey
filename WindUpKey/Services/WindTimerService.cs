@@ -81,7 +81,7 @@ public sealed class WindTimerService
     public bool IsBroken => _config.IsDoll && Layers.IsBrokenAt(DateTimeOffset.UtcNow);
 
     /// <summary>Has player overwind (more winding from others may break them).</summary>
-    public bool IsOverwound => _config.IsDoll && Layers.Player > 0;
+    public bool IsOverwound => _config.IsDoll && Layers.IsOverwound;
 
     /// <summary>Normal wind as a percentage of max wind hours, 0–100: all a partner is ever told.</summary>
     public int PercentForWinder => _config.IsDoll ? Layers.PercentOfMax(DateTimeOffset.UtcNow, _config.MaxWindHours) : 0;
