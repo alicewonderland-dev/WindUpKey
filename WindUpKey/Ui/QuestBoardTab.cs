@@ -63,10 +63,12 @@ public sealed class QuestBoardTab
         ImGui.Spacing();
         ImGui.TextUnformatted("Quest Board");
         ImGui.Separator();
-        ImGui.TextWrapped(
-            "Clear duties for stickers: Easy duties give 1, Medium 2 and Hard 3, and every sticker winds your key. " +
-            "Finish a line (row, column or diagonal) for a bonus; the board then clears. Quest wind can take you past " +
-            "your max wind hours, up to twice the max. Easy duties reset daily, Medium and Hard weekly.");
+        ImGui.TextWrapped(_quests.ForDoll
+            ? "Clear duties for stickers: Easy duties give 1, Medium 2 and Hard 3, and every sticker winds your key. " +
+              "Finish a line (row, column or diagonal) for bonus wind and a spare spring; the board then clears. Quest " +
+              "wind can take you past your max wind hours, up to twice the max. Easy duties reset daily, Medium and Hard weekly."
+            : "Clear duties for stickers: Easy duties give 1, Medium 2 and Hard 3. Finish a line (row, column or " +
+              "diagonal) for 2 spare springs; the board then clears. Easy duties reset daily, Medium and Hard weekly.");
         ImGui.Spacing();
 
         if (!_quests.IsRolled)
@@ -237,10 +239,14 @@ public sealed class QuestBoardTab
         _ => _quests.DutyName(slot.ContentFinderConditionId),
     };
 
-    private static string RewardLabel(QuestSlot slot)
+    private string RewardLabel(QuestSlot slot)
     {
+        // A winder's board pays stickers (and springs for lines), never wind.
+        var doll = _quests.ForDoll;
         if (slot.Kind == QuestSlotKind.Msq)
         {
+            if (!doll)
+                return slot.Completed ? "(today's sticker done)" : "(1 sticker)";
             return slot.Completed
                 ? $"({QuestRewardRules.MsqHours:0}h each turn-in; today's sticker done)"
                 : $"(1 sticker, {QuestRewardRules.MsqHours:0}h each turn-in)";
@@ -249,6 +255,8 @@ public sealed class QuestBoardTab
         // A slot done unsynced shows what it gave, not what a synced clear would have.
         var reward = QuestRewardRules.ForDutyClear(slot, synced: !slot.CompletedUnsynced);
         var noun = reward.Stickers == 1 ? "sticker" : "stickers";
+        if (!doll)
+            return $"({reward.Stickers} {noun})";
         return $"({reward.Stickers} {noun}, {reward.Hours:0}h{(slot.HalfWind ? ", half wind" : string.Empty)})";
     }
 

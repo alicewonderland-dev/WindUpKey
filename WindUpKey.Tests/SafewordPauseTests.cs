@@ -20,13 +20,15 @@ public sealed class SafewordPauseTests
     [InlineData(MessageTypes.Unwind)]
     [InlineData(MessageTypes.Call)]
     [InlineData(MessageTypes.OwnerSettingsUpdate)]
+    // Spare springs: a wind can break the doll now, so the pause refuses it (the relay refunds the springs).
+    [InlineData(MessageTypes.Wind)]
     public void Pause_RefusesEachRemoteControlMessage(string type)
     {
         Assert.True(SafewordPause.Refuses(type));
     }
 
     [Theory]
-    [InlineData(MessageTypes.Wind)]
+    [InlineData(MessageTypes.Repair)]
     [InlineData(MessageTypes.OwnerSettingsQuery)]
     [InlineData(MessageTypes.PresenceQuery)]
     [InlineData(MessageTypes.PresenceResult)]
@@ -47,6 +49,8 @@ public sealed class SafewordPauseTests
     [InlineData("    private async Task HandleInboundUnwindAsync(", "        _timer.ClearWind(winderIdentity);")]
     [InlineData("    private async Task HandleInboundCallAsync(", "        await _callTravel.RequestAsync(payload).ConfigureAwait(false);")]
     [InlineData("    private async Task HandleInboundOwnerSettingsUpdateAsync(", "        if (payload.MaxWindHours is { } hours)")]
+    // Spare springs: a wind can break the doll, so it is refused too (the relay refunds it).
+    [InlineData("    private async Task HandleInboundWindAsync(", "        var result = _timer.AddPlayerWind(payload.Hours, winderIdentity);")]
     public void Pause_EachRefusedHandlerChecksItWhenHandled_AfterItsPermission_BeforeApplyingAnything(string handler, string firstEffect)
     {
         var body = ProfileSettingsTests.MethodBody(RelayClientSource, handler);
@@ -65,7 +69,6 @@ public sealed class SafewordPauseTests
     }
 
     [Theory]
-    [InlineData("    private async Task HandleInboundWindAsync(")]
     [InlineData("    private async Task HandleInboundOwnerSettingsQueryAsync(")]
     [InlineData("    private async Task HandleInboundPresenceQueryAsync(")]
     [InlineData("    private void HandleInboundWindRequest(")]
@@ -86,8 +89,8 @@ public sealed class SafewordPauseTests
         Assert.Contains("To = fromKey,", helper);
         Assert.Contains("Code = ErrorCodes.SafewordPaused,", helper);
         Assert.Contains("return true;", helper);
-        // Exactly the three refused handlers call it.
-        Assert.Equal(3, Regex.Matches(RelayClientSource, Regex.Escape("await RefuseIfSafewordPausedAsync(envelope.Type,")).Count);
+        // Exactly the four refused handlers call it.
+        Assert.Equal(4, Regex.Matches(RelayClientSource, Regex.Escape("await RefuseIfSafewordPausedAsync(envelope.Type,")).Count);
 
         // The pause is read from the active character's own stored value, with the clock and Hardcore, each time.
         Assert.Contains(
@@ -250,9 +253,10 @@ public sealed class SafewordPauseTests
     {
         var use = ProfileSettingsTests.MethodBody(TimerSource, "    public void UseSafeword(double hours)");
         Assert.Contains("_config.SafewordPausedUntilUtc = SafewordPause.Extend(_config.SafewordPausedUntilUtc, DateTimeOffset.UtcNow, hours);", use);
-        Assert.Contains("AddWind(TimeSpan.FromHours(hours), ignoreMaxCap: true);", use);
+        // Spare springs: normal wind, then quest overwind with no cap; never player overwind, so it can't break the doll.
+        Assert.Contains("Save(Layers.AddSafeword(hours, _config.MaxWindHours, now), now);", use);
         Assert.True(
-            use.IndexOf("SafewordPause.Extend(", StringComparison.Ordinal) < use.IndexOf("AddWind(", StringComparison.Ordinal),
+            use.IndexOf("SafewordPause.Extend(", StringComparison.Ordinal) < use.IndexOf("AddSafeword(", StringComparison.Ordinal),
             "the pause is set after the wind");
 
         var command = SafewordCommand;

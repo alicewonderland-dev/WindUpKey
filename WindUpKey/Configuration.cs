@@ -14,9 +14,10 @@ public class Configuration : IPluginConfiguration
     /// <summary>
     /// 12: per-character lock emote (06-A1). 06-B1's <see cref="SafewordPausedUntilUtc"/> needs no bump: absent means no
     /// pause. 13: the quest board (<see cref="QuestBoard"/>, <see cref="Achievements"/>) replaced the daily quest fields,
-    /// which are dropped without reward.
+    /// which are dropped without reward. 14: spare springs: the wind layers (<see cref="NormalWindHours"/> …), filled
+    /// from the expiry by <see cref="ProfileMigration.FillWindLayers"/>, and <see cref="BrokenRecoveryMinutes"/>.
     /// </summary>
-    public const int CurrentVersion = 13;
+    public const int CurrentVersion = 14;
 
     /// <summary>Orphan profile from pre-v6 flat config until the first logged-in ContentId claims it.</summary>
     public const string PendingProfileKey = "pending";
@@ -161,6 +162,22 @@ public class Configuration : IPluginConfiguration
     /// <summary>Last-write-wins stamp for <see cref="ExpiryUtc"/> sync with the relay.</summary>
     public DateTimeOffset? WindUpdatedUtc { get; set; }
 
+    /// <summary>
+    /// 14: the active character's wind layers (<see cref="WindLayers"/>), mirrored like the fields above. Read and write
+    /// them through <see cref="WindTimerService"/>; <see cref="ExpiryUtc"/> is derived from them.
+    /// </summary>
+    public double NormalWindHours { get; set; }
+
+    public double QuestOverwindHours { get; set; }
+
+    public double PlayerOverwindHours { get; set; }
+
+    public DateTimeOffset? WindAsOfUtc { get; set; }
+
+    public DateTimeOffset? BrokenUntilUtc { get; set; }
+
+    public int BrokenRecoveryMinutes { get; set; } = WindLayers.DefaultRecoveryMinutes;
+
     /// <summary>Last paired-partner wind request sent by this doll; shared across all partners.</summary>
     public DateTimeOffset? LastWindRequestUtc { get; set; }
 
@@ -200,6 +217,20 @@ public class Configuration : IPluginConfiguration
         // 06-A1: before any profile is activated, every profile (pending too) without its own lock emote settings
         // gets the global values. Gated on the nulls, never on Version, so a set value is never overwritten.
         ProfileMigration.FillLockEmote(Profiles.Values, AutoGroundSit, LockEmoteId);
+        // 14: wind layers from each profile's expiry (and the active character's flat fields, below).
+        var migratedAt = DateTimeOffset.UtcNow;
+        ProfileMigration.FillWindLayers(Profiles.Values, migratedAt);
+        if (WindAsOfUtc is null)
+        {
+            var layers = WindLayers.FromExpiry(ExpiryUtc, migratedAt, MaxWindHours > 0 ? MaxWindHours : 72);
+            NormalWindHours = layers.Normal;
+            QuestOverwindHours = layers.Quest;
+            PlayerOverwindHours = 0;
+            BrokenUntilUtc = null;
+            WindAsOfUtc = migratedAt;
+        }
+
+        BrokenRecoveryMinutes = WindLayers.ClampRecoveryMinutes(BrokenRecoveryMinutes <= 0 ? WindLayers.DefaultRecoveryMinutes : BrokenRecoveryMinutes);
         PairedPartners ??= [];
         PendingPartnerKeys ??= [];
         PendingPairRemovals ??= [];
@@ -328,6 +359,12 @@ public class Configuration : IPluginConfiguration
             SafewordPausedUntilUtc = SafewordPausedUntilUtc,
             ExpiryUtc = ExpiryUtc,
             WindUpdatedUtc = WindUpdatedUtc,
+            NormalWindHours = NormalWindHours,
+            QuestOverwindHours = QuestOverwindHours,
+            PlayerOverwindHours = PlayerOverwindHours,
+            WindAsOfUtc = WindAsOfUtc,
+            BrokenUntilUtc = BrokenUntilUtc,
+            BrokenRecoveryMinutes = BrokenRecoveryMinutes,
             LastWindRequestUtc = LastWindRequestUtc,
             LowWindWarningsFired = LowWindWarningsFired,
             LowWindTriggerHighSeconds = LowWindTriggerHighSeconds,
@@ -364,6 +401,12 @@ public class Configuration : IPluginConfiguration
         SafewordPausedUntilUtc = SafewordPause.Normalize(profile.SafewordPausedUntilUtc, DateTimeOffset.UtcNow);
         ExpiryUtc = profile.ExpiryUtc;
         WindUpdatedUtc = profile.WindUpdatedUtc;
+        NormalWindHours = profile.NormalWindHours;
+        QuestOverwindHours = profile.QuestOverwindHours;
+        PlayerOverwindHours = profile.PlayerOverwindHours;
+        WindAsOfUtc = profile.WindAsOfUtc;
+        BrokenUntilUtc = profile.BrokenUntilUtc;
+        BrokenRecoveryMinutes = WindLayers.ClampRecoveryMinutes(profile.BrokenRecoveryMinutes <= 0 ? WindLayers.DefaultRecoveryMinutes : profile.BrokenRecoveryMinutes);
         LastWindRequestUtc = profile.LastWindRequestUtc;
         LowWindWarningsFired = profile.LowWindWarningsFired;
         LowWindTriggerHighSeconds = profile.LowWindTriggerHighSeconds;

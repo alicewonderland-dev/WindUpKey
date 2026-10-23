@@ -61,6 +61,24 @@ public sealed class LowWindMessagesConfig
     public const string DefaultCommendationWind =
         "On the way out, a grateful player gives your key a few welcome turns.";
 
+    public const string DefaultBroken =
+        "Something deep inside you snaps with a sharp twang - you've been wound far too tightly. You're broken, and can go no further until someone repairs you or your springs settle.";
+
+    public const string DefaultBrokenNamed =
+        "{name} gives your key one turn too many. Something deep inside you snaps with a sharp twang - you're broken, and can go no further until someone repairs you or your springs settle.";
+
+    public const string DefaultRepaired =
+        "Careful hands set your broken spring right. Your gears catch again.";
+
+    public const string DefaultRepairedNamed =
+        "{name} carefully sets your broken spring right. Your gears catch again.";
+
+    public const string DefaultRecovered =
+        "With a soft click, your strained springs settle back into place. You can move again.";
+
+    public const string DefaultMendedUnwound =
+        "Your broken spring settles back into place, but your key has no wind left behind it. You can go no further until you're rewound.";
+
     public const string DefaultMoodleFullyWoundTitle = "Fully Wound";
     public const string DefaultMoodleFullyWoundDescription =
         "Your key is wound tight. Springs hold strong; motion comes easily.";
@@ -80,6 +98,14 @@ public sealed class LowWindMessagesConfig
     public const string DefaultMoodleUnwoundTitle = "Unwound";
     public const string DefaultMoodleUnwoundDescription =
         "Your winding has run out. Your springs seize - you can go no further without being rewound.";
+
+    public const string DefaultMoodleOverwoundTitle = "Overwound";
+    public const string DefaultMoodleOverwoundDescription =
+        "Your springs are strained past their limit and creak with every step. Wind them much further and something may break.";
+
+    public const string DefaultMoodleBrokenTitle = "Broken";
+    public const string DefaultMoodleBrokenDescription =
+        "Careless winding has snapped something inside. Your gears won't catch until you're repaired, or your springs settle.";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -141,6 +167,20 @@ public sealed class LowWindMessagesConfig
         Resolve(EnsureLoaded().MoodleUnwoundTitle, DefaultMoodleUnwoundTitle);
     public string MoodleUnwoundDescription =>
         Resolve(EnsureLoaded().MoodleUnwoundDescription, DefaultMoodleUnwoundDescription);
+    public string MoodleOverwoundTitle =>
+        Resolve(EnsureLoaded().MoodleOverwoundTitle, DefaultMoodleOverwoundTitle);
+    public string MoodleOverwoundDescription =>
+        Resolve(EnsureLoaded().MoodleOverwoundDescription, DefaultMoodleOverwoundDescription);
+    public string MoodleBrokenTitle =>
+        Resolve(EnsureLoaded().MoodleBrokenTitle, DefaultMoodleBrokenTitle);
+    public string MoodleBrokenDescription =>
+        Resolve(EnsureLoaded().MoodleBrokenDescription, DefaultMoodleBrokenDescription);
+    public string Broken => Resolve(EnsureLoaded().Broken, DefaultBroken);
+    public string BrokenNamed => Resolve(EnsureLoaded().BrokenNamed, DefaultBrokenNamed);
+    public string Repaired => Resolve(EnsureLoaded().Repaired, DefaultRepaired);
+    public string RepairedNamed => Resolve(EnsureLoaded().RepairedNamed, DefaultRepairedNamed);
+    public string Recovered => Resolve(EnsureLoaded().Recovered, DefaultRecovered);
+    public string MendedUnwound => Resolve(EnsureLoaded().MendedUnwound, DefaultMendedUnwound);
 
     private MessagesFile EnsureLoaded()
     {
@@ -230,6 +270,16 @@ public sealed class LowWindMessagesConfig
         public string? MoodleNearlySpentDescription { get; set; }
         public string? MoodleUnwoundTitle { get; set; }
         public string? MoodleUnwoundDescription { get; set; }
+        public string? MoodleOverwoundTitle { get; set; }
+        public string? MoodleOverwoundDescription { get; set; }
+        public string? MoodleBrokenTitle { get; set; }
+        public string? MoodleBrokenDescription { get; set; }
+        public string? Broken { get; set; }
+        public string? BrokenNamed { get; set; }
+        public string? Repaired { get; set; }
+        public string? RepairedNamed { get; set; }
+        public string? Recovered { get; set; }
+        public string? MendedUnwound { get; set; }
 
         public static MessagesFile CreateDefaults() => new()
         {
@@ -241,6 +291,7 @@ public sealed class LowWindMessagesConfig
                 "wind-received: windLight/Medium/Deep/Full (+ *Named with {name}). " +
                 "unwind / unwindNamed: partner removed your key. " +
                 "commendationWind: a completed-duty commendation winds the doll. " +
+                "broken / brokenNamed: wound too far by others; repaired / repairedNamed / recovered: the break ends. " +
                 "moodle*: titles/descriptions for wind-charge Moodles (no exact time). Blank = built-in default.",
             High = DefaultHigh,
             Mid = DefaultMid,
@@ -267,6 +318,16 @@ public sealed class LowWindMessagesConfig
             MoodleNearlySpentDescription = DefaultMoodleNearlySpentDescription,
             MoodleUnwoundTitle = DefaultMoodleUnwoundTitle,
             MoodleUnwoundDescription = DefaultMoodleUnwoundDescription,
+            MoodleOverwoundTitle = DefaultMoodleOverwoundTitle,
+            MoodleOverwoundDescription = DefaultMoodleOverwoundDescription,
+            MoodleBrokenTitle = DefaultMoodleBrokenTitle,
+            MoodleBrokenDescription = DefaultMoodleBrokenDescription,
+            Broken = DefaultBroken,
+            BrokenNamed = DefaultBrokenNamed,
+            Repaired = DefaultRepaired,
+            RepairedNamed = DefaultRepairedNamed,
+            Recovered = DefaultRecovered,
+            MendedUnwound = DefaultMendedUnwound,
         };
     }
 }

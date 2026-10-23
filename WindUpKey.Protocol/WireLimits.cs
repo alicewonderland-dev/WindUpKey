@@ -112,10 +112,27 @@ public static class WireLimits
 
     public static bool IsValid(PairRemovePayload p) => IsKey(p.PeerKey);
 
+    public static bool IsValid(UnwindQuotePayload p) => FitsShort(p.RequestId) && IsOptionalKey(p.From) && IsKey(p.To);
+
+    public static bool IsValid(RepairPayload p) => FitsShort(p.RequestId) && IsOptionalKey(p.From) && IsKey(p.To);
+
+    public static bool IsValid(SpringGrantPayload p) => FitsShort(p.RequestId);
+
+    public static bool IsValid(SpringGiftPayload p) => FitsShort(p.RequestId) && IsOptionalKey(p.From) && IsKey(p.To);
+
+    /// <summary>Finite, non-negative hours with short stamps (the relay stores layers as they are).</summary>
+    public static bool IsValid(WindLayersWire? p) =>
+        p is null
+        || (IsHours(p.NormalHours) && IsHours(p.QuestHours) && IsHours(p.PlayerHours)
+            && FitsShort(p.AsOfUtc) && FitsShort(p.BrokenUntilUtc));
+
+    private static bool IsHours(double hours) => double.IsFinite(hours) && hours >= 0 && hours <= 100_000;
+
     /// <summary>At most <see cref="ListEntries"/> consent rows, each for a key, with short stamps.</summary>
     public static bool IsValid(DollStatePushPayload p) =>
         FitsShort(p.ExpiryUtc)
         && FitsShort(p.WindUpdatedUtc)
+        && IsValid(p.Layers)
         && (p.Peers is null
             || (p.Peers.Count <= ListEntries
                 && p.Peers.All(e => e is not null && IsKey(e.PeerKey) && FitsShort(e.UpdatedUtc))));
@@ -187,6 +204,10 @@ public static class WireLimits
             MessageTypes.CallAck => Check<CallAckPayload>(payload, IsValid),
             MessageTypes.CallResult => Check<CallResultPayload>(payload, IsValid),
             MessageTypes.Error => Check<ErrorPayload>(payload, IsValid),
+            MessageTypes.UnwindQuote => Check<UnwindQuotePayload>(payload, IsValid),
+            MessageTypes.Repair => Check<RepairPayload>(payload, IsValid),
+            MessageTypes.SpringGrant => Check<SpringGrantPayload>(payload, IsValid),
+            MessageTypes.SpringGift => Check<SpringGiftPayload>(payload, IsValid),
             _ => true,
         };
     }

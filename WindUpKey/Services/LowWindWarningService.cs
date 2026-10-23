@@ -210,6 +210,46 @@ public sealed class LowWindWarningService
         _sounds.PlayWind(TimeSpan.FromHours(soundHours));
     }
 
+    /// <summary>Wound too far by another player: the broken RP line (named when the winder is known).</summary>
+    public void OnBroken(string? winderName = null)
+    {
+        if (!_config.IsDoll)
+            return;
+
+        var name = string.IsNullOrWhiteSpace(winderName) ? null : winderName.Trim();
+        PrintMessage(name is null ? _messages.Broken : FormatNamed(_messages.BrokenNamed, name));
+        _sounds.PlayUnwind();
+    }
+
+    /// <summary>
+    /// Another player repaired the doll. <paramref name="stillUnwound"/>: they were unwound while broken, so the mended
+    /// spring still has no wind behind it (they can't move yet).
+    /// </summary>
+    public void OnRepaired(string? winderName = null, bool stillUnwound = false)
+    {
+        if (!_config.IsDoll)
+            return;
+
+        if (stillUnwound)
+        {
+            PrintMessage(_messages.MendedUnwound);
+            return;
+        }
+
+        var name = string.IsNullOrWhiteSpace(winderName) ? null : winderName.Trim();
+        PrintMessage(name is null ? _messages.Repaired : FormatNamed(_messages.RepairedNamed, name));
+        _sounds.PlayWind(TimeSpan.FromHours(1));
+    }
+
+    /// <summary>The break ended by itself (<paramref name="stillUnwound"/>: but they were unwound meanwhile).</summary>
+    public void OnRecovered(bool stillUnwound = false)
+    {
+        if (!_config.IsDoll)
+            return;
+
+        PrintMessage(stillUnwound ? _messages.MendedUnwound : _messages.Recovered);
+    }
+
     private static string FormatNamed(string template, string name) =>
         template.Replace("{name}", name, StringComparison.Ordinal);
 

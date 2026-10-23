@@ -79,6 +79,55 @@ public sealed class QuestBoardService : IWindUpSource
     /// <summary>The last sticker that finished a line, for the board's clear animation (in-memory only).</summary>
     public QuestLineClear? LastLineClear { get; private set; }
 
+    /// <summary>Sends one batch of unpaid lines (lines, requestId) to the relay; set by the plugin.</summary>
+    public Action<int, string>? GrantSprings { get; set; }
+
+    /// <summary>How often unpaid lines are sent again while the relay hasn't answered for them.</summary>
+    private static readonly TimeSpan GrantResendInterval = TimeSpan.FromSeconds(30);
+
+    private long _lastGrantSend;
+
+    /// <summary>The relay answered a spring grant (framework thread): that batch is paid, or past the day's limit.</summary>
+    public void OnSpringGrantSettled(string? requestId)
+    {
+        if (QuestBoardEngine.SettleSpringGrant(Board, requestId))
+            _config.Save();
+    }
+
+    /// <summary>
+    /// Sends every unpaid batch (each keeps its id, so the relay pays it once however often it's sent), at most every
+    /// <see cref="GrantResendInterval"/> unless <paramref name="force"/>.
+    /// </summary>
+    private void SendSpringGrants(bool force = false)
+    {
+        var board = Board;
+        if (board.PendingSpringGrants.Count == 0 || GrantSprings is null || CanGrantSprings?.Invoke() != true)
+            return;
+        if (!force && Stopwatch.GetElapsedTime(_lastGrantSend) < GrantResendInterval)
+            return;
+
+        _lastGrantSend = Stopwatch.GetTimestamp();
+        var changed = false;
+        foreach (var grant in board.PendingSpringGrants)
+        {
+            changed |= !grant.Sent;
+            grant.Sent = true;
+            GrantSprings(grant.Lines, grant.RequestId);
+        }
+
+        if (changed)
+            _config.Save();
+    }
+
+    /// <summary>
+    /// Whether the relay can pay quest springs now: connected, and it has reported a spring balance (a relay with
+    /// springs off never does, so nothing is sent to it). Set by the plugin.
+    /// </summary>
+    public Func<bool>? CanGrantSprings { get; set; }
+
+    /// <summary>A doll's board pays wind as well as springs; a winder's pays springs only.</summary>
+    public bool ForDoll => _config.IsDoll;
+
     public QuestBoardState Board => _config.QuestBoard ??= new QuestBoardState();
 
     public void Enable()
@@ -125,7 +174,7 @@ public sealed class QuestBoardService : IWindUpSource
         }
     }
 
-    public bool CanReroll(QuestDifficulty difficulty) => _config.IsDoll && IsRolled && QuestRollRules.CanReroll(Board, difficulty);
+    public bool CanReroll(QuestDifficulty difficulty) => _config.HasChosenRole && IsRolled && QuestRollRules.CanReroll(Board, difficulty);
 
     /// <summary>Rerolls the open Medium or Hard slots (once a week each). Returns false when it isn't allowed.</summary>
     public bool TryReroll(QuestDifficulty difficulty)
@@ -198,6 +247,7 @@ public sealed class QuestBoardService : IWindUpSource
         {
             // A reset during a duty waits for it to end, so the slot the doll queued for is still there to credit.
             SeedMsqHistory();
+            SendSpringGrants();
             // Also while bound by duty before it starts (zoned in, waiting on the party; joined in progress before
             // combat): the duty is only watched from its start.
             if (_duty is null && !_condition[ConditionFlag.BoundByDuty])
@@ -212,13 +262,13 @@ public sealed class QuestBoardService : IWindUpSource
     }
 
     /// <summary>
-    /// A logged-in doll whose own profile is the active one. On a character switch the profile changes in
+    /// A logged-in doll or winder whose own profile is the active one. On a character switch the profile changes in
     /// RelayClient.Tick, which can run after this service's tick in the same frame: until then the active board, role
     /// and wind are still the previous character's, and the game reads are already the new one's.
     /// </summary>
     private bool IsActiveCharacterReady() =>
         _clientState.IsLoggedIn
-        && _config.IsDoll
+        && _config.HasChosenRole
         && _facts.IsLoaded
         && _facts.ContentId != 0
         && string.Equals(_config.ActiveContentId, Configuration.FormatContentId(_facts.ContentId), StringComparison.Ordinal);
@@ -429,14 +479,25 @@ public sealed class QuestBoardService : IWindUpSource
         var cleared = award.Placements.LastOrDefault(p => p.Lines > 0);
         if (cleared.Lines > 0)
             LastLineClear = new QuestLineClear(cleared.BoardBefore, cleared.LineCells, Stopwatch.GetTimestamp());
+        // Each line is paid a spare spring by the relay (it holds the balance), sent from SendSpringGrants until it answers.
+        if (award.LinesCleared > 0)
+            QuestBoardEngine.AddSpringLines(board, award.LinesCleared, () => Guid.NewGuid().ToString("N"));
 
         // The board is saved before the wind (AddQuestWind saves too), so a failed wind never re-awards stickers.
         _config.Save();
-        var windHours = award.FillToCap ? QuestRewardRules.OverwindCapHours(_config.MaxWindHours) : award.Hours;
-        if (windHours > 0)
-            _timer.AddQuestWind(windHours);
 
-        PluginChat.Print(_chat, Message(what, stickers, award), PluginChat.Green);
+        // Winders have no wind: their board pays in springs only (double a doll's, which the relay applies).
+        if (_config.IsDoll)
+        {
+            var windHours = award.FillToCap ? QuestRewardRules.OverwindCapHours(_config.MaxWindHours) : award.Hours;
+            if (windHours > 0)
+                _timer.AddQuestWind(windHours);
+        }
+
+        if (award.LinesCleared > 0)
+            SendSpringGrants(force: true);
+
+        PluginChat.Print(_chat, Message(what, stickers, award, _config.IsDoll), PluginChat.Green);
         _log.Information(
             "Quest board award: stickers={Stickers}, lines={Lines}, fill={Fill}",
             stickers,
@@ -445,8 +506,20 @@ public sealed class QuestBoardService : IWindUpSource
     }
 
     /// <summary>The chat line for an award. 06: it never names hours or how much wind the doll has.</summary>
-    private static string Message(string what, int stickers, QuestAward award)
+    private static string Message(string what, int stickers, QuestAward award, bool doll)
     {
+        if (!doll)
+        {
+            if (award.LinesCleared > 0)
+                return $"Quest board: {what}. {(award.LinesCleared == 1 ? "A line" : $"{award.LinesCleared} lines at once")}! The board clears.";
+            return stickers switch
+            {
+                0 => $"Quest board: {what}. No sticker this time.",
+                1 => $"Quest board: {what}. A sticker for your board.",
+                _ => $"Quest board: {what}. {stickers} stickers for your board.",
+            };
+        }
+
         if (award.TripleLine)
             return $"Quest board: {what}. Three lines at once! The key turns and turns and turns.";
         if (award.LinesCleared >= 2)

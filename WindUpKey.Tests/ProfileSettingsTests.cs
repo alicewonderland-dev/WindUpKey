@@ -75,7 +75,9 @@ public sealed class ProfileSettingsTests
         Assert.Contains("LockEmoteId = ProfileMigration.NewProfileLockEmoteId,", activate);
         Assert.True(ProfileMigration.NewProfileAutoGroundSit);
         Assert.Equal((ushort)52, ProfileMigration.NewProfileLockEmoteId);
-        Assert.Matches(@"public const int CurrentVersion = 13;", ConfigurationSource);
+        Assert.Matches(@"public const int CurrentVersion = 14;", ConfigurationSource);
+        // 14: every profile gets its wind layers from its expiry, gated on the missing layers, never on Version.
+        Assert.Contains("ProfileMigration.FillWindLayers(Profiles.Values, migratedAt);", migrate);
         // 13: every profile's quest board is normalised, never gated on Version either.
         Assert.Contains("profile.QuestBoard.Normalize();", migrate);
     }
@@ -329,17 +331,17 @@ public sealed class ProfileSettingsTests
     }
 
     [Fact]
-    public void Wind_TheTimerUsesTheRule()
+    public void Wind_TheTimerUsesTheLayerRules()
     {
+        // Spare springs: every wind goes through WindLayers, each to its own layer, and the stored expiry is derived.
         var timer = PluginSource(Path.Combine("Services", "WindTimerService.cs"));
-        var addWind = MethodBody(timer, "    private TimeSpan AddWind(");
-        Assert.Contains("WindMath.Add(", addWind);
-        Assert.Contains("ignoreMaxCap ? null : capHours ?? _config.MaxWindHours);", addWind);
-        // The quest board overwinds up to twice the max, never uncapped.
-        var questWind = MethodBody(timer, "    public TimeSpan AddQuestWind(");
-        Assert.Contains("capHours: QuestRewardRules.OverwindCapHours(_config.MaxWindHours)", questWind);
-        Assert.DoesNotContain("ignoreMaxCap", questWind);
-        Assert.DoesNotContain("maxExpiry", addWind);
+        Assert.Contains("before.AddPlayer(hours, _config.MaxWindHours, now, _config.BrokenRecoveryMinutes)",
+            MethodBody(timer, "    public PlayerWindResult AddPlayerWind("));
+        Assert.Contains("Save(Layers.AddQuest(hours, _config.MaxWindHours, now), now);", MethodBody(timer, "    public void AddQuestWind("));
+        Assert.Contains("before.AddNormal(bonus.TotalHours, _config.MaxWindHours, now)", MethodBody(timer, "    public TimeSpan AddCommendationWind("));
+        Assert.Contains("WriteLayers(Layers.Unwind(now), now);", MethodBody(timer, "    public void ClearWind("));
+        Assert.Contains("_config.ExpiryUtc = at.StopsAt(now);", MethodBody(timer, "    private void WriteLayers("));
+        Assert.DoesNotContain("WindMath.Add(", timer);
     }
 
     // ---------- source helpers ----------

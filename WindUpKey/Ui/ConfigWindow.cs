@@ -60,11 +60,21 @@ public sealed class ConfigWindow : Window, IDisposable
     private string? _pairOwnerKey;
     private Vector2 _pairOwnerPos;
     private static readonly Vector2 PairSettingsWindowOffset = new(12f, 12f);
-    private static readonly double[] WindHourPresets = [1.0, 6.0, 12.0, 24.0];
+    private static readonly int[] WindSpringPresets = [1, 2, 3];
+
+    /// <summary>How many springs each partner's Give button sends, while editing (by partner key).</summary>
+    private readonly Dictionary<string, int> _springGiftDrafts = new(StringComparer.Ordinal);
+
+    /// <summary>Max wind hours while typed, committed when the edit ends (null when not editing).</summary>
+    private int? _maxHoursDraft;
 
     private sealed class OwnerSettingsDraft
     {
         public double MaxHours = 72;
+
+        /// <summary>The doll's break recovery minutes; null for a doll before protocol 6.</summary>
+        public int? BreakMinutes;
+
         public bool AutoSit = true;
         public ushort EmoteId = CharacterProfile.GroundSitEmoteId;
         public bool Locked;
@@ -141,7 +151,7 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.EndTabItem();
         }
 
-        if (_config.IsDoll && ImGui.BeginTabItem("Quests"))
+        if (_config.HasChosenRole && ImGui.BeginTabItem("Quests"))
         {
             _questTab.Draw();
             ImGui.EndTabItem();
@@ -239,6 +249,7 @@ public sealed class ConfigWindow : Window, IDisposable
             _config.Role = PlayerRole.Doll;
             _config.HasCompletedInitialSetup = true;
             _config.Save();
+            _relay.ResyncRole();
             if (grantStarterWind)
                 _timer.AddHours(24);
             else
@@ -256,6 +267,8 @@ public sealed class ConfigWindow : Window, IDisposable
             _config.Role = PlayerRole.Doll;
             _config.HasCompletedInitialSetup = true;
             _config.Save();
+            // Register again, so the relay applies a doll's spring cap and grants.
+            _relay.ResyncRole();
             // Grant wind before syncing lock — Tick() first would lock+sit, then unlock.
             if (grantStarterWind)
                 _timer.AddHours(24);
@@ -270,7 +283,19 @@ public sealed class ConfigWindow : Window, IDisposable
             _config.HasCompletedInitialSetup = true;
             _timer.SuspendDollRestrictions();
             _config.Save();
+            _relay.ResyncRole();
         }
+    }
+
+    private void CommitMaxWindHours()
+    {
+        if (_maxHoursDraft is not { } hours)
+            return;
+
+        _maxHoursDraft = null;
+        _config.MaxWindHours = hours;
+        _config.Save();
+        _timer.OnMaxWindHoursChanged();
     }
 
     private void DrawGeneralTab()
@@ -303,11 +328,28 @@ public sealed class ConfigWindow : Window, IDisposable
                 ImGui.BeginDisabled();
 
             // 06-A4: saved when committed (Enter, focus leaving, or a +/- step), so a crash can't lose it.
-            var maxHours = (int)Math.Round(_config.MaxWindHours);
+            // Typed digits are held here until the edit ends: a part-typed value (1, then 10…) read as the max would break
+            // the doll on a partner's wind or cap quest wind low.
+            if (settingsLocked)
+                _maxHoursDraft = null;
+            var maxHours = _maxHoursDraft ?? (int)Math.Round(_config.MaxWindHours);
             ImGui.SetNextItemWidth(80);
             if (ImGui.InputInt("Max wind hours", ref maxHours))
             {
-                _config.MaxWindHours = Math.Clamp(maxHours, 1, 168);
+                _maxHoursDraft = Math.Clamp(maxHours, 1, 168);
+                if (!ImGui.IsItemActive())
+                    CommitMaxWindHours();
+            }
+
+            if (_maxHoursDraft is not null && !ImGui.IsItemActive())
+                CommitMaxWindHours();
+
+            // How long a break by careless winding lasts before the doll recovers by itself.
+            var breakMinutes = _config.BrokenRecoveryMinutes;
+            ImGui.SetNextItemWidth(80);
+            if (ImGui.InputInt("Break recovery (minutes)", ref breakMinutes))
+            {
+                _config.BrokenRecoveryMinutes = WindLayers.ClampRecoveryMinutes(breakMinutes);
                 if (!ImGui.IsItemActive())
                     _config.Save();
             }
@@ -470,6 +512,18 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.SetWindowFontScale(1f);
         }
 
+        // Spare springs: the wind currency, held by the relay.
+        ImGui.Spacing();
+        ImGui.TextUnformatted(_relay.SpringBalance is { } springs
+            ? $"Spare springs: {springs} / {_relay.SpringCap}"
+            : "Spare springs: …");
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Each spare spring winds a partner for 8 hours (12 from a doll's owner). You get free springs on your " +
+                "first login each day, and more for each quest board line. You can't wind yourself with them.");
+        }
+
         DrawRelayIdentitySection();
 
         ImGui.Spacing();
@@ -553,12 +607,32 @@ public sealed class ConfigWindow : Window, IDisposable
                     ImGui.SameLine();
                     if (!hasValidPartnerKey)
                         ImGui.BeginDisabled();
-                    DrawWindHourButtons(
-                        hours => _relay.Forget(_relay.SendWindByKeyAsync(actionPartnerKey, hours), "wind"),
+                    DrawWindSpringButtons(
+                        springs => _relay.Forget(_relay.SendWindByKeyAsync(actionPartnerKey, springs), "wind"),
+                        fromOwner: isOwnedDoll,
                         smallButtons: true);
 
+                    // Unwinding asks the doll for its cost first; the confirm popup shows it.
                     if (ImGui.SmallButton("Unwind"))
                         _relay.Forget(_relay.SendUnwindByKeyAsync(actionPartnerKey), "unwind");
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("Costs a spring per 8 hours of their wind (free for their owner). You'll see the cost first.");
+
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton("Repair"))
+                        _relay.Forget(_relay.SendRepairAsync(actionPartnerKey), "repair");
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("Repair a doll who was broken by being wound too far. Free.");
+
+                    ImGui.TextUnformatted("Give springs");
+                    ImGui.SameLine();
+                    var gift = _springGiftDrafts.TryGetValue(actionPartnerKey, out var draftGift) ? draftGift : 1;
+                    ImGui.SetNextItemWidth(70);
+                    if (ImGui.InputInt("##gift", ref gift))
+                        _springGiftDrafts[actionPartnerKey] = Math.Clamp(gift, 1, SpringRules.WinderCap);
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton("Give"))
+                        _relay.Forget(_relay.SendSpringGiftAsync(actionPartnerKey, Math.Clamp(gift, 1, SpringRules.WinderCap)), "spring gift");
 
                     if (_config.IsDoll)
                     {
@@ -1093,6 +1167,7 @@ public sealed class ConfigWindow : Window, IDisposable
             draft.AutoSit = snap.AutoGroundSit;
             draft.EmoteId = snap.LockEmoteId == 0 ? CharacterProfile.GroundSitEmoteId : snap.LockEmoteId;
             draft.Locked = snap.SettingsLocked;
+            draft.BreakMinutes = snap.BrokenRecoveryMinutes;
             draft.Synced = true;
             draft.RestoreSeq = snap.RestoreSeq;
         }
@@ -1114,6 +1189,21 @@ public sealed class ConfigWindow : Window, IDisposable
         {
             draft.MaxHours = Math.Clamp(maxHours, 1, 168);
             PushOwnerSettings(dollKey, draft);
+        }
+
+        // Only a doll on protocol 6 reports it (older dolls can't break).
+        if (draft.BreakMinutes is { } breakMinutes)
+        {
+            ImGui.SetNextItemWidth(80);
+            if (ImGui.InputInt("Break recovery (minutes)", ref breakMinutes))
+            {
+                draft.BreakMinutes = WindLayers.ClampRecoveryMinutes(breakMinutes);
+                if (!ImGui.IsItemActive())
+                    PushOwnerSettings(dollKey, draft);
+            }
+
+            if (ImGui.IsItemDeactivatedAfterEdit())
+                PushOwnerSettings(dollKey, draft);
         }
 
         if (ImGui.Checkbox("Play emote when unwound", ref draft.AutoSit))
@@ -1345,7 +1435,8 @@ public sealed class ConfigWindow : Window, IDisposable
                 autoGroundSit: draft.AutoSit,
                 lockEmoteId: draft.EmoteId,
                 settingsLocked: draft.Locked,
-                notify: notify),
+                notify: notify,
+                brokenRecoveryMinutes: draft.BreakMinutes),
             "owner settings update");
     }
 
@@ -1443,14 +1534,17 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.EndCombo();
     }
 
-    private static void DrawWindHourButtons(Action<double> onClick, bool smallButtons)
+    /// <summary>1, 2 or 3 spare springs, labelled with the hours each gives (12h a spring from the doll's owner).</summary>
+    private static void DrawWindSpringButtons(Action<int> onClick, bool fromOwner, bool smallButtons)
     {
-        foreach (var hours in WindHourPresets)
+        foreach (var springs in WindSpringPresets)
         {
-            var label = hours == 1 ? "1h" : $"{hours:0}h";
+            var label = $"{springs} ({SpringRules.WindHours(springs, fromOwner):0}h)###wind{springs}";
             var clicked = smallButtons ? ImGui.SmallButton(label) : ImGui.Button(label);
             if (clicked)
-                onClick(hours);
+                onClick(springs);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip($"Spend {springs} spare spring{(springs == 1 ? string.Empty : "s")}.");
             ImGui.SameLine();
         }
     }
@@ -1616,12 +1710,14 @@ public sealed class ConfigWindow : Window, IDisposable
 
         ImGui.Spacing();
         ImGui.TextUnformatted("Self wind");
-        DrawWindHourButtons(
-            hours =>
+        // Wound locally as a player's wind (no springs are spent on yourself), so it can test overwind and breaking.
+        DrawWindSpringButtons(
+            springs =>
             {
                 if (EnsureDebugSelfPair(canWind: true, canUnwind: false))
-                    _relay.Forget(_relay.SendWindByKeyAsync(_config.PairingKey, hours), "debug self-wind");
+                    _relay.Forget(_relay.SendWindByKeyAsync(_config.PairingKey, springs), "debug self-wind");
             },
+            fromOwner: false,
             smallButtons: false);
 
         if (ImGui.Button("Unwind") && EnsureDebugSelfPair(canWind: false, canUnwind: true))

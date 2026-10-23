@@ -287,6 +287,50 @@ public sealed class QuestBoardTests
         Assert.Empty(QuestBoardEngine.CreditMsqTurnIns(state, story, tracked: 70050));
     }
 
+    [Fact]
+    public void SpringLines_WaitInBatches_UntilTheRelayAnswersForEach()
+    {
+        var state = new QuestBoardState();
+        var ids = 0;
+        string NewId() => $"g{++ids}";
+
+        QuestBoardEngine.AddSpringLines(state, 2, NewId);
+        QuestBoardEngine.AddSpringLines(state, 1, NewId);
+        var first = Assert.Single(state.PendingSpringGrants);
+        Assert.Equal(("g1", 3), (first.RequestId, first.Lines));
+
+        // Once sent, a batch takes no more lines: the relay's answer for it covers exactly what it carried.
+        first.Sent = true;
+        QuestBoardEngine.AddSpringLines(state, 2, NewId);
+        Assert.Equal(["g1", "g2"], state.PendingSpringGrants.Select(g => g.RequestId));
+
+        // A batch never carries more than the relay accepts.
+        QuestBoardEngine.AddSpringLines(state, 12, NewId);
+        Assert.All(state.PendingSpringGrants, g => Assert.InRange(g.Lines, 1, QuestBoardEngine.MaxLinesPerGrant));
+        Assert.Equal(17, state.PendingSpringGrants.Sum(g => g.Lines));
+
+        Assert.True(QuestBoardEngine.SettleSpringGrant(state, "g1"));
+        Assert.False(QuestBoardEngine.SettleSpringGrant(state, "g1"));
+        Assert.False(QuestBoardEngine.SettleSpringGrant(state, null));
+        Assert.Equal(14, state.Clone().PendingSpringGrants.Sum(g => g.Lines));
+    }
+
+    [Fact]
+    public void UnpaidSpringBatches_AreCapped_DroppingTheOldest()
+    {
+        // A relay that never answers (springs off): the list stops growing.
+        var state = new QuestBoardState();
+        var ids = 0;
+        for (var i = 0; i < 30; i++)
+        {
+            QuestBoardEngine.AddSpringLines(state, 1, () => $"g{++ids}");
+            state.PendingSpringGrants[^1].Sent = true;
+        }
+
+        Assert.Equal(QuestBoardEngine.MaxPendingGrants, state.PendingSpringGrants.Count);
+        Assert.Equal("g30", state.PendingSpringGrants[^1].RequestId);
+    }
+
     // ---------- resets ----------
 
     [Fact]

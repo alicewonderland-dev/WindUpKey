@@ -41,6 +41,12 @@ public sealed class QuestBoardState
     /// <summary>The main scenario quests done before the board existed were added to <see cref="CreditedMsqQuestIds"/>.</summary>
     public bool MsqHistorySeeded { get; set; }
 
+    /// <summary>
+    /// Lines the relay hasn't paid in springs yet, in batches it settles by requestId. A batch is resent until the relay
+    /// answers (a disconnect never loses one), and it pays each id once.
+    /// </summary>
+    public List<PendingSpringGrant> PendingSpringGrants { get; set; } = [];
+
     public QuestBoardState Clone() => new()
     {
         Stickers = Stickers,
@@ -52,6 +58,7 @@ public sealed class QuestBoardState
         MsqTrackedQuestId = MsqTrackedQuestId,
         CreditedMsqQuestIds = (CreditedMsqQuestIds ?? []).ToList(),
         MsqHistorySeeded = MsqHistorySeeded,
+        PendingSpringGrants = (PendingSpringGrants ?? []).Where(g => g is not null).Select(g => g.Clone()).ToList(),
     };
 
     /// <summary>Drops null or invalid slots (a damaged or hand-edited config). Returns true when anything changed.</summary>
@@ -59,8 +66,24 @@ public sealed class QuestBoardState
     {
         Slots ??= [];
         CreditedMsqQuestIds ??= [];
+        PendingSpringGrants ??= [];
+        PendingSpringGrants.RemoveAll(g => g is null || g.Lines <= 0 || string.IsNullOrEmpty(g.RequestId));
         return Slots.RemoveAll(s => s is null || !s.IsValid) > 0;
     }
 
     public IEnumerable<QuestSlot> SlotsOf(QuestDifficulty difficulty) => Slots.Where(s => s.Difficulty == difficulty);
+}
+
+/// <summary>Quest board lines waiting for the relay to pay them in springs.</summary>
+[Serializable]
+public sealed class PendingSpringGrant
+{
+    public string RequestId { get; set; } = string.Empty;
+
+    public int Lines { get; set; }
+
+    /// <summary>Sent at least once: it no longer takes new lines, so the relay's answer for it covers exactly these.</summary>
+    public bool Sent { get; set; }
+
+    public PendingSpringGrant Clone() => (PendingSpringGrant)MemberwiseClone();
 }

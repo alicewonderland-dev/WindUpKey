@@ -10,6 +10,12 @@ public enum WindChargeLevel
     Low,
     NearlySpent,
     Unwound,
+
+    /// <summary>Fully wound with player overwind: the fully-wound status plus the clockwork warning.</summary>
+    Overwound,
+
+    /// <summary>Broken by careless winding: only the shackles status.</summary>
+    Broken,
 }
 
 /// <summary>What the Moodles wind status does on this tick (<see cref="MoodlesSyncGate.Next"/>).</summary>

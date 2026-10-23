@@ -63,6 +63,8 @@
     <Compile Include="..\WindUpKey\Services\SafewordPause.cs" Link="Plugin\SafewordPause.cs" />
     <Compile Include="..\WindUpKey\Services\ClipLedger.cs" Link="Plugin\ClipLedger.cs" />
     <Compile Include="..\WindUpKey\Services\WindMath.cs" Link="Plugin\WindMath.cs" />
+    <!-- Spare springs: the doll's three wind layers. -->
+    <Compile Include="..\WindUpKey\Services\WindLayers.cs" Link="Plugin\WindLayers.cs" />
     <Compile Include="..\WindUpKey\Services\LoginSitRule.cs" Link="Plugin\LoginSitRule.cs" />
     <!-- 06 Part C: cancelling the looping emote. -->
     <Compile Include="..\WindUpKey\Services\EmoteCancelPlan.cs" Link="Plugin\EmoteCancelPlan.cs" />

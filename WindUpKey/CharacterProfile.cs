@@ -74,6 +74,25 @@ public sealed class CharacterProfile
     /// <summary>Last-write-wins stamp for <see cref="ExpiryUtc"/> sync with the relay.</summary>
     public DateTimeOffset? WindUpdatedUtc { get; set; }
 
+    /// <summary>
+    /// Spare springs: the wind layers (<see cref="Services.WindLayers"/>) as of <see cref="WindAsOfUtc"/>. Null
+    /// <see cref="WindAsOfUtc"/> means not migrated yet: the layers are filled from <see cref="ExpiryUtc"/>. Since then
+    /// <see cref="ExpiryUtc"/> is derived (when the doll stops if nothing changes) for older builds and the relay.
+    /// </summary>
+    public double NormalWindHours { get; set; }
+
+    public double QuestOverwindHours { get; set; }
+
+    public double PlayerOverwindHours { get; set; }
+
+    public DateTimeOffset? WindAsOfUtc { get; set; }
+
+    /// <summary>While broken: when the break ends by itself.</summary>
+    public DateTimeOffset? BrokenUntilUtc { get; set; }
+
+    /// <summary>How long a break lasts (5–240 minutes). Owners can change it, as for max wind hours.</summary>
+    public int BrokenRecoveryMinutes { get; set; } = Services.WindLayers.DefaultRecoveryMinutes;
+
     /// <summary>Last paired-partner wind request sent by this doll; shared across all partners.</summary>
     public DateTimeOffset? LastWindRequestUtc { get; set; }
 

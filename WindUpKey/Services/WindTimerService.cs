@@ -7,8 +7,10 @@ using WindUpKey.Quest;
 namespace WindUpKey.Services;
 
 /// <summary>
-/// Owns expiry state for dolls only. Exact remaining duration is returned for the person winding —
-/// never surface it in doll UI/chat (vague low-wind echo is handled by <see cref="LowWindWarningService"/>).
+/// Owns the doll's wind (dolls only): the three <see cref="WindLayers"/>, the broken state, and the lock they set.
+/// <see cref="Configuration.ExpiryUtc"/> is derived from the layers (when the doll stops if nothing changes) for the
+/// low-wind warnings, the relay and older builds. Never surface exact durations in doll UI/chat; partners get only a
+/// percentage of normal wind (<see cref="PercentForWinder"/>).
 /// </summary>
 public sealed class WindTimerService
 {
@@ -25,6 +27,7 @@ public sealed class WindTimerService
     private bool _relaySafetyBypass;
     private bool _relaySafetyBypassAnnounced;
     private bool _callTravelBypass;
+    private bool _wasBroken;
 
     /// <summary>Raised after local ExpiryUtc changes (not when applying a relay sync).</summary>
     public Action? DollWindChanged { get; set; }
@@ -47,12 +50,44 @@ public sealed class WindTimerService
         _chat = chat;
         // Only dolls start from timer state; winders are unlocked at role switch, not every tick.
         _wasLocked = config.IsDoll && IsTimerEmpty;
+        _wasBroken = config.IsDoll && IsBroken;
         _lock.SetLocked(_wasLocked);
     }
 
-    /// <summary>Empty/expired timer. Meaningful for dolls only.</summary>
-    public bool IsTimerEmpty =>
-        _config.ExpiryUtc is null || _config.ExpiryUtc.Value <= DateTimeOffset.UtcNow;
+    /// <summary>The doll's wind now (from the stored layers; an unmigrated profile reads its expiry).</summary>
+    public WindLayers Layers
+    {
+        get
+        {
+            var now = DateTimeOffset.UtcNow;
+            if (_config.WindAsOfUtc is not { } asOf)
+                return WindLayers.FromExpiry(_config.ExpiryUtc, now, _config.MaxWindHours);
+            // Max wind hours may have been raised since (an owner, or the doll): the drain since the last save is taken
+            // first, under the layers as they were, and only then does player overwind fill the new room. Relayering
+            // first would let the drain fall on quest overwind, which an unwind would then take as normal wind.
+            return new WindLayers(
+                _config.NormalWindHours,
+                _config.QuestOverwindHours,
+                _config.PlayerOverwindHours,
+                asOf,
+                _config.BrokenUntilUtc).At(now).Relayer(_config.MaxWindHours);
+        }
+    }
+
+    /// <summary>Locked by wind: no normal wind, or broken. Meaningful for dolls only.</summary>
+    public bool IsTimerEmpty => Layers.IsLockedAt(DateTimeOffset.UtcNow);
+
+    /// <summary>Broken by careless winding: locked until repaired or the break ends.</summary>
+    public bool IsBroken => _config.IsDoll && Layers.IsBrokenAt(DateTimeOffset.UtcNow);
+
+    /// <summary>Has player overwind (more winding from others may break them).</summary>
+    public bool IsOverwound => _config.IsDoll && Layers.Player > 0;
+
+    /// <summary>Normal wind as a percentage of max wind hours, 0–100: all a partner is ever told.</summary>
+    public int PercentForWinder => _config.IsDoll ? Layers.PercentOfMax(DateTimeOffset.UtcNow, _config.MaxWindHours) : 0;
+
+    /// <summary>What unwinding the doll costs now: normal wind and player overwind in 8h springs, rounded up.</summary>
+    public int UnwindCost => SpringRules.UnwindCost(Layers.UnwindableHours(DateTimeOffset.UtcNow));
 
     /// <summary>
     /// Movement/teleport lock policy. False while the relay safety bypass or an active
@@ -142,22 +177,76 @@ public sealed class WindTimerService
         _loginSitAttempts = 0;
     }
 
+    /// <summary>A local wind that isn't another player's (the starter wind): normal wind only, up to max.</summary>
+    public void AddHours(double hours)
+    {
+        if (!_config.IsDoll || hours <= 0)
+            return;
+
+        var now = DateTimeOffset.UtcNow;
+        var before = Layers;
+        var after = before.AddNormal(hours, _config.MaxWindHours, now);
+        Save(after, now);
+        if (after.Normal > before.Normal)
+            _lowWind.OnWoundReceived(TimeSpan.FromHours(after.Normal - before.Normal));
+    }
+
     /// <summary>
-    /// Extend the timer by hours (doll only). Returns remaining span for the remote winder.
-    /// <paramref name="winderIdentity"/> is optional Name@World (or name) of who wound them.
+    /// A wind from another player (doll only): normal wind up to max, then player overwind. Player overwind reaching max
+    /// wind hours breaks the doll. A broken doll refuses it (<see cref="PlayerWindResult.Refused"/>), and the relay gives
+    /// the springs back. <paramref name="winderIdentity"/> is optional Name@World (or name) of who wound them.
     /// </summary>
-    public TimeSpan AddHours(double hours, string? winderIdentity = null)
+    public PlayerWindResult AddPlayerWind(double hours, string? winderIdentity = null)
     {
         if (!_config.IsDoll)
-            return TimeSpan.Zero;
+            return new PlayerWindResult(true, 0, false, false, false);
 
-        if (hours <= 0)
-            return RemainingForWinder();
+        var now = DateTimeOffset.UtcNow;
+        var before = Layers;
+        if (before.IsBrokenAt(now))
+            return new PlayerWindResult(true, PercentForWinder, false, true, false);
 
-        var actualAdded = AddWind(TimeSpan.FromHours(hours));
-        if (actualAdded > TimeSpan.Zero)
-            _lowWind.OnWoundReceived(actualAdded, TryWinderDisplayName(winderIdentity));
-        return RemainingForWinder();
+        var outcome = before.AddPlayer(hours, _config.MaxWindHours, now, _config.BrokenRecoveryMinutes);
+        Save(outcome.Layers, now);
+        var name = TryWinderDisplayName(winderIdentity);
+        if (outcome.Broke)
+        {
+            _wasBroken = true;
+            _lowWind.OnBroken(name);
+        }
+        else if (hours > 0)
+        {
+            // Sized to the wind, as quest wind is: the doll never learns where it landed.
+            _lowWind.OnWoundReceived(TimeSpan.FromHours(hours), name);
+        }
+
+        return new PlayerWindResult(false, PercentForWinder, IsOverwound, outcome.Broke, outcome.Broke);
+    }
+
+    /// <summary>
+    /// After max wind hours changed (the doll's own setting, or an owner's): the layers are stored as they now read, so a
+    /// raised max moves player overwind into normal wind from this moment on.
+    /// </summary>
+    public void OnMaxWindHoursChanged()
+    {
+        if (!_config.IsDoll)
+            return;
+
+        var now = DateTimeOffset.UtcNow;
+        Save(Layers, now);
+    }
+
+    /// <summary>A repair by another player: ends the break now. False when the doll wasn't broken.</summary>
+    public bool Repair(string? winderIdentity = null)
+    {
+        if (!IsBroken)
+            return false;
+
+        var now = DateTimeOffset.UtcNow;
+        Save(Layers.Repair(now), now);
+        _wasBroken = false;
+        _lowWind.OnRepaired(TryWinderDisplayName(winderIdentity), stillUnwound: IsTimerEmpty);
+        return true;
     }
 
     /// <summary>
@@ -183,9 +272,18 @@ public sealed class WindTimerService
         _config.SafewordPausedUntilUtc = SafewordPause.Extend(_config.SafewordPausedUntilUtc, DateTimeOffset.UtcNow, hours);
         _config.Save();
 
-        var actualAdded = AddWind(TimeSpan.FromHours(hours), ignoreMaxCap: true);
-        if (actualAdded > TimeSpan.Zero)
-            _lowWind.OnWoundReceived(actualAdded);
+        // The safeword also ends a break at once. Then normal wind, then quest overwind with no cap: it never adds player
+        // overwind, so it can't break them.
+        var now = DateTimeOffset.UtcNow;
+        if (IsBroken)
+        {
+            Save(Layers.Repair(now), now);
+            _wasBroken = false;
+        }
+
+        Save(Layers.AddSafeword(hours, _config.MaxWindHours, now), now);
+        if (hours > 0)
+            _lowWind.OnWoundReceived(TimeSpan.FromHours(hours));
     }
 
     /// <summary>06-B1: the doll ends the pause early. Returns false when remote control wasn't paused.</summary>
@@ -202,56 +300,65 @@ public sealed class WindTimerService
     }
 
     /// <summary>
-    /// Adds a commendation bonus using the normal timer cap (never shortening the timer, 06-A8), but emits only the
-    /// dedicated vague commendation RP echo. Returns the time actually added after applying the cap.
+    /// A commendation bonus: normal wind only, up to max, with the dedicated vague commendation RP echo. Returns the time
+    /// actually added.
     /// </summary>
     public TimeSpan AddCommendationWind(TimeSpan bonus, int commendationsReceived)
     {
-        var actualAdded = AddWind(bonus);
-        if (actualAdded <= TimeSpan.Zero)
+        if (!_config.IsDoll || bonus <= TimeSpan.Zero)
             return TimeSpan.Zero;
 
+        var now = DateTimeOffset.UtcNow;
+        var before = Layers;
+        var after = before.AddNormal(bonus.TotalHours, _config.MaxWindHours, now);
+        if (after.Normal <= before.Normal)
+            return TimeSpan.Zero;
+
+        Save(after, now);
         _lowWind.OnCommendationWind(commendationsReceived);
-        return actualAdded;
+        return TimeSpan.FromHours(after.Normal - before.Normal);
     }
 
     /// <summary>
-    /// Quest board path: extends the timer up to the overwind cap (<see cref="QuestRewardRules.OverwindCapHours"/>, twice
-    /// <see cref="Configuration.MaxWindHours"/>), never shortening a longer timer (06-A8). Still emits the vague wound RP
-    /// echo. Returns the time actually added.
+    /// Quest board wind: normal wind up to max, then quest overwind, so the two reach at most twice
+    /// <see cref="Configuration.MaxWindHours"/> (<see cref="QuestRewardRules.OverwindCapHours"/>). Still emits the vague
+    /// wound RP echo, sized to the reward.
     /// </summary>
-    public TimeSpan AddQuestWind(double hours)
+    public void AddQuestWind(double hours)
     {
         if (!_config.IsDoll || hours <= 0)
-            return TimeSpan.Zero;
+            return;
 
-        var actualAdded = AddWind(TimeSpan.FromHours(hours), capHours: QuestRewardRules.OverwindCapHours(_config.MaxWindHours));
+        var now = DateTimeOffset.UtcNow;
+        Save(Layers.AddQuest(hours, _config.MaxWindHours, now), now);
         // The echo is sized to what the quest gave, not what fit under the cap: the board shows each reward's hours, so a
         // smaller echo (or none) would tell the doll the timer just reached the cap.
         _lowWind.OnWoundReceived(TimeSpan.FromHours(hours));
-        return actualAdded;
     }
 
-    /// <param name="ignoreMaxCap">No cap at all (the safeword).</param>
-    /// <param name="capHours">A cap other than <see cref="Configuration.MaxWindHours"/> (quest overwind).</param>
-    private TimeSpan AddWind(TimeSpan amount, bool ignoreMaxCap = false, double? capHours = null)
+    /// <summary>
+    /// Stores <paramref name="layers"/> and the expiry derived from them, stamped for the relay's last-write-wins sync,
+    /// then brings the lock, warnings and listeners up to date.
+    /// </summary>
+    private void Save(WindLayers layers, DateTimeOffset now)
     {
-        if (!_config.IsDoll || amount <= TimeSpan.Zero)
-            return TimeSpan.Zero;
-
-        // 06-A8: capped at MaxWindHours (or capHours) from now, but never shorter than the current expiry.
-        var (proposed, actualAdded) = WindMath.Add(
-            DateTimeOffset.UtcNow,
-            _config.ExpiryUtc,
-            amount,
-            ignoreMaxCap ? null : capHours ?? _config.MaxWindHours);
-        _config.ExpiryUtc = proposed;
-        _config.WindUpdatedUtc = DateTimeOffset.UtcNow;
+        WriteLayers(layers, now);
+        _config.WindUpdatedUtc = now;
         _config.Save();
         SyncLockState();
         _lowWind.OnWindChanged();
         DollWindChanged?.Invoke();
-        return actualAdded;
+    }
+
+    private void WriteLayers(WindLayers layers, DateTimeOffset now)
+    {
+        var at = layers.At(now);
+        _config.NormalWindHours = at.Normal;
+        _config.QuestOverwindHours = at.Quest;
+        _config.PlayerOverwindHours = at.Player;
+        _config.WindAsOfUtc = now;
+        _config.BrokenUntilUtc = at.BrokenUntil;
+        _config.ExpiryUtc = at.StopsAt(now);
     }
 
     private static string? TryWinderDisplayName(string? identity)
@@ -270,16 +377,8 @@ public sealed class WindTimerService
         return trimmed.Length > 0 ? trimmed : null;
     }
 
-    public TimeSpan RemainingForWinder()
-    {
-        if (!_config.IsDoll)
-            return TimeSpan.Zero;
-
-        if (_config.ExpiryUtc is not { } exp)
-            return TimeSpan.Zero;
-        var remaining = exp - DateTimeOffset.UtcNow;
-        return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
-    }
+    /// <summary>How long until the doll stops if nothing changes (0 while locked). Debug and warnings only.</summary>
+    public TimeSpan RunningFor() => _config.IsDoll ? Layers.RunningFor(DateTimeOffset.UtcNow) : TimeSpan.Zero;
 
     public void Tick()
     {
@@ -290,9 +389,33 @@ public sealed class WindTimerService
             return;
         }
 
+        TrackBreakEnd();
         SyncLockState();
         TryPendingLoginSit();
         TidySafewordPause();
+    }
+
+    /// <summary>
+    /// A break that ended by itself: its time is stored as passed (so the wind runs on from here, and the relay and other
+    /// PCs learn it), with the doll's RP line.
+    /// </summary>
+    private void TrackBreakEnd()
+    {
+        var broken = IsBroken;
+        if (broken || !_wasBroken)
+        {
+            _wasBroken = broken;
+            return;
+        }
+
+        // Only this character's own stored break ending says "recovered": after a character switch the flag may be the
+        // previous one's, and this character has no break stored.
+        _wasBroken = false;
+        if (_config.BrokenUntilUtc is null)
+            return;
+
+        Save(Layers, DateTimeOffset.UtcNow);
+        _lowWind.OnRecovered(stillUnwound: IsTimerEmpty);
     }
 
     /// <summary>
@@ -349,16 +472,18 @@ public sealed class WindTimerService
     }
 
     /// <summary>
-    /// Clear remaining wind (locks the doll). Used by partner unwind permission.
-    /// <paramref name="winderIdentity"/> is optional Name@World (or name) of who unwound them.
+    /// An unwind (locks the doll): normal wind and player overwind go, quest overwind is kept (and held while they're at
+    /// 0). Used by partner unwind permission. <paramref name="winderIdentity"/> is optional Name@World (or name) of who
+    /// unwound them.
     /// </summary>
     public void ClearWind(string? winderIdentity = null)
     {
         if (!_config.IsDoll)
             return;
 
-        _config.ExpiryUtc = null;
-        _config.WindUpdatedUtc = DateTimeOffset.UtcNow;
+        var now = DateTimeOffset.UtcNow;
+        WriteLayers(Layers.Unwind(now), now);
+        _config.WindUpdatedUtc = now;
         _config.Save();
         SyncLockState();
         _lowWind.OnCleared(TryWinderDisplayName(winderIdentity));
@@ -366,15 +491,18 @@ public sealed class WindTimerService
     }
 
     /// <summary>
-    /// Applies relay-authoritative wind expiry without emitting <see cref="DollWindChanged"/>.
+    /// Applies the relay's stored wind without emitting <see cref="DollWindChanged"/>: its layers when it has them, else
+    /// (a row an older build pushed) layers made from its expiry.
     /// </summary>
-    public void ApplySyncedExpiry(DateTimeOffset? expiryUtc, DateTimeOffset updatedUtc)
+    public void ApplySynced(WindLayers? layers, DateTimeOffset? expiryUtc, DateTimeOffset updatedUtc)
     {
         if (!_config.IsDoll)
             return;
 
-        _config.ExpiryUtc = expiryUtc;
+        var now = DateTimeOffset.UtcNow;
+        WriteLayers(layers ?? WindLayers.FromExpiry(expiryUtc, now, _config.MaxWindHours), now);
         _config.WindUpdatedUtc = updatedUtc;
+        _wasBroken = IsBroken;
         _config.Save();
         SyncLockState();
         _lowWind.OnWindChanged();
@@ -434,3 +562,11 @@ public sealed class WindTimerService
         return $"{Math.Max(1, minutes)}m";
     }
 }
+
+/// <summary>What a player's wind did, as the doll tells the winder (never exact times).</summary>
+/// <param name="Refused">Not applied: the doll is broken (or not a doll). The relay gives the springs back.</param>
+/// <param name="Percent">Normal wind as a percentage of max (overwind reads 100).</param>
+/// <param name="Overwound">Has player overwind.</param>
+/// <param name="Broken">Is broken.</param>
+/// <param name="BrokeNow">This wind broke them.</param>
+public readonly record struct PlayerWindResult(bool Refused, int Percent, bool Overwound, bool Broken, bool BrokeNow);

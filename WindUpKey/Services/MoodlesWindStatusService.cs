@@ -34,10 +34,17 @@ public sealed class MoodlesWindStatusService : IDisposable
     private static readonly Guid LowGuid = Guid.Parse("a1b2c3d4-e5f6-4701-8903-0000c1a66e03");
     private static readonly Guid NearlySpentGuid = Guid.Parse("a1b2c3d4-e5f6-4701-8904-0000c1a66e04");
     private static readonly Guid UnwoundGuid = Guid.Parse("a1b2c3d4-e5f6-4701-8905-0000c1a66e05");
+    private static readonly Guid OverwoundGuid = Guid.Parse("a1b2c3d4-e5f6-4701-8906-0000c1a66e06");
+    private static readonly Guid BrokenGuid = Guid.Parse("a1b2c3d4-e5f6-4701-8907-0000c1a66e07");
 
-    private static readonly TimeSpan FullyWoundMin = TimeSpan.FromHours(28);
-    private static readonly TimeSpan WoundMin = TimeSpan.FromHours(12);
-    private static readonly TimeSpan LowMin = TimeSpan.FromHours(2);
+    /// <summary>Game status icons: Clockwork (Status 1443) and Shackles of Time (Status 2741).</summary>
+    private const int ClockworkIconId = 215825;
+    private const int ShacklesOfTimeIconId = 215372;
+
+    /// <summary>The bands are percentages of normal wind (of max wind hours), so they never tell an exact time.</summary>
+    private const int FullyWoundMinPercent = 90;
+    private const int WoundMinPercent = 50;
+    private const int LowMinPercent = 10;
 
     private static readonly IReadOnlyList<Guid> AllLevelGuids =
     [
@@ -46,6 +53,8 @@ public sealed class MoodlesWindStatusService : IDisposable
         LowGuid,
         NearlySpentGuid,
         UnwoundGuid,
+        OverwoundGuid,
+        BrokenGuid,
     ];
 
     private readonly IClientState _clientState;
@@ -405,7 +414,7 @@ public sealed class MoodlesWindStatusService : IDisposable
             return;
         }
 
-        var level = ResolveLevel(_timer.RemainingForWinder());
+        var level = ResolveLevel(_timer.PercentForWinder, _timer.IsTimerEmpty, _timer.IsBroken, _timer.IsOverwound);
         if (!forceApply && _appliedLevel == level)
             return;
 
@@ -414,7 +423,12 @@ public sealed class MoodlesWindStatusService : IDisposable
         if (!_gate.MayApply(level, now))
             return;
 
-        if (skipIfPresent && TryContainsStatus(player, LevelMeta(level).Guid))
+        // Already right only when exactly this level's statuses are there: these survive between sessions, so one left
+        // from before (a clockwork warning after the overwind drained offline) must still be cleared.
+        var levelGuids = LevelStatuses(level).Select(s => s.Guid).ToHashSet();
+        if (skipIfPresent
+            && levelGuids.All(guid => TryContainsStatus(player, guid))
+            && AllLevelGuids.Where(guid => !levelGuids.Contains(guid)).All(guid => !TryContainsStatus(player, guid)))
         {
             _appliedLevel = level;
             _gate.ApplySucceeded();
@@ -557,35 +571,12 @@ public sealed class MoodlesWindStatusService : IDisposable
 
     private void ApplyLevel(WindChargeLevel level, IPlayerCharacter player)
     {
-        var (guid, iconId, statusType) = LevelMeta(level);
-        var (title, description) = LevelText(level);
         var applier = TryLocalApplier(player) ?? string.Empty;
         if (string.IsNullOrEmpty(applier))
         {
             _appliedLevel = null;
             return;
         }
-
-        // Moodles JSON MyStatus shape; NoExpire + AsPermanent → no countdown, survives zone.
-        var payload = new MoodleStatusPayload
-        {
-            GUID = guid,
-            IconID = iconId,
-            Title = title,
-            Description = description,
-            CustomFXPath = string.Empty,
-            ExpiresAt = 0,
-            Type = statusType,
-            Modifiers = 0,
-            Stacks = 1,
-            StackSteps = 0,
-            ChainedStatus = Guid.Empty,
-            ChainTrigger = 0,
-            Applier = applier,
-            Dispeller = string.Empty,
-            NoExpire = true,
-            AsPermanent = true,
-        };
 
         try
         {
@@ -598,21 +589,42 @@ public sealed class MoodlesWindStatusService : IDisposable
                 return;
             }
 
-            var jsonBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload, _jsonOptions));
-            var statusObj = JsonSerializer.Deserialize(jsonBytes, _myStatusType, _jsonOptions);
-            if (statusObj is null)
-            {
-                _appliedLevel = null;
-                return;
-            }
-
             var prepareOptionsType = _prepareToApply.GetParameters()[1].ParameterType.GetElementType()!;
             var emptyOpts = Array.CreateInstance(prepareOptionsType, 0);
-            var prepared = _prepareToApply.Invoke(null, [statusObj, emptyOpts]);
-            if (prepared is null)
+            var prepared = new List<object>();
+            foreach (var spec in LevelStatuses(level))
             {
-                _appliedLevel = null;
-                return;
+                // Moodles JSON MyStatus shape; NoExpire + AsPermanent → no countdown, survives zone.
+                var payload = new MoodleStatusPayload
+                {
+                    GUID = spec.Guid,
+                    IconID = spec.IconId,
+                    Title = spec.Title,
+                    Description = spec.Description,
+                    CustomFXPath = string.Empty,
+                    ExpiresAt = 0,
+                    Type = spec.StatusType,
+                    Modifiers = 0,
+                    Stacks = 1,
+                    StackSteps = 0,
+                    ChainedStatus = Guid.Empty,
+                    ChainTrigger = 0,
+                    Applier = applier,
+                    Dispeller = string.Empty,
+                    NoExpire = true,
+                    AsPermanent = true,
+                };
+
+                var jsonBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload, _jsonOptions));
+                var statusObj = JsonSerializer.Deserialize(jsonBytes, _myStatusType, _jsonOptions);
+                var ready = statusObj is null ? null : _prepareToApply.Invoke(null, [statusObj, emptyOpts]);
+                if (ready is null)
+                {
+                    _appliedLevel = null;
+                    return;
+                }
+
+                prepared.Add(ready);
             }
 
             var manager = _getMyStatusManager.Invoke(null, [applier, true]);
@@ -625,8 +637,10 @@ public sealed class MoodlesWindStatusService : IDisposable
             CancelAllOnManager(manager);
 
             var statusTuple = Enum.Parse(_updateSourceType, "StatusTuple");
-            var added = _addOrUpdate.Invoke(manager, [prepared, statusTuple, false, true]);
-            _appliedLevel = added is not null ? level : null;
+            var allAdded = true;
+            foreach (var status in prepared)
+                allAdded &= _addOrUpdate.Invoke(manager, [status, statusTuple, false, true]) is not null;
+            _appliedLevel = allAdded ? level : null;
             if (_appliedLevel is null)
                 LogUnavailableOnce("Moodles local AddOrUpdate did not retain wind charge moodle");
         }
@@ -726,36 +740,52 @@ public sealed class MoodlesWindStatusService : IDisposable
         }
     }
 
-    internal static WindChargeLevel ResolveLevel(TimeSpan remaining)
+    /// <summary>
+    /// The doll's Moodle level: broken first, then unwound (no normal wind, or a lock), then overwound (player overwind,
+    /// which only exists at 100%), then the bands of normal wind: 90–100% fully wound, 50–90% wound, 10–50% low, under
+    /// 10% nearly spent.
+    /// </summary>
+    internal static WindChargeLevel ResolveLevel(int percent, bool unwound, bool broken, bool overwound)
     {
-        if (remaining <= TimeSpan.Zero)
+        if (broken)
+            return WindChargeLevel.Broken;
+        if (unwound)
             return WindChargeLevel.Unwound;
-        if (remaining > FullyWoundMin)
+        if (overwound)
+            return WindChargeLevel.Overwound;
+        if (percent >= FullyWoundMinPercent)
             return WindChargeLevel.FullyWound;
-        if (remaining > WoundMin)
+        if (percent >= WoundMinPercent)
             return WindChargeLevel.Wound;
-        if (remaining > LowMin)
+        if (percent >= LowMinPercent)
             return WindChargeLevel.Low;
         return WindChargeLevel.NearlySpent;
     }
 
-    private static (Guid Guid, int IconId, int StatusType) LevelMeta(WindChargeLevel level) => level switch
+    /// <summary>The statuses a level applies, the first being the one its presence is checked by.</summary>
+    private IReadOnlyList<MoodleSpec> LevelStatuses(WindChargeLevel level) => level switch
     {
-        WindChargeLevel.FullyWound => (FullyWoundGuid, 214146, 0), // Positive
-        WindChargeLevel.Wound => (WoundGuid, 214142, 0),
-        WindChargeLevel.Low => (LowGuid, 214141, 1), // Negative
-        WindChargeLevel.NearlySpent => (NearlySpentGuid, 214140, 1),
-        _ => (UnwoundGuid, 215260, 1),
+        WindChargeLevel.Overwound =>
+        [
+            Spec(WindChargeLevel.FullyWound),
+            new MoodleSpec(OverwoundGuid, ClockworkIconId, 1, _messages.MoodleOverwoundTitle, _messages.MoodleOverwoundDescription),
+        ],
+        WindChargeLevel.Broken =>
+            [new MoodleSpec(BrokenGuid, ShacklesOfTimeIconId, 1, _messages.MoodleBrokenTitle, _messages.MoodleBrokenDescription)],
+        _ => [Spec(level)],
     };
 
-    private (string Title, string Description) LevelText(WindChargeLevel level) => level switch
+    private MoodleSpec Spec(WindChargeLevel level) => level switch
     {
-        WindChargeLevel.FullyWound => (_messages.MoodleFullyWoundTitle, _messages.MoodleFullyWoundDescription),
-        WindChargeLevel.Wound => (_messages.MoodleWoundTitle, _messages.MoodleWoundDescription),
-        WindChargeLevel.Low => (_messages.MoodleLowTitle, _messages.MoodleLowDescription),
-        WindChargeLevel.NearlySpent => (_messages.MoodleNearlySpentTitle, _messages.MoodleNearlySpentDescription),
-        _ => (_messages.MoodleUnwoundTitle, _messages.MoodleUnwoundDescription),
+        WindChargeLevel.FullyWound => new(FullyWoundGuid, 214146, 0, _messages.MoodleFullyWoundTitle, _messages.MoodleFullyWoundDescription), // Positive
+        WindChargeLevel.Wound => new(WoundGuid, 214142, 0, _messages.MoodleWoundTitle, _messages.MoodleWoundDescription),
+        WindChargeLevel.Low => new(LowGuid, 214141, 1, _messages.MoodleLowTitle, _messages.MoodleLowDescription), // Negative
+        WindChargeLevel.NearlySpent => new(NearlySpentGuid, 214140, 1, _messages.MoodleNearlySpentTitle, _messages.MoodleNearlySpentDescription),
+        _ => new(UnwoundGuid, 215260, 1, _messages.MoodleUnwoundTitle, _messages.MoodleUnwoundDescription),
     };
+
+    /// <summary>One Moodles status: its stable GUID, game icon, type (0 positive, 1 negative) and text.</summary>
+    private readonly record struct MoodleSpec(Guid Guid, int IconId, int StatusType, string Title, string Description);
 
     /// <summary>Field layout mirrors Moodles MyStatus for JSON deserialization into Moodles types.</summary>
     private sealed class MoodleStatusPayload

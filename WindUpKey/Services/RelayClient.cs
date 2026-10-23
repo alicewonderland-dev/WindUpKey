@@ -35,6 +35,10 @@ public sealed class OwnerSettingsSnapshot
     public bool AutoGroundSit { get; set; }
     public ushort LockEmoteId { get; set; }
     public bool SettingsLocked { get; set; }
+
+    /// <summary>How long the doll's breaks last (null from a doll before protocol 6).</summary>
+    public int? BrokenRecoveryMinutes { get; set; }
+
     public bool CanCall { get; set; }
     public bool TravelReady { get; set; }
     public List<(ushort Id, string Name)> Emotes { get; set; } = [];
@@ -76,6 +80,11 @@ public sealed class RelayClient : IDisposable
     public const string QueueFullFailure = "That partner's message queue is full; try again later.";
     /// <summary>06-B1: the doll refused an unwind or settings update because her safeword paused remote control.</summary>
     public const string SafewordPausedFailure = "That doll has paused remote control for now.";
+    public const string NotEnoughSpringsFailure = "You don't have enough spare springs.";
+    public const string SpringCapFullFailure = "They can't hold that many more spare springs.";
+    public const string BrokenFailure = "That doll is broken. Repair them first; your springs came back.";
+    public const string CostChangedFailure = "Unwinding them costs more now; your springs came back. Try again.";
+    public const string UpdateRequiredFailure = "Update Wind-Up Key to wind, unwind or repair.";
     public static readonly TimeSpan WindRequestCooldown = TimeSpan.FromHours(1);
     private static readonly TimeSpan PresenceThrottle = TimeSpan.FromSeconds(10);
 
@@ -178,6 +187,14 @@ public sealed class RelayClient : IDisposable
     private readonly object _pendingWindLock = new();
     private readonly Dictionary<string, double> _pendingWindHoursByRequestId = new(StringComparer.Ordinal);
     private readonly HashSet<string> _pendingWindRequestIds = new(StringComparer.Ordinal);
+
+    /// <summary>Unwind quotes asked for: requestId → doll key (under <see cref="_pendingWindLock"/>).</summary>
+    private readonly Dictionary<string, string> _pendingQuotes = new(StringComparer.Ordinal);
+
+    /// <summary>Paid unwinds and repairs sent, for their result line (under <see cref="_pendingWindLock"/>).</summary>
+    private readonly HashSet<string> _pendingUnwinds = new(StringComparer.Ordinal);
+
+    private readonly HashSet<string> _pendingRepairs = new(StringComparer.Ordinal);
 
     private readonly object _ownerSettingsLock = new();
     private readonly Dictionary<string, OwnerSettingsSnapshot> _ownerSettingsByDollKey = new(StringComparer.Ordinal);
@@ -580,6 +597,14 @@ public sealed class RelayClient : IDisposable
                         var switched = _config.ActivateCharacter(contentId);
                         characterReady = true;
 
+                        // The balance and an open quote belonged to the previous character; the new register reports its own.
+                        if (switched)
+                        {
+                            SpringBalance = null;
+                            SpringCap = SpringRules.DollCap;
+                            LastUnwindQuote = null;
+                        }
+
                         // Once per profile load or activation, before this profile connects or pushes anything.
                         if (!string.Equals(_stampsCheckedProfile, _config.ActiveContentId, StringComparison.Ordinal))
                         {
@@ -766,7 +791,33 @@ public sealed class RelayClient : IDisposable
         _lastStatus = "Stopped.";
     }
 
-    public async Task SendWindAsync(string targetIdentity, double hours)
+    /// <summary>The role sent at register (spring cap and grants); null before a role is chosen.</summary>
+    private string? RegisterRole => _config.Role switch
+    {
+        PlayerRole.Winder => SpringRules.RoleWinder,
+        PlayerRole.Doll => SpringRules.RoleDoll,
+        _ => null,
+    };
+
+    /// <summary>The spare spring balance the relay last reported, or null before it has (or with springs off).</summary>
+    public int? SpringBalance { get; private set; }
+
+    /// <summary>The spring cap the relay last reported (10 for a doll, 20 for a winder).</summary>
+    public int SpringCap { get; private set; } = SpringRules.DollCap;
+
+    /// <summary>The last unwind quote a doll sent (for the confirm popup), or null.</summary>
+    public UnwindQuoteView? LastUnwindQuote { get; private set; }
+
+    public void ClearUnwindQuote() => LastUnwindQuote = null;
+
+    /// <summary>After a role switch: register again, so the relay applies the new role's spring cap and grants.</summary>
+    public void ResyncRole()
+    {
+        SpringBalance = null;
+        CloseSocket();
+    }
+
+    public async Task SendWindAsync(string targetIdentity, int springs)
     {
         if (_cachedIdentity is null)
         {
@@ -782,7 +833,7 @@ public sealed class RelayClient : IDisposable
                 StringComparison.OrdinalIgnoreCase);
             if (self)
             {
-                await SendWindByKeyAsync(_config.PairingKey, hours).ConfigureAwait(false);
+                await SendWindByKeyAsync(_config.PairingKey, springs).ConfigureAwait(false);
                 return;
             }
         }
@@ -795,14 +846,32 @@ public sealed class RelayClient : IDisposable
         }
 
         RememberPartnerIdentity(pair, targetIdentity);
-        await SendWindByKeyAsync(pair.PartnerKey, hours).ConfigureAwait(false);
+        await SendWindByKeyAsync(pair.PartnerKey, springs).ConfigureAwait(false);
     }
 
-    public async Task SendWindByKeyAsync(string partnerKey, double hours)
+    /// <summary>
+    /// Spends <paramref name="springs"/> spare springs winding a partner (8h each; the relay makes it 12h for the doll's
+    /// owner). The debug self-pair winds locally instead: springs never wind yourself.
+    /// </summary>
+    public async Task SendWindByKeyAsync(string partnerKey, int springs)
     {
         if (_cachedIdentity is null)
         {
             _notifier.NotifyWinderError("Not logged in.");
+            return;
+        }
+
+        springs = Math.Clamp(springs, 1, SpringRules.MaxSpringsPerWind);
+        var hours = SpringRules.WindHours(springs, fromOwner: false);
+        if (_config.IsDebugEnabled && string.Equals(PairingKeyUtil.Normalize(partnerKey), _config.PairingKey, StringComparison.Ordinal))
+        {
+            WindSelfLocally(hours);
+            return;
+        }
+
+        if (SpringBalance is { } balance && balance < springs)
+        {
+            _notifier.NotifyWinderError(NotEnoughSpringsFailure);
             return;
         }
 
@@ -825,12 +894,14 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
+        // Hours for a relay with springs off; a relay with them sets the hours itself.
         var payload = new WindPayload
         {
             RequestId = Guid.NewGuid().ToString("N"),
             From = _config.PairingKey,
             To = toKey,
             Hours = hours,
+            Springs = springs,
         };
 
         RememberPendingWind(payload.RequestId, hours);
@@ -897,10 +968,8 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
-        var maxSeconds = TimeSpan.FromHours(Math.Max(0.01, _config.MaxWindHours)).TotalSeconds;
-        var percent = (int)Math.Round(
-            Math.Clamp(_timer.RemainingForWinder().TotalSeconds / maxSeconds * 100.0, 0.0, 100.0),
-            MidpointRounding.AwayFromZero);
+        // A percentage of normal wind, as every partner is told (overwind reads 100).
+        var percent = _timer.PercentForWinder;
         var payload = new WindRequestPayload
         {
             RequestId = Guid.NewGuid().ToString("N"),
@@ -1019,12 +1088,24 @@ public sealed class RelayClient : IDisposable
             return;
         }
 
+        // The debug self-pair unwinds locally (springs are never spent on yourself).
+        if (_config.IsDebugEnabled && string.Equals(toKey, _config.PairingKey, StringComparison.Ordinal))
+        {
+            UnwindSelfLocally();
+            return;
+        }
+
+        // Step 1 of 2: ask the doll what it costs. Their unwindQuote opens the confirm popup (LastUnwindQuote).
+        LastUnwindQuote = null;
         var payload = new UnwindPayload
         {
             RequestId = Guid.NewGuid().ToString("N"),
             From = _config.PairingKey,
             To = toKey,
+            Quote = true,
         };
+        lock (_pendingWindLock)
+            _pendingQuotes[payload.RequestId] = toKey;
 
         // 09-K5: an unwind that didn't go out (no open socket, over the limit, or a throw, which still reaches Forget's
         // log) is told to the winder, on the framework thread.
@@ -1046,6 +1127,145 @@ public sealed class RelayClient : IDisposable
 
                     _notifier.NotifyWinderError("Not connected yet. Try again in a moment.");
                 }), "unwind send result", background: true);
+            }
+        }
+    }
+
+    /// <summary>Debug self-wind: applied here as a player's wind (so it can test overwind and breaking), never through the relay.</summary>
+    private void WindSelfLocally(double hours) =>
+        Forget(_framework.RunOnTick(() =>
+        {
+            // 08-P2 (K3a): nothing after an unload.
+            if (_disposed)
+                return;
+
+            var result = _timer.AddPlayerWind(hours, _cachedIdentity);
+            _notifier.NotifyWindResult(_cachedIdentity ?? "You", result.Percent, result.Overwound, result.Broken, result.BrokeNow);
+        }), "debug self-wind", background: true);
+
+    /// <summary>Debug self-unwind: applied here, never through the relay.</summary>
+    private void UnwindSelfLocally() =>
+        Forget(_framework.RunOnTick(() =>
+        {
+            // 08-P2 (K3a): nothing after an unload.
+            if (_disposed)
+                return;
+
+            _timer.ClearWind(_cachedIdentity);
+        }), "debug self-unwind", background: true);
+
+    /// <summary>Step 2 of 2: unwinds the doll for the quoted <paramref name="springs"/> (0 when the quote said free).</summary>
+    public async Task SendPaidUnwindAsync(string partnerKey, int springs)
+    {
+        LastUnwindQuote = null;
+        var toKey = PairingKeyUtil.Normalize(partnerKey);
+        if (_cachedIdentity is null || !IsConnected || !PairingKeyUtil.IsValid(toKey) || !PairingKeyUtil.IsValid(_config.PairingKey))
+        {
+            _notifier.NotifyWinderError("Not connected yet. Try again in a moment.");
+            return;
+        }
+
+        if (springs > 0 && SpringBalance is { } balance && balance < springs)
+        {
+            _notifier.NotifyWinderError(NotEnoughSpringsFailure);
+            return;
+        }
+
+        var payload = new UnwindPayload
+        {
+            RequestId = Guid.NewGuid().ToString("N"),
+            From = _config.PairingKey,
+            To = toKey,
+            Springs = Math.Max(0, springs),
+        };
+        lock (_pendingWindLock)
+            _pendingUnwinds.Add(payload.RequestId);
+
+        await SendOrTellAsync(MessageTypes.Unwind, payload, "unwind").ConfigureAwait(false);
+    }
+
+    /// <summary>Repairs a broken doll (free; they must let you wind them).</summary>
+    public async Task SendRepairAsync(string partnerKey)
+    {
+        var toKey = PairingKeyUtil.Normalize(partnerKey);
+        if (_cachedIdentity is null || !IsConnected || !PairingKeyUtil.IsValid(toKey) || !PairingKeyUtil.IsValid(_config.PairingKey))
+        {
+            _notifier.NotifyWinderError("Not connected yet. Try again in a moment.");
+            return;
+        }
+
+        var payload = new RepairPayload { RequestId = Guid.NewGuid().ToString("N"), From = _config.PairingKey, To = toKey };
+        lock (_pendingWindLock)
+            _pendingRepairs.Add(payload.RequestId);
+
+        await SendOrTellAsync(MessageTypes.Repair, payload, "repair").ConfigureAwait(false);
+    }
+
+    /// <summary>Gives <paramref name="springs"/> spare springs to a paired player, up to their cap.</summary>
+    public async Task SendSpringGiftAsync(string partnerKey, int springs)
+    {
+        var toKey = PairingKeyUtil.Normalize(partnerKey);
+        if (_cachedIdentity is null || !IsConnected || !PairingKeyUtil.IsValid(toKey) || !PairingKeyUtil.IsValid(_config.PairingKey))
+        {
+            _notifier.NotifyWinderError("Not connected yet. Try again in a moment.");
+            return;
+        }
+
+        if (springs < 1 || (SpringBalance is { } balance && balance < springs))
+        {
+            _notifier.NotifyWinderError(NotEnoughSpringsFailure);
+            return;
+        }
+
+        var payload = new SpringGiftPayload { RequestId = Guid.NewGuid().ToString("N"), From = _config.PairingKey, To = toKey, Springs = springs };
+        await SendOrTellAsync(MessageTypes.SpringGift, payload, "spring gift").ConfigureAwait(false);
+    }
+
+    /// <summary>The relay answered a quest spring grant (its requestId), on the framework thread; set by the plugin.</summary>
+    public Action<string?>? SpringGrantSettled { get; set; }
+
+    /// <summary>
+    /// A batch of quest board lines for the relay to pay in springs. The board resends it under the same
+    /// <paramref name="requestId"/> until the relay answers (it pays each id once), so nothing is shown when it can't go out.
+    /// </summary>
+    public async Task SendSpringGrantAsync(int lines, string requestId)
+    {
+        if (lines <= 0 || !IsConnected)
+            return;
+
+        await SendEnvelopeAsync(
+                Envelope.Create(MessageTypes.SpringGrant, new SpringGrantPayload
+                {
+                    RequestId = requestId,
+                    Lines = lines,
+                }),
+                CancellationToken.None)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 09-K5: sends a request; one that didn't go out (no open socket, over the limit, or a throw, which still reaches
+    /// Forget's log) is told to the sender, on the framework thread.
+    /// </summary>
+    private async Task SendOrTellAsync(string type, object payload, string what)
+    {
+        var sent = false;
+        try
+        {
+            sent = await SendEnvelopeAsync(Envelope.Create(type, payload), CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (!sent)
+            {
+                Forget(_framework.RunOnTick(() =>
+                {
+                    // 08-P2 (K3a): nothing after an unload.
+                    if (_disposed)
+                        return;
+
+                    _notifier.NotifyWinderError("Not connected yet. Try again in a moment.");
+                }), what + " send result", background: true);
             }
         }
     }
@@ -1388,7 +1608,8 @@ public sealed class RelayClient : IDisposable
         bool? autoGroundSit = null,
         ushort? lockEmoteId = null,
         bool? settingsLocked = null,
-        bool notify = true)
+        bool notify = true,
+        int? brokenRecoveryMinutes = null)
     {
         var key = PairingKeyUtil.Normalize(dollKey);
         if (!PairingKeyUtil.IsValid(key))
@@ -1408,7 +1629,7 @@ public sealed class RelayClient : IDisposable
                 return;
             }
 
-            ApplyLocalOwnerSettingsUpdate(maxWindHours, autoGroundSit, lockEmoteId, settingsLocked);
+            ApplyLocalOwnerSettingsUpdate(maxWindHours, autoGroundSit, lockEmoteId, settingsLocked, brokenRecoveryMinutes);
             ApplyLocalOwnerSettingsSnapshot(key);
             if (notify)
                 PluginChat.Print(_chat, $"Doll settings updated for {GetPairMessageLabel(key)}.", PluginChat.Green);
@@ -1433,6 +1654,7 @@ public sealed class RelayClient : IDisposable
             AutoGroundSit = autoGroundSit,
             LockEmoteId = lockEmoteId,
             SettingsLocked = settingsLocked,
+            BrokenRecoveryMinutes = brokenRecoveryMinutes,
         }), CancellationToken.None).ConfigureAwait(false);
     }
 
@@ -1460,10 +1682,15 @@ public sealed class RelayClient : IDisposable
         double? maxWindHours,
         bool? autoGroundSit,
         ushort? lockEmoteId,
-        bool? settingsLocked)
+        bool? settingsLocked,
+        int? brokenRecoveryMinutes)
     {
         if (maxWindHours is { } hours)
             _config.MaxWindHours = Math.Clamp(Math.Round(hours), 1, 168);
+        var maxChanged = maxWindHours is not null;
+
+        if (brokenRecoveryMinutes is { } minutes)
+            _config.BrokenRecoveryMinutes = WindLayers.ClampRecoveryMinutes(minutes);
 
         if (autoGroundSit is { } autoSit)
             _config.AutoGroundSit = autoSit;
@@ -1476,6 +1703,8 @@ public sealed class RelayClient : IDisposable
             _config.OwnerSettingsLocked = locked;
 
         _config.Save();
+        if (maxChanged)
+            _timer.OnMaxWindHoursChanged();
     }
 
     private void ApplyLocalOwnerSettingsSnapshot(string dollKey)
@@ -1494,6 +1723,7 @@ public sealed class RelayClient : IDisposable
                 AutoGroundSit = _config.AutoGroundSit,
                 LockEmoteId = _config.EffectiveLockEmoteId,
                 SettingsLocked = _config.OwnerSettingsLocked,
+                BrokenRecoveryMinutes = _config.BrokenRecoveryMinutes,
                 Emotes = emotes,
                 CanCall = true,
                 TravelReady = TravelPluginsReady(),
@@ -1840,7 +2070,7 @@ public sealed class RelayClient : IDisposable
 
         // 05-D6: no token in the body; the upgrade's Authorization header already carried it.
         _registerRejection = null;
-        await SendEnvelopeAsync(RelayWireRules.Register(pairingKey, relaySecret), ct).ConfigureAwait(false);
+        await SendEnvelopeAsync(RelayWireRules.Register(pairingKey, relaySecret, RegisterRole), ct).ConfigureAwait(false);
         _log.Information("WindUpKey registered on relay as key={Key}", LogRedact.Key(pairingKey));
 
         // The sends below use what was read with the key and secret, and stop if the character changed (or a login,
@@ -2303,6 +2533,18 @@ public sealed class RelayClient : IDisposable
             case MessageTypes.WindResult:
                 HandleWindResult(envelope);
                 break;
+            case MessageTypes.Repair:
+                await HandleInboundRepairAsync(envelope, ct).ConfigureAwait(false);
+                break;
+            case MessageTypes.UnwindQuote:
+                HandleUnwindQuote(envelope);
+                break;
+            case MessageTypes.SpringBalance:
+                HandleSpringBalance(envelope);
+                break;
+            case MessageTypes.SpringGift:
+                HandleSpringGift(envelope);
+                break;
             case MessageTypes.Error:
                 await HandleErrorAsync(envelope, ct).ConfigureAwait(false);
                 break;
@@ -2376,9 +2618,14 @@ public sealed class RelayClient : IDisposable
         var fromKey = PairingKeyUtil.Normalize(payload.From);
         var fromSelf = string.Equals(fromKey, _config.PairingKey, StringComparison.Ordinal);
 
-        // Stealth: unpaired senders get no reply (do not prove we are online).
+        // Stealth: unpaired senders get no reply (do not prove we are online). A paid wind is still refused, so the relay
+        // (which only routes it while it still has the pair) gives the springs back rather than keeping them.
         if (!(_config.IsDebugEnabled && fromSelf) && !_consent.IsPairedByKey(fromKey))
+        {
+            if (payload.Springs > 0)
+                await RefuseUnpairedPaidAsync(payload.RequestId, fromKey, ct).ConfigureAwait(false);
             return;
+        }
 
         // Self-wind (debug) still requires Can wind me on the self-key pair.
         var allowed = ((_config.IsDebugEnabled && fromSelf) || _config.IsDoll)
@@ -2403,15 +2650,84 @@ public sealed class RelayClient : IDisposable
                 ? _cachedIdentity
                 : null;
 
-        var remaining = _timer.AddHours(payload.Hours, winderIdentity);
-        await SendEnvelopeAsync(Envelope.Create(MessageTypes.WindResult, new WindResultPayload
+        // Spare springs: a wind can break the doll, so the safeword's pause refuses it too (the relay refunds it).
+        if (await RefuseIfSafewordPausedAsync(envelope.Type, payload.RequestId, fromKey, ct).ConfigureAwait(false))
+            return;
+
+        // The relay set the hours from the springs paid (8h each, 12h from an owner). A broken doll refuses it, and the
+        // relay gives the springs back.
+        var result = _timer.AddPlayerWind(payload.Hours, winderIdentity);
+        if (result.Refused)
         {
-            RequestId = payload.RequestId,
-            From = _config.PairingKey,
-            To = fromKey,
-            RemainingSeconds = remaining.TotalSeconds,
-            RemainingDisplay = WindTimerService.FormatRemaining(remaining),
-        }), ct).ConfigureAwait(false);
+            await SendEnvelopeAsync(Envelope.Create(MessageTypes.Error, new ErrorPayload
+            {
+                RequestId = payload.RequestId,
+                To = fromKey,
+                Code = ErrorCodes.Broken,
+                Message = BrokenFailure,
+            }), ct).ConfigureAwait(false);
+            return;
+        }
+
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.WindResult, WindResultFor(payload.RequestId, fromKey, result)), ct)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A paid wind or unwind from a partner this PC no longer has (removed here as it was sent): refused, or the relay
+    /// would keep the springs once the delivered hold timed out.
+    /// </summary>
+    private Task RefuseUnpairedPaidAsync(string requestId, string toKey, CancellationToken ct) =>
+        SendEnvelopeAsync(Envelope.Create(MessageTypes.Error, new ErrorPayload
+        {
+            RequestId = requestId,
+            To = toKey,
+            Code = ErrorCodes.NotAllowed,
+            Message = GenericWindFailure,
+        }), ct);
+
+    /// <summary>What a winder is told: never exact time, only a percentage of normal wind and the overwound/broken flags.</summary>
+    private WindResultPayload WindResultFor(string requestId, string toKey, PlayerWindResult? result = null) => new()
+    {
+        RequestId = requestId,
+        From = _config.PairingKey,
+        To = toKey,
+        Percent = result?.Percent ?? _timer.PercentForWinder,
+        Overwound = result?.Overwound ?? _timer.IsOverwound,
+        Broken = result?.Broken ?? _timer.IsBroken,
+        BrokeNow = result?.BrokeNow ?? false,
+    };
+
+    /// <summary>A partner repairs this doll: free, for partners who may wind them. Always answered with the state now.</summary>
+    private async Task HandleInboundRepairAsync(Envelope envelope, CancellationToken ct)
+    {
+        var payload = envelope.GetPayload<RepairPayload>();
+        if (payload is null)
+            return;
+
+        var fromKey = PairingKeyUtil.Normalize(payload.From);
+        if (!_consent.IsPairedByKey(fromKey))
+            return;
+
+        if (!_config.IsDoll || !_consent.CanReceiveWindFromKey(fromKey))
+        {
+            await SendEnvelopeAsync(Envelope.Create(MessageTypes.Error, new ErrorPayload
+            {
+                RequestId = payload.RequestId,
+                To = fromKey,
+                Code = ErrorCodes.NotAllowed,
+                Message = GenericWindFailure,
+            }), ct).ConfigureAwait(false);
+            return;
+        }
+
+        // Only a repair that mended something says how the doll is: a free repair of an unbroken doll must not be a way to
+        // read their wind again and again.
+        var mended = _timer.Repair(_config.FindPairByKey(fromKey)?.GetMessageLabel());
+        var result = mended
+            ? WindResultFor(payload.RequestId, fromKey)
+            : new WindResultPayload { RequestId = payload.RequestId, From = _config.PairingKey, To = fromKey };
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.WindResult, result), ct).ConfigureAwait(false);
     }
 
     private async Task HandleInboundUnwindAsync(Envelope envelope, CancellationToken ct)
@@ -2424,7 +2740,11 @@ public sealed class RelayClient : IDisposable
         var fromSelf = string.Equals(fromKey, _config.PairingKey, StringComparison.Ordinal);
 
         if (!(_config.IsDebugEnabled && fromSelf) && !_consent.IsPairedByKey(fromKey))
+        {
+            if (!payload.Quote && payload.Springs > 0)
+                await RefuseUnpairedPaidAsync(payload.RequestId, fromKey, ct).ConfigureAwait(false);
             return;
+        }
 
         var allowed = ((_config.IsDebugEnabled && fromSelf) || _config.IsDoll)
                       && _consent.CanReceiveUnwindFromKey(fromKey);
@@ -2451,16 +2771,40 @@ public sealed class RelayClient : IDisposable
                 ? _cachedIdentity
                 : null;
 
-        _timer.ClearWind(winderIdentity);
-        var remaining = _timer.RemainingForWinder();
-        await SendEnvelopeAsync(Envelope.Create(MessageTypes.WindResult, new WindResultPayload
+        // Owners unwind free; anyone else pays the springs the unwind removes (normal wind and player overwind, 8h each,
+        // rounded up). The relay held what the unwinder paid; a negative amount means it charges nothing (springs off).
+        var free = pair?.IsOwner == true || payload.Springs < 0;
+        var cost = _timer.UnwindCost;
+        if (payload.Quote)
         {
-            RequestId = payload.RequestId,
-            From = _config.PairingKey,
-            To = fromKey,
-            RemainingSeconds = remaining.TotalSeconds,
-            RemainingDisplay = WindTimerService.FormatRemaining(remaining),
-        }), ct).ConfigureAwait(false);
+            await SendEnvelopeAsync(Envelope.Create(MessageTypes.UnwindQuote, new UnwindQuotePayload
+            {
+                RequestId = payload.RequestId,
+                From = _config.PairingKey,
+                To = fromKey,
+                Springs = free ? 0 : cost,
+                Free = free,
+            }), ct).ConfigureAwait(false);
+            return;
+        }
+
+        if (!free && payload.Springs < cost)
+        {
+            await SendEnvelopeAsync(Envelope.Create(MessageTypes.Error, new ErrorPayload
+            {
+                RequestId = payload.RequestId,
+                To = fromKey,
+                Code = ErrorCodes.CostChanged,
+                Message = CostChangedFailure,
+            }), ct).ConfigureAwait(false);
+            return;
+        }
+
+        _timer.ClearWind(winderIdentity);
+        // What it really cost: it may have fallen since the quote as wind drained, and the relay gives the rest back.
+        var unwound = WindResultFor(payload.RequestId, fromKey);
+        unwound.Charged = free ? 0 : cost;
+        await SendEnvelopeAsync(Envelope.Create(MessageTypes.WindResult, unwound), ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -2521,9 +2865,89 @@ public sealed class RelayClient : IDisposable
         if (hadPendingWind && !(_config.IsDoll && aboutSelf))
             _sounds.PlayWind(TimeSpan.FromHours(windHours));
 
-        var remaining = TimeSpan.FromSeconds(Math.Max(0, payload.RemainingSeconds));
+        bool wasUnwind, wasRepair;
+        lock (_pendingWindLock)
+        {
+            wasUnwind = _pendingUnwinds.Remove(payload.RequestId);
+            wasRepair = _pendingRepairs.Remove(payload.RequestId);
+        }
+
         var label = GetPairMessageLabel(fromKey);
-        _notifier.NotifyWinderRemaining(label, remaining);
+        if (wasUnwind)
+            _notifier.NotifyUnwound(label);
+        else if (wasRepair)
+            _notifier.NotifyRepaired(label, payload.Broken);
+        // No percentage: a repair answered after a reload lost the pending entry (a doll that wasn't broken says nothing
+        // about its wind), or a doll from before protocol 6 sent only the exact time, which no partner sees now.
+        else if (payload.Percent is { } percent)
+            _notifier.NotifyWindResult(label, percent, payload.Overwound, payload.Broken, payload.BrokeNow);
+    }
+
+    /// <summary>A doll's answer to an unwind quote: shown as a confirm popup (<see cref="LastUnwindQuote"/>).</summary>
+    private void HandleUnwindQuote(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<UnwindQuotePayload>();
+        if (payload is null)
+            return;
+
+        string? asked;
+        lock (_pendingWindLock)
+        {
+            _pendingQuotes.Remove(payload.RequestId, out asked);
+        }
+
+        var fromKey = PairingKeyUtil.Normalize(payload.From);
+        if (asked is null || !string.Equals(asked, fromKey, StringComparison.Ordinal))
+            return;
+
+        LastUnwindQuote = new UnwindQuoteView(fromKey, GetPairMessageLabel(fromKey), Math.Max(0, payload.Springs), payload.Free);
+    }
+
+    /// <summary>The relay's spring balance, with a line for the changes worth telling (spends show in the UI only).</summary>
+    private void HandleSpringBalance(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<SpringBalancePayload>();
+        if (payload is null)
+            return;
+
+        SpringBalance = Math.Max(0, payload.Balance);
+        SpringCap = payload.Cap > 0 ? payload.Cap : SpringCap;
+        var plural = Math.Abs(payload.Delta) == 1 ? "spring" : "springs";
+        switch (payload.Reason)
+        {
+            case SpringReasons.Daily when payload.Delta > 0:
+                PluginChat.Print(_chat, $"You find {payload.Delta} spare {plural} waiting for you today.", PluginChat.Green);
+                break;
+            case SpringReasons.Quest:
+                SpringGrantSettled?.Invoke(payload.RequestId);
+                if (payload.Delta > 0)
+                    PluginChat.Print(_chat, $"Quest board: {payload.Delta} spare {plural} for your lines.", PluginChat.Green);
+                break;
+            case SpringReasons.Refund when payload.Delta > 0:
+                PluginChat.Print(_chat, $"{payload.Delta} spare {plural} came back to you.", PluginChat.Yellow);
+                break;
+            case SpringReasons.GiftSent:
+                PluginChat.Print(
+                    _chat,
+                    $"You gave {Math.Abs(payload.Delta)} spare {plural} to {GetPairMessageLabel(PairingKeyUtil.Normalize(payload.PeerKey))}.",
+                    PluginChat.Green);
+                break;
+        }
+    }
+
+    /// <summary>Springs given to you (live, or queued while you were offline). The balance comes in its own message.</summary>
+    private void HandleSpringGift(Envelope envelope)
+    {
+        var payload = envelope.GetPayload<SpringGiftPayload>();
+        if (payload is null || payload.Springs <= 0)
+            return;
+
+        var fromKey = PairingKeyUtil.Normalize(payload.From);
+        if (!_consent.IsPairedByKey(fromKey))
+            return;
+
+        var plural = payload.Springs == 1 ? "spring" : "springs";
+        PluginChat.Print(_chat, $"{GetPairMessageLabel(fromKey)} gave you {payload.Springs} spare {plural}.", PluginChat.Green);
     }
 
     private async Task HandleErrorAsync(Envelope envelope, CancellationToken ct)
@@ -2596,6 +3020,41 @@ public sealed class RelayClient : IDisposable
                 await Task.CompletedTask.ConfigureAwait(false);
                 return;
             }
+        }
+
+        if (!string.IsNullOrEmpty(payload.RequestId))
+        {
+            lock (_pendingWindLock)
+            {
+                _pendingQuotes.Remove(payload.RequestId);
+                _pendingUnwinds.Remove(payload.RequestId);
+                _pendingRepairs.Remove(payload.RequestId);
+            }
+        }
+
+        // Spare springs (protocol 6). A refused wind or unwind comes back in its own springBalance.
+        var springsMessage = payload.Code switch
+        {
+            ErrorCodes.NotEnoughSprings => NotEnoughSpringsFailure,
+            ErrorCodes.SpringCapFull => SpringCapFullFailure,
+            ErrorCodes.Broken => BrokenFailure,
+            ErrorCodes.CostChanged => CostChangedFailure,
+            ErrorCodes.UpdateRequired => UpdateRequiredFailure,
+            ErrorCodes.PeerUpdateRequired => "That doll needs to update Wind-Up Key first.",
+            ErrorCodes.TargetOffline when !string.IsNullOrEmpty(payload.RequestId) => "That doll is offline right now.",
+            _ => null,
+        };
+        if (springsMessage is not null)
+        {
+            _notifier.NotifyWinderError(springsMessage);
+            return;
+        }
+
+        // A grant the relay won't pay (not a valid one): done, so the board stops sending it.
+        if (payload.Code == ErrorCodes.GrantRefused)
+        {
+            SpringGrantSettled?.Invoke(payload.RequestId);
+            return;
         }
 
         if (queueFull)
@@ -2840,7 +3299,7 @@ public sealed class RelayClient : IDisposable
                         expiry = parsedExpiry;
                     }
 
-                    _timer.ApplySyncedExpiry(expiry, remoteWindUpdated);
+                    _timer.ApplySynced(ReadSyncedLayers(payload.Layers), expiry, remoteWindUpdated);
                 }
                 else if (localWindUpdated > remoteWindUpdated)
                 {
@@ -3033,13 +3492,34 @@ public sealed class RelayClient : IDisposable
         if (peers.Count == 0 && !hasWind)
             return null;
 
+        var layers = _timer.Layers;
         return new DollStatePushPayload
         {
             Peers = peers,
             ExpiryUtc = _config.ExpiryUtc?.ToString("O"),
             WindUpdatedUtc = _config.WindUpdatedUtc?.ToString("O"),
             ClearWind = hasWind && _config.ExpiryUtc is null,
+            Layers = hasWind
+                ? new WindLayersWire
+                {
+                    NormalHours = layers.Normal,
+                    QuestHours = layers.Quest,
+                    PlayerHours = layers.Player,
+                    AsOfUtc = layers.AsOf.ToString("O"),
+                    BrokenUntilUtc = layers.BrokenUntil?.ToString("O"),
+                }
+                : null,
         };
+    }
+
+    /// <summary>The relay's stored layers, or null when it has none or they don't read (then the expiry is used).</summary>
+    private static WindLayers? ReadSyncedLayers(WindLayersWire? wire)
+    {
+        if (wire is null || !WireLimits.IsValid(wire) || !SyncStamp.TryParse(wire.AsOfUtc, out var asOf))
+            return null;
+
+        DateTimeOffset? brokenUntil = SyncStamp.TryParse(wire.BrokenUntilUtc, out var until) ? until : null;
+        return new WindLayers(wire.NormalHours, wire.QuestHours, wire.PlayerHours, asOf, brokenUntil);
     }
 
     private void HandleDeliveryQueued(Envelope envelope)
@@ -3212,6 +3692,7 @@ public sealed class RelayClient : IDisposable
             AutoGroundSit = _config.AutoGroundSit,
             LockEmoteId = _config.EffectiveLockEmoteId,
             SettingsLocked = _config.OwnerSettingsLocked,
+            BrokenRecoveryMinutes = _config.BrokenRecoveryMinutes,
             // 03-D13: at most 512, names within the field limit, so the relay never drops the reply.
             Emotes = RelayWireRules.OutgoingEmotes(emotes),
             CanCall = _consent.CanReceiveCallFromKey(fromKey),
@@ -3334,7 +3815,12 @@ public sealed class RelayClient : IDisposable
         if (payload.SettingsLocked is { } locked)
             _config.OwnerSettingsLocked = locked;
 
+        if (payload.BrokenRecoveryMinutes is { } minutes)
+            _config.BrokenRecoveryMinutes = WindLayers.ClampRecoveryMinutes(minutes);
+
         _config.Save();
+        if (payload.MaxWindHours is not null)
+            _timer.OnMaxWindHoursChanged();
 
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.OwnerSettingsAck, new OwnerSettingsAckPayload
         {
@@ -3345,6 +3831,7 @@ public sealed class RelayClient : IDisposable
             AutoGroundSit = _config.AutoGroundSit,
             LockEmoteId = _config.EffectiveLockEmoteId,
             SettingsLocked = _config.OwnerSettingsLocked,
+            BrokenRecoveryMinutes = _config.BrokenRecoveryMinutes,
         }), ct).ConfigureAwait(false);
     }
 
@@ -3375,6 +3862,7 @@ public sealed class RelayClient : IDisposable
                 AutoGroundSit = payload.AutoGroundSit,
                 LockEmoteId = payload.LockEmoteId == 0 ? CharacterProfile.GroundSitEmoteId : payload.LockEmoteId,
                 SettingsLocked = payload.SettingsLocked,
+                BrokenRecoveryMinutes = payload.BrokenRecoveryMinutes,
                 // 03-D12: named from this client's own Emote sheet by ID; the doll's names only as a sanitised fallback.
                 Emotes = RelayWireRules.ResolveOwnerEmotes(payload.Emotes, _commands.GetEmoteName),
                 CanCall = payload.CanCall,
@@ -3410,6 +3898,7 @@ public sealed class RelayClient : IDisposable
             existing.AutoGroundSit = payload.AutoGroundSit;
             existing.LockEmoteId = payload.LockEmoteId == 0 ? CharacterProfile.GroundSitEmoteId : payload.LockEmoteId;
             existing.SettingsLocked = payload.SettingsLocked;
+            existing.BrokenRecoveryMinutes = payload.BrokenRecoveryMinutes ?? existing.BrokenRecoveryMinutes;
             existing.LastError = null;
             existing.KeepErrorOnNextResult = false;
             existing.ReQueryRequestId = null;
@@ -3559,6 +4048,7 @@ public sealed class RelayClient : IDisposable
             AutoGroundSit = snap.AutoGroundSit,
             LockEmoteId = snap.LockEmoteId,
             SettingsLocked = snap.SettingsLocked,
+            BrokenRecoveryMinutes = snap.BrokenRecoveryMinutes,
             Emotes = snap.Emotes.ToList(),
             CanCall = snap.CanCall,
             TravelReady = snap.TravelReady,
@@ -3820,3 +4310,6 @@ public sealed class RelayClient : IDisposable
         // ObjectDisposedException. A SemaphoreSlim whose AvailableWaitHandle is never read holds nothing unmanaged.
     }
 }
+
+/// <summary>A doll's unwind quote, for the confirm popup: who, their label, the cost, and whether it is free (owner).</summary>
+public sealed record UnwindQuoteView(string DollKey, string Label, int Springs, bool Free);

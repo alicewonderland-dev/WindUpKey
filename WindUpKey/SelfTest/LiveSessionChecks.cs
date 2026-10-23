@@ -87,7 +87,7 @@ public static class LiveSessionChecks
             return CheckResult.Skip(id, "the run's message budget is used up");
 
         var wind = await RefusedAsync(link, tap, plan.OwnKey, replyTimeout, ct, requestId =>
-            Envelope.Create(MessageTypes.Wind, new WindPayload { RequestId = requestId, To = target, Hours = ProbeWindHours })).ConfigureAwait(false);
+            Envelope.Create(MessageTypes.Wind, new WindPayload { RequestId = requestId, To = target, Hours = ProbeWindHours, Springs = 1 })).ConfigureAwait(false);
         var unwind = await RefusedAsync(link, tap, plan.OwnKey, replyTimeout, ct, requestId =>
             Envelope.Create(MessageTypes.Unwind, new UnwindPayload { RequestId = requestId, To = target })).ConfigureAwait(false);
 

@@ -11,7 +11,8 @@ namespace WindUpKey.Sources;
 
 public sealed class ContextMenuWindSource : IWindUpSource
 {
-    private static readonly double[] HourOptions = [1, 6, 12, 24];
+    /// <summary>Spare springs a context-menu wind can spend (8h each; 12h each from the doll's owner).</summary>
+    private static readonly int[] SpringOptions = [1, 2, 3];
 
     private readonly IContextMenu _contextMenu;
     private readonly IClientState _clientState;
@@ -97,14 +98,14 @@ public sealed class ContextMenuWindSource : IWindUpSource
             OnClicked = clicked =>
             {
                 var items = new List<IMenuItem>();
-                foreach (var hours in HourOptions)
+                foreach (var springs in SpringOptions)
                 {
-                    var h = hours;
+                    var n = springs;
                     items.Add(new MenuItem
                     {
-                        Name = $"{h} hour{(h == 1 ? string.Empty : "s")}",
+                        Name = $"{n} spring{(n == 1 ? string.Empty : "s")} ({SpringRules.WindHours(n, fromOwner: false):0}h)",
                         UseDefaultPrefix = true,
-                        OnClicked = _ => StartWind(identity, h),
+                        OnClicked = _ => StartWind(identity, n),
                     });
                 }
 
@@ -115,15 +116,25 @@ public sealed class ContextMenuWindSource : IWindUpSource
                     OnClicked = _ => StartUnwind(identity),
                 });
 
+                if (_config.FindPair(identity)?.PartnerKey is { } repairKey)
+                {
+                    items.Add(new MenuItem
+                    {
+                        Name = "Repair",
+                        UseDefaultPrefix = true,
+                        OnClicked = _ => _relay.Forget(_relay.SendRepairAsync(repairKey), "context-menu repair"),
+                    });
+                }
+
                 clicked.OpenSubmenu(menuTitle, items);
             },
         });
     }
 
-    private void StartWind(string identity, double hours)
+    private void StartWind(string identity, int springs)
     {
         // 08-P1: already catches its own failures; wrapped too so no send is ever left unobserved.
-        _relay.Forget(SendWindSafeAsync(identity, hours), "context-menu wind");
+        _relay.Forget(SendWindSafeAsync(identity, springs), "context-menu wind");
     }
 
     private void StartUnwind(string identity)
@@ -131,11 +142,11 @@ public sealed class ContextMenuWindSource : IWindUpSource
         _relay.Forget(SendUnwindSafeAsync(identity), "context-menu unwind");
     }
 
-    private async Task SendWindSafeAsync(string identity, double hours)
+    private async Task SendWindSafeAsync(string identity, int springs)
     {
         try
         {
-            await _relay.SendWindAsync(identity, hours);
+            await _relay.SendWindAsync(identity, springs);
         }
         catch (Exception ex)
         {

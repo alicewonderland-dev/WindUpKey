@@ -52,11 +52,12 @@ public static class SafewordPause
     }
 
     /// <summary>
-    /// The inbound messages a pause refuses: an owner's unwind, call and settings update. Everything else (a wind, a
+    /// The inbound messages a pause refuses: an owner's unwind, call and settings update, and (spare springs) a player's
+    /// wind, which can now overwind and break the doll; the relay gives its springs back. Everything else (a repair, a
     /// settings query, presence, pairing) is handled as usual.
     /// </summary>
     public static bool Refuses(string? messageType) =>
-        messageType is MessageTypes.Unwind or MessageTypes.Call or MessageTypes.OwnerSettingsUpdate;
+        messageType is MessageTypes.Unwind or MessageTypes.Call or MessageTypes.OwnerSettingsUpdate or MessageTypes.Wind;
 
     /// <summary>
     /// Whether <c>/windup safeword &lt;rest&gt;</c> asks to end the pause. A doll whose usable safeword is "resume" uses

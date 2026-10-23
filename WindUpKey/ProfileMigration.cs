@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace WindUpKey;
@@ -22,6 +23,27 @@ public static class ProfileMigration
     /// forward again refills only what it dropped, from the globals it kept as the active character's values.
     /// 06-A13: returns nothing: no caller used whether anything was filled.
     /// </summary>
+    /// <summary>
+    /// 14 (spare springs): a profile without wind layers yet (<see cref="CharacterProfile.WindAsOfUtc"/> null) gets them
+    /// from its expiry: the time left up to max wind hours is normal wind, anything past it quest overwind. Gated on the
+    /// null, not the version, so an older build that dropped the layers on save has them refilled from the expiry it kept.
+    /// </summary>
+    public static void FillWindLayers(IEnumerable<CharacterProfile?> profiles, DateTimeOffset now)
+    {
+        foreach (var profile in profiles)
+        {
+            if (profile is null || profile.WindAsOfUtc is not null)
+                continue;
+
+            var layers = Services.WindLayers.FromExpiry(profile.ExpiryUtc, now, profile.MaxWindHours > 0 ? profile.MaxWindHours : 72);
+            profile.NormalWindHours = layers.Normal;
+            profile.QuestOverwindHours = layers.Quest;
+            profile.PlayerOverwindHours = 0;
+            profile.BrokenUntilUtc = null;
+            profile.WindAsOfUtc = now;
+        }
+    }
+
     public static void FillLockEmote(IEnumerable<CharacterProfile?> profiles, bool globalAutoGroundSit, ushort globalLockEmoteId)
     {
         foreach (var profile in profiles)

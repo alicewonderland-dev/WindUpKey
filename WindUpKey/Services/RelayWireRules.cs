@@ -27,14 +27,16 @@ public static class RelayWireRules
     }
 
     /// <summary>
-    /// The client's <c>register</c>: its pairing key and relay secret. Never the shared token (05-D6): it goes only in the
-    /// upgrade's <c>Authorization</c> header (01-D8), and no relay ever read it from the body, so the field is left out.
+    /// The client's <c>register</c>: its pairing key and relay secret, and (protocol 6) its role, which sets its spare
+    /// spring cap and grants. Never the shared token (05-D6): it goes only in the upgrade's <c>Authorization</c> header
+    /// (01-D8), and no relay ever read it from the body, so the field is left out.
     /// </summary>
-    public static Envelope Register(string pairingKey, string? secret) =>
+    public static Envelope Register(string pairingKey, string? secret, string? role = null) =>
         Envelope.Create(MessageTypes.Register, new RegisterPayload
         {
             PairingKey = pairingKey,
             Secret = secret,
+            Role = role,
         });
 
     /// <summary>

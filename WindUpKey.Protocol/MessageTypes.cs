@@ -1,9 +1,15 @@
 namespace WindUpKey.Protocol;
 
-/// <summary>Wire protocol version. Bump only on breaking envelope changes.</summary>
+/// <summary>
+/// Wire protocol version. Bump only on breaking changes. 6: spare springs. The relay refuses winds and unwinds
+/// from clients below <see cref="Springs"/>, which would otherwise wind for free and read exact remaining times.
+/// </summary>
 public static class ProtocolVersion
 {
-    public const int Current = 5;
+    public const int Current = 6;
+
+    /// <summary>The first version that pays for winds and unwinds with spare springs.</summary>
+    public const int Springs = 6;
 }
 
 /// <summary>Known message type strings. Clients ignore unknown types.</summary>
@@ -44,13 +50,23 @@ public static class MessageTypes
     public const string DeliveryQueued = "deliveryQueued";
     /// <summary>Relay → sender: previously queued message handed to the target socket.</summary>
     public const string DeliveryDelivered = "deliveryDelivered";
+    /// <summary>Doll → unwinder: what an unwind would cost now (the reply to an unwind with <c>quote</c>).</summary>
+    public const string UnwindQuote = "unwindQuote";
+    /// <summary>Partner → broken doll: repair them (free).</summary>
+    public const string Repair = "repair";
+    /// <summary>Client → relay: quest board lines completed, paid in springs.</summary>
+    public const string SpringGrant = "springGrant";
+    /// <summary>Client → relay → recipient: give springs to a paired player.</summary>
+    public const string SpringGift = "springGift";
+    /// <summary>Relay → client: the spring balance, after register and after every change.</summary>
+    public const string SpringBalance = "springBalance";
 
     private static readonly HashSet<string> Known = new(StringComparer.Ordinal)
     {
         Register, Wind, WindResult, WindRequest, Unwind, Error, Ping, Pong, PairSubmit, PairCancel, PairEstablished,
         PairRemove, PresenceQuery, PresenceResult, OwnerGrant, OwnerRevoked, OwnerSettingsQuery, OwnerSettingsResult,
         OwnerSettingsUpdate, OwnerSettingsAck, Call, CallAck, CallResult, PairSync, DollStatePush, DeliveryQueued,
-        DeliveryDelivered,
+        DeliveryDelivered, UnwindQuote, Repair, SpringGrant, SpringGift, SpringBalance,
     };
 
     /// <summary>True when <paramref name="type"/> is one of the constants above.</summary>

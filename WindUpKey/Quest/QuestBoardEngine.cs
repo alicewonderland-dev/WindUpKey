@@ -119,6 +119,43 @@ public static class QuestBoardEngine
     /// The first time a character's board is set up: every main scenario quest they've already done can't give wind
     /// later, so replaying the story in New Game+ earns nothing. Returns false when it was already done.
     /// </summary>
+    /// <summary>The most lines one spring grant may carry (the relay refuses more as malformed).</summary>
+    public const int MaxLinesPerGrant = 9;
+
+    /// <summary>
+    /// Lines just completed, to be paid in springs: they join the newest batch not sent yet (up to
+    /// <see cref="MaxLinesPerGrant"/>), or start a new one with its own id.
+    /// </summary>
+    public static void AddSpringLines(QuestBoardState state, int lines, Func<string> newId)
+    {
+        while (lines > 0)
+        {
+            var open = state.PendingSpringGrants.LastOrDefault(g => !g.Sent && g.Lines < MaxLinesPerGrant);
+            if (open is null)
+            {
+                open = new PendingSpringGrant { RequestId = newId() };
+                state.PendingSpringGrants.Add(open);
+            }
+
+            var take = Math.Min(lines, MaxLinesPerGrant - open.Lines);
+            open.Lines += take;
+            lines -= take;
+        }
+
+        // A relay that never answers (springs off) mustn't grow the list for ever: the oldest batches go (the relay pays
+        // at most a few lines a day anyway).
+        if (state.PendingSpringGrants.Count > MaxPendingGrants)
+            state.PendingSpringGrants.RemoveRange(0, state.PendingSpringGrants.Count - MaxPendingGrants);
+    }
+
+    /// <summary>The most unpaid batches kept.</summary>
+    public const int MaxPendingGrants = 10;
+
+    /// <summary>The relay answered the grant <paramref name="requestId"/> (paid, or past the day's limit): it is done.</summary>
+    public static bool SettleSpringGrant(QuestBoardState state, string? requestId) =>
+        !string.IsNullOrEmpty(requestId)
+        && state.PendingSpringGrants.RemoveAll(g => string.Equals(g.RequestId, requestId, StringComparison.Ordinal)) > 0;
+
     public static bool SeedMsqHistory(QuestBoardState state, IEnumerable<uint> completedMsqQuestIds)
     {
         if (state.MsqHistorySeeded)

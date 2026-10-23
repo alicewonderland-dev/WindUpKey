@@ -23,6 +23,13 @@ public sealed class RegisterPayload
     /// </summary>
     [JsonPropertyName("secret")]
     public string? Secret { get; set; }
+
+    /// <summary>
+    /// The character's role (<see cref="SpringRules.RoleDoll"/> or <see cref="SpringRules.RoleWinder"/>), which sets its
+    /// spring cap and grants. Omitted by older clients (treated as a doll) and before a role is chosen.
+    /// </summary>
+    [JsonPropertyName("role")]
+    public string? Role { get; set; }
 }
 
 public sealed class WindPayload
@@ -38,8 +45,16 @@ public sealed class WindPayload
     [JsonPropertyName("to")]
     public string To { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The wind's hours. Since protocol 6 the relay sets it from <see cref="Springs"/> (8h each, 12h from the doll's
+    /// owner), whatever the sender wrote.
+    /// </summary>
     [JsonPropertyName("hours")]
     public double Hours { get; set; }
+
+    /// <summary>Spare springs spent on this wind (protocol 6). The relay takes them from the sender.</summary>
+    [JsonPropertyName("springs")]
+    public int Springs { get; set; }
 }
 
 /// <summary>Doll asks a paired partner for additional winding.</summary>
@@ -74,6 +89,154 @@ public sealed class UnwindPayload
     /// <summary>Target pairing key.</summary>
     [JsonPropertyName("to")]
     public string To { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Only ask what it would cost: the doll replies with <see cref="MessageTypes.UnwindQuote"/> and changes nothing.
+    /// </summary>
+    [JsonPropertyName("quote")]
+    public bool Quote { get; set; }
+
+    /// <summary>
+    /// Springs paid for the unwind (the quoted cost; 0 from the doll's owner). The relay takes them from the sender, and
+    /// the doll refuses it if the cost has gone up since.
+    /// </summary>
+    [JsonPropertyName("springs")]
+    public int Springs { get; set; }
+}
+
+/// <summary>Doll → unwinder: what unwinding them costs now.</summary>
+public sealed class UnwindQuotePayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Doll pairing key (set/overwritten by relay).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Unwinder pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    /// <summary>Springs the unwind costs (0 when free: the doll's owner, or nothing to unwind).</summary>
+    [JsonPropertyName("springs")]
+    public int Springs { get; set; }
+
+    /// <summary>The unwinder is the doll's owner, so it is free.</summary>
+    [JsonPropertyName("free")]
+    public bool Free { get; set; }
+}
+
+/// <summary>Partner → broken doll: repair them. Free; the doll checks Can wind me.</summary>
+public sealed class RepairPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Sender pairing key (set/overwritten by relay).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Doll pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+}
+
+/// <summary>Client → relay: quest board lines completed (the relay pays them in springs, within a daily limit).</summary>
+public sealed class SpringGrantPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Lines completed and not yet paid. The client resends them under the same <see cref="RequestId"/> until the relay
+    /// answers, and the relay settles each requestId once.
+    /// </summary>
+    [JsonPropertyName("lines")]
+    public int Lines { get; set; }
+}
+
+/// <summary>Client → relay: give springs to a paired player; relay → recipient: springs were given to you.</summary>
+public sealed class SpringGiftPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>Giver pairing key (set/overwritten by relay).</summary>
+    [JsonPropertyName("from")]
+    public string From { get; set; } = string.Empty;
+
+    /// <summary>Recipient pairing key.</summary>
+    [JsonPropertyName("to")]
+    public string To { get; set; } = string.Empty;
+
+    [JsonPropertyName("springs")]
+    public int Springs { get; set; }
+}
+
+/// <summary>Relay → client: the spring balance, with why it changed.</summary>
+public sealed class SpringBalancePayload
+{
+    /// <summary>The request this answers, when it answers one (a wind, unwind, gift or grant).</summary>
+    [JsonPropertyName("requestId")]
+    public string? RequestId { get; set; }
+
+    [JsonPropertyName("balance")]
+    public int Balance { get; set; }
+
+    [JsonPropertyName("cap")]
+    public int Cap { get; set; }
+
+    /// <summary>The change (positive or negative), 0 for a plain sync.</summary>
+    [JsonPropertyName("delta")]
+    public int Delta { get; set; }
+
+    /// <summary>One of <see cref="SpringReasons"/>.</summary>
+    [JsonPropertyName("reason")]
+    public string Reason { get; set; } = SpringReasons.Sync;
+
+    /// <summary>The other player of a gift, wind or refund, when there is one.</summary>
+    [JsonPropertyName("peerKey")]
+    public string? PeerKey { get; set; }
+}
+
+/// <summary>Why a spring balance changed.</summary>
+public static class SpringReasons
+{
+    public const string Sync = "sync";
+    public const string Daily = "daily";
+    public const string Quest = "quest";
+    public const string Wind = "wind";
+    public const string Unwind = "unwind";
+    public const string Refund = "refund";
+    public const string GiftSent = "giftSent";
+    public const string GiftReceived = "giftReceived";
+}
+
+/// <summary>
+/// The doll's wind layers, for multi-PC sync (protocol 6). The relay stores and returns them as they are, under the same
+/// last-write-wins stamp as the expiry.
+/// </summary>
+public sealed class WindLayersWire
+{
+    /// <summary>Normal wind (0 to max wind hours) at <see cref="AsOfUtc"/>.</summary>
+    [JsonPropertyName("normalHours")]
+    public double NormalHours { get; set; }
+
+    /// <summary>Quest overwind at <see cref="AsOfUtc"/>.</summary>
+    [JsonPropertyName("questHours")]
+    public double QuestHours { get; set; }
+
+    /// <summary>Player overwind at <see cref="AsOfUtc"/>.</summary>
+    [JsonPropertyName("playerHours")]
+    public double PlayerHours { get; set; }
+
+    [JsonPropertyName("asOfUtc")]
+    public string? AsOfUtc { get; set; }
+
+    /// <summary>While broken: when the break ends by itself (ISO-8601); null when not broken.</summary>
+    [JsonPropertyName("brokenUntilUtc")]
+    public string? BrokenUntilUtc { get; set; }
 }
 
 public sealed class WindResultPayload
@@ -89,11 +252,35 @@ public sealed class WindResultPayload
     [JsonPropertyName("to")]
     public string To { get; set; } = string.Empty;
 
+    /// <summary>Exact remaining time: sent by protocol 5 dolls only. Protocol 6 dolls leave it 0 (see <see cref="Percent"/>).</summary>
     [JsonPropertyName("remainingSeconds")]
     public double RemainingSeconds { get; set; }
 
     [JsonPropertyName("remainingDisplay")]
     public string RemainingDisplay { get; set; } = string.Empty;
+
+    /// <summary>Normal wind as a percentage of max wind hours, 0–100 (overwind always reads 100).</summary>
+    [JsonPropertyName("percent")]
+    public int? Percent { get; set; }
+
+    /// <summary>The doll has player overwind (more winding may break them).</summary>
+    [JsonPropertyName("overwound")]
+    public bool Overwound { get; set; }
+
+    /// <summary>The doll is broken (this wind broke them, or they were broken already).</summary>
+    [JsonPropertyName("broken")]
+    public bool Broken { get; set; }
+
+    /// <summary>This wind is what broke them.</summary>
+    [JsonPropertyName("brokeNow")]
+    public bool BrokeNow { get; set; }
+
+    /// <summary>
+    /// For a paid unwind: the springs it actually cost (its cost can fall between the quote and the unwind as wind
+    /// drains). The relay keeps that many of the held springs and gives the rest back.
+    /// </summary>
+    [JsonPropertyName("charged")]
+    public int? Charged { get; set; }
 }
 
 public sealed class PairSubmitPayload
@@ -147,6 +334,10 @@ public sealed class PairSyncPayload
     /// <summary>Last-write-wins stamp for ExpiryUtc; absent when no wind row exists yet.</summary>
     [JsonPropertyName("windUpdatedUtc")]
     public string? WindUpdatedUtc { get; set; }
+
+    /// <summary>The wind layers stored with the expiry (protocol 6; absent when the row has none).</summary>
+    [JsonPropertyName("layers")]
+    public WindLayersWire? Layers { get; set; }
 }
 
 /// <summary>One directed consent record from a doll toward a peer.</summary>
@@ -187,6 +378,10 @@ public sealed class DollStatePushPayload
     /// <summary>True when ExpiryUtc is intentionally cleared (unwound).</summary>
     [JsonPropertyName("clearWind")]
     public bool ClearWind { get; set; }
+
+    /// <summary>The wind layers, merged with the expiry under <see cref="WindUpdatedUtc"/> (protocol 6).</summary>
+    [JsonPropertyName("layers")]
+    public WindLayersWire? Layers { get; set; }
 }
 
 /// <summary>Offline store-and-forward status for a requestId-bearing message.</summary>
@@ -326,6 +521,10 @@ public sealed class OwnerSettingsResultPayload
     /// <summary>True when Lifestream and vnavmesh IPC are available on the doll (receive-side only; callers ignore this).</summary>
     [JsonPropertyName("travelReady")]
     public bool TravelReady { get; set; }
+
+    /// <summary>How long a break lasts before the doll recovers by itself (protocol 6; absent from older dolls).</summary>
+    [JsonPropertyName("brokenRecoveryMinutes")]
+    public int? BrokenRecoveryMinutes { get; set; }
 }
 
 public sealed class OwnerSettingsUpdatePayload
@@ -352,6 +551,10 @@ public sealed class OwnerSettingsUpdatePayload
 
     [JsonPropertyName("settingsLocked")]
     public bool? SettingsLocked { get; set; }
+
+    /// <summary>Break recovery minutes (protocol 6); clamped by the doll.</summary>
+    [JsonPropertyName("brokenRecoveryMinutes")]
+    public int? BrokenRecoveryMinutes { get; set; }
 }
 
 public sealed class OwnerSettingsAckPayload
@@ -378,6 +581,10 @@ public sealed class OwnerSettingsAckPayload
 
     [JsonPropertyName("settingsLocked")]
     public bool SettingsLocked { get; set; }
+
+    /// <summary>Break recovery minutes now in effect (protocol 6).</summary>
+    [JsonPropertyName("brokenRecoveryMinutes")]
+    public int? BrokenRecoveryMinutes { get; set; }
 }
 
 /// <summary>Owner requests that the doll travel near the given world position.</summary>
@@ -562,6 +769,27 @@ public static class ErrorCodes
     /// like any other short code, and old clients show their generic failure for it.
     /// </summary>
     public const string SafewordPaused = "safeword_paused";
+
+    /// <summary>Relay → sender: winding and unwinding need protocol 6 (spare springs); update the plugin.</summary>
+    public const string UpdateRequired = "update_required";
+
+    /// <summary>Relay → sender: the doll's plugin is older than protocol 6, so it can't be wound, unwound or repaired yet.</summary>
+    public const string PeerUpdateRequired = "peer_update_required";
+
+    /// <summary>Relay → sender: not enough spare springs for this wind, unwind or gift.</summary>
+    public const string NotEnoughSprings = "not_enough_springs";
+
+    /// <summary>Relay → sender: the recipient's spare springs are at their cap, so the gift wasn't sent.</summary>
+    public const string SpringCapFull = "spring_cap_full";
+
+    /// <summary>Doll → sender: the doll is broken, so the wind was refused (only a repair is accepted).</summary>
+    public const string Broken = "broken";
+
+    /// <summary>Doll → sender: the unwind now costs more than was paid; ask for a new quote.</summary>
+    public const string CostChanged = "cost_changed";
+
+    /// <summary>Relay → sender: the quest springs for today are used up, or the grant was a replay.</summary>
+    public const string GrantRefused = "grant_refused";
 
     /// <summary>
     /// Session-level codes only the relay may send. The relay drops routed errors with these codes,

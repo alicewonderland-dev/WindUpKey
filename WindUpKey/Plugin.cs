@@ -61,6 +61,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly RelayClient _relay;
     private readonly MoodlesWindStatusService _moodlesStatus;
     private readonly CallPromptWindow _callPrompt;
+    private readonly UnwindConfirmWindow _unwindConfirm;
     private readonly CallTravelService _callTravel;
 #if WINDUP_TESTING
     private readonly SelfTestController _selfTest;
@@ -184,6 +185,11 @@ public sealed class Plugin : IDalamudPlugin
         _windowSystem.AddWindow(_configWindow);
         _windowSystem.AddWindow(_changelogWindow);
         _windowSystem.AddWindow(_callPrompt);
+        _unwindConfirm = new UnwindConfirmWindow(_relay);
+        _windowSystem.AddWindow(_unwindConfirm);
+        quests.GrantSprings = (lines, requestId) => _relay.Forget(_relay.SendSpringGrantAsync(lines, requestId), "quest springs");
+        _relay.SpringGrantSettled = quests.OnSpringGrantSettled;
+        quests.CanGrantSprings = () => _relay.IsConnected && _relay.SpringBalance is not null;
 
         var contextMenuSource = new ContextMenuWindSource(ContextMenu, ClientState, Configuration, _relay, Log);
         _sources.Add(contextMenuSource);
@@ -284,6 +290,7 @@ public sealed class Plugin : IDalamudPlugin
         RecordSlowestPhase("timer", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
         phaseStart = Stopwatch.GetTimestamp();
         _relay.TickCallTravel();
+        _unwindConfirm.Sync();
         RecordSlowestPhase("call-travel", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);
 #if WINDUP_TESTING
         _selfTest.Tick();
