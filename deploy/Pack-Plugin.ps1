@@ -3,13 +3,11 @@
 #   deploy/dist/WindUpKey.zip          (Release — public/default version)
 #   deploy/dist/WindUpKey-Testing.zip  (Testing compile — same version, adds the self-test / Testing manifest)
 #
-# Release and Testing are built from the same commit with the same version (11-D2). The 0.2.7.0 quest board is the
-# exception while it is in public testing. Pack -Channel Release from the quest-board branch and publish that
-# WindUpKey.zip as the WindUpKey entry's TestingAssemblyVersion/DownloadLinkTesting in Wonderland's repo.json
-# (github.com/alicewonderland-dev/Wonderland), while Release keeps shipping from master (0.2.6.x). It must be the
-# Release compile: the Testing compile carries the self-test and turns the input diagnostics log on, which stay
-# private. Once it is promoted, both channels go back to one version. Debug helpers are runtime-gated via Configuration.IsDebugEnabled,
-# not by the Testing compile channel.
+# Release and Testing are built from the same commit with the same version (11-D2). Only the Release compile is ever
+# published (Wonderland's repo.json, github.com/alicewonderland-dev/Wonderland): the Testing compile carries the
+# self-test and turns the input diagnostics log on, which stay private. A public testing build, when there is one, is
+# also the Release compile, listed as the WindUpKey entry's TestingAssemblyVersion/DownloadLinkTesting with
+# TestingDalamudApiLevel. Debug helpers are runtime-gated via Configuration.IsDebugEnabled, not by the Testing compile.
 #
 # 11: after each build the DLL's metadata names are checked. Release must have Call and the quest board but no
 # self-test; Testing must have both (a positive control for the check itself). A mismatch fails the pack.

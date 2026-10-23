@@ -12,7 +12,7 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
-            "0.2.9.0 — Quest board tuning and vacation mode (Testing)",
+            "0.2.9.0 — Quest board tuning and vacation mode",
             [
                 "Hard duties now come only from the newest Savage tier, starting with the first fights. One is always a fight you've cleared, if you have one. Ultimates you've cleared can still come up, now and then, for triple wind.",
                 "One Medium Extreme is always one you've cleared, if you have one.",
