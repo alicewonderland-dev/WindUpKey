@@ -122,15 +122,16 @@ public sealed class QuestBoardTests
     [Fact]
     public void SlotRewards_FollowTheTable()
     {
-        Assert.Equal(new QuestRewardRules.SlotReward(1, 8), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Easy, QuestSlotKind.Duty), true));
-        Assert.Equal(new QuestRewardRules.SlotReward(1, 4), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Easy, QuestSlotKind.Duty, half: true), true));
+        Assert.Equal(new QuestRewardRules.SlotReward(1, 12), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Easy, QuestSlotKind.Duty), true));
+        // A saved half-wind flag (0.2.9.0 and before) no longer changes anything.
+        Assert.Equal(new QuestRewardRules.SlotReward(1, 12), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Easy, QuestSlotKind.Duty, half: true), true));
         Assert.Equal(new QuestRewardRules.SlotReward(0, 0), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Easy, QuestSlotKind.Duty), false));
         Assert.Equal(new QuestRewardRules.SlotReward(2, 16), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Medium, QuestSlotKind.Extreme), true));
         Assert.Equal(new QuestRewardRules.SlotReward(0, 4), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Medium, QuestSlotKind.Extreme), false));
         Assert.Equal(new QuestRewardRules.SlotReward(3, 24), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Hard, QuestSlotKind.Savage), true));
         Assert.Equal(new QuestRewardRules.SlotReward(0, 6), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Hard, QuestSlotKind.Savage), false));
-        Assert.Equal(new QuestRewardRules.SlotReward(1, 8), QuestRewardRules.ForMsq(true));
-        Assert.Equal(new QuestRewardRules.SlotReward(0, 8), QuestRewardRules.ForMsq(false));
+        Assert.Equal(new QuestRewardRules.SlotReward(0, 8), QuestRewardRules.ForMsq());
+        Assert.Equal(new QuestRewardRules.SlotReward(1, 12), QuestRewardRules.ForDaily());
     }
 
     [Fact]
@@ -210,37 +211,24 @@ public sealed class QuestBoardTests
     }
 
     [Fact]
-    public void TheMsq_AlwaysGivesWind_ButOnlyOneStickerADay()
+    public void AnMsqTurnIn_GivesATurnOfWind_AndNoSlotStickerOrSpring()
     {
-        var state = new QuestBoardState { Slots = [Slot(QuestDifficulty.Easy, QuestSlotKind.Msq, 0)] };
-
-        Assert.Equal(new QuestRewardRules.SlotReward(1, 8), QuestBoardEngine.CreditMsq(state, 70001)!.Value.Reward);
-        Assert.Equal(new QuestRewardRules.SlotReward(0, 8), QuestBoardEngine.CreditMsq(state, 70002)!.Value.Reward);
-
-        // The daily roll brings a fresh MSQ slot, so tomorrow's first turn-in gives a sticker again.
-        QuestRollRules.ReplaceEasy(state, [Slot(QuestDifficulty.Easy, QuestSlotKind.Msq, 0)], DateTimeOffset.UnixEpoch);
-        Assert.Equal(1, QuestBoardEngine.CreditMsq(state, 70003)!.Value.Reward.Stickers);
-    }
-
-    [Fact]
-    public void ADayWithoutAnMsqSlot_StillGivesMsqWind_WithoutASticker()
-    {
-        // E.g. the story was done at the daily roll and a patch added more.
         var credit = QuestBoardEngine.CreditMsq(new QuestBoardState(), 70001);
         Assert.Equal(new QuestRewardRules.SlotReward(0, 8), credit!.Value.Reward);
         Assert.Null(credit.Value.Slot);
+        Assert.Equal(0, QuestBoardEngine.CompletionSprings([credit.Value]));
     }
 
     [Fact]
     public void EachMsqQuest_IsCreditedOnce_SoNewGamePlusEarnsNothing()
     {
-        var state = new QuestBoardState { Slots = [Slot(QuestDifficulty.Easy, QuestSlotKind.Msq, 0)] };
+        var state = new QuestBoardState();
         Assert.NotNull(QuestBoardEngine.CreditMsq(state, 70001));
         Assert.Null(QuestBoardEngine.CreditMsq(state, 70001));
         Assert.Null(QuestBoardEngine.CreditMsq(state, 0));
 
         // The list survives a reset and a clone (the profile copy).
-        QuestRollRules.ReplaceEasy(state, [Slot(QuestDifficulty.Easy, QuestSlotKind.Msq, 0)], DateTimeOffset.UnixEpoch);
+        QuestRollRules.ReplaceEasy(state, [Slot(QuestDifficulty.Easy, QuestSlotKind.Duty, 3)]);
         Assert.Null(QuestBoardEngine.CreditMsq(state.Clone(), 70001));
     }
 
@@ -264,11 +252,11 @@ public sealed class QuestBoardTests
     public void MsqTurnIns_CreditEveryNewQuest_NotOnlyTheTrackedOne()
     {
         // The guide showed the Twin Adder path; the doll did the Maelstrom one (70011), then one more before a poll.
-        var state = new QuestBoardState { Slots = [Slot(QuestDifficulty.Easy, QuestSlotKind.Msq, 0)], CreditedMsqQuestIds = [70001] };
+        var state = new QuestBoardState { CreditedMsqQuestIds = [70001] };
         var credits = QuestBoardEngine.CreditMsqTurnIns(state, [70001, 70011, 70012], tracked: 70010);
 
         Assert.Equal(2, credits.Count);
-        Assert.Equal(1, credits.Sum(c => c.Reward.Stickers));
+        Assert.Equal(0, credits.Sum(c => c.Reward.Stickers));
         Assert.Equal(16, credits.Sum(c => c.Reward.Hours));
         Assert.Empty(QuestBoardEngine.CreditMsqTurnIns(state, [70001, 70011, 70012], tracked: 70013));
     }
@@ -423,15 +411,15 @@ public sealed class QuestBoardTests
         {
             var slots = QuestRollRules.RollEasy(Duties, Facts(60, unlocked: [1, 2, 3, 4, 5, 7, 50], unlockable: [6]), new Random(seed));
 
-            Assert.Equal(QuestRollRules.EasySlots, slots.Count);
-            Assert.Equal(QuestSlotKind.Msq, slots[0].Kind);
+            // Dungeons and guildhests only (1, 2, 7): with the Leveling Roulette, four slots.
+            Assert.Equal(4, slots.Count);
             // Duty 6 (level 90) is above the character, so nothing is unlockable at 60.
-            Assert.Equal(QuestSlotKind.LevelingRoulette, slots[1].Kind);
-            Assert.All(slots.Skip(2), s => Assert.Equal(QuestSlotKind.Duty, s.Kind));
-            Assert.DoesNotContain(slots, s => s.ContentFinderConditionId is 50 or 6 or 8);
+            Assert.Equal(QuestSlotKind.LevelingRoulette, slots[0].Kind);
+            Assert.All(slots.Skip(1), s => Assert.Equal(QuestSlotKind.Duty, s.Kind));
+            Assert.DoesNotContain(slots, s => s.Kind == QuestSlotKind.Msq);
+            // No Extremes, trials, normal raids or alliance raids, and nothing out of reach.
+            Assert.DoesNotContain(slots, s => s.ContentFinderConditionId is 50 or 6 or 8 or 3 or 4 or 5);
             Assert.Equal(slots.Count, slots.Select(s => (s.Kind, s.ContentFinderConditionId)).Distinct().Count());
-            Assert.All(slots.Where(s => s.ContentFinderConditionId is 3 or 4), s => Assert.True(s.HalfWind));
-            Assert.All(slots.Where(s => s.ContentFinderConditionId is 1 or 2 or 5 or 7), s => Assert.False(s.HalfWind));
         }
     }
 
@@ -443,8 +431,8 @@ public sealed class QuestBoardTests
         Assert.Equal(QuestSlotKind.Unlock, slots[0].Kind);
         Assert.Equal(6u, slots[0].ContentFinderConditionId);
         Assert.DoesNotContain(slots, s => s.Kind is QuestSlotKind.Msq or QuestSlotKind.LevelingRoulette);
-        // Only three unlocked duties: four slots in all.
-        Assert.Equal(4, slots.Count);
+        // Of the three unlocked duties only the two dungeons count (3 is a trial): three slots in all.
+        Assert.Equal(3, slots.Count);
     }
 
     [Fact]

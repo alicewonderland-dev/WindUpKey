@@ -37,6 +37,8 @@ public static class QuestContentCatalog
     private static Dictionary<uint, uint>? _instanceContentByCfc;
     private static Dictionary<uint, List<uint>>? _unlockQuestsByInstance;
     private static HashSet<uint>? _levelingRouletteIds;
+    private static HashSet<uint>? _dailyRouletteIds;
+    private static HashSet<uint>? _pvpRouletteIds;
     private static List<uint>? _mainScenarioQuestIds;
 
     /// <summary>The English JournalSection name fragment of the main scenario sections.</summary>
@@ -143,6 +145,8 @@ public static class QuestContentCatalog
         _instanceContentByCfc = null;
         _unlockQuestsByInstance = null;
         _levelingRouletteIds = null;
+        _dailyRouletteIds = null;
+        _pvpRouletteIds = null;
         _mainScenarioQuestIds = null;
     }
 
@@ -221,23 +225,53 @@ public static class QuestContentCatalog
         _unlockQuestsByInstance = primary;
     }
 
+    /// <summary>A roulette the Daily slot counts: any PvP roulette, and every Duty Roulette except Normal Raids and Trials.</summary>
+    public static bool CountsForDaily(IDataManager data, uint contentRouletteId)
+    {
+        if (contentRouletteId == 0)
+            return false;
+
+        EnsureRouletteCache(data);
+        return _dailyRouletteIds!.Contains(contentRouletteId);
+    }
+
+    public static bool IsPvpRoulette(IDataManager data, uint contentRouletteId)
+    {
+        if (contentRouletteId == 0)
+            return false;
+
+        EnsureRouletteCache(data);
+        return _pvpRouletteIds!.Contains(contentRouletteId);
+    }
+
     private static void EnsureRouletteCache(IDataManager data)
     {
-        if (_levelingRouletteIds is not null)
+        if (_levelingRouletteIds is not null && _dailyRouletteIds is not null && _pvpRouletteIds is not null)
             return;
 
-        var ids = new HashSet<uint>();
-        // 11-D4: English, as for the duties (the needle is the English roulette name).
+        var leveling = new HashSet<uint>();
+        var daily = new HashSet<uint>();
+        var pvp = new HashSet<uint>();
+        // 11-D4: English, as for the duties (the needles are the English roulette names).
         var sheet = data.GetExcelSheet<ContentRoulette>(ClientLanguage.English);
         if (sheet is not null)
         {
             foreach (var row in sheet)
             {
-                if (row.RowId != 0 && row.Name.ExtractText().Contains(LevelingRouletteNeedle, StringComparison.OrdinalIgnoreCase))
-                    ids.Add(row.RowId);
+                if (row.RowId == 0)
+                    continue;
+                var name = row.Name.ExtractText();
+                if (name.Contains(LevelingRouletteNeedle, StringComparison.OrdinalIgnoreCase))
+                    leveling.Add(row.RowId);
+                if (row.IsPvP)
+                    pvp.Add(row.RowId);
+                if (QuestRollRules.CountsForDaily(name, row.IsPvP))
+                    daily.Add(row.RowId);
             }
         }
 
-        _levelingRouletteIds = ids;
+        _dailyRouletteIds = daily;
+        _pvpRouletteIds = pvp;
+        _levelingRouletteIds = leveling;
     }
 }

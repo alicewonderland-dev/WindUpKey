@@ -73,50 +73,86 @@ public static class QuestRollRules
         return best;
     }
 
-    /// <summary>An Easy trial or normal raid gives half wind.</summary>
-    public static bool IsHalfWind(QuestDutyCategory category) => category is QuestDutyCategory.Trial or QuestDutyCategory.NormalRaid;
-
-    /// <summary>The Easy pool: mentor-roulette dungeons, guildhests, trials and raids (never Extremes) the character's level allows.</summary>
+    /// <summary>The Easy pool: mentor-roulette dungeons and guildhests the character's level allows (no trials or raids).</summary>
     public static IEnumerable<QuestDutyRow> EasyPool(IEnumerable<QuestDutyRow> duties, QuestCharacterFacts facts) =>
         duties.Where(d => d.InMentorPool
-                          && d.Category is QuestDutyCategory.Dungeon or QuestDutyCategory.Guildhest or QuestDutyCategory.Trial
-                              or QuestDutyCategory.NormalRaid or QuestDutyCategory.AllianceRaid
+                          && d.Category is QuestDutyCategory.Dungeon or QuestDutyCategory.Guildhest
                           && d.Level <= facts.HighestCombatLevel);
 
     /// <summary>
-    /// The day's Easy slots, in order: the next MSQ (if any), one duty the character can unlock but hasn't (if any), a
-    /// Leveling Roulette (if a combat job is below the cap), then random unlocked duties up to <see cref="EasySlots"/>.
+    /// The week's Easy slots, in order: one duty the character can unlock but hasn't (if any), a Leveling Roulette (if a
+    /// combat job is below the cap), then random unlocked duties up to <see cref="EasySlots"/>.
     /// </summary>
-    public static List<QuestSlot> RollEasy(IReadOnlyList<QuestDutyRow> duties, QuestCharacterFacts facts, Random rng)
+    public static List<QuestSlot> RollEasy(IReadOnlyList<QuestDutyRow> duties, QuestCharacterFacts facts, Random rng) =>
+        PickEasy(duties, facts, EasySlots, NoDuties, NoDuties, withUnlock: true, withLeveling: true, rng);
+
+    /// <summary>
+    /// Up to <paramref name="count"/> Easy slots: an Unlock slot when <paramref name="withUnlock"/> (if any duty can be
+    /// unlocked), a Leveling Roulette when <paramref name="withLeveling"/> (if a job is below the cap), then random
+    /// unlocked duties. Never a duty in <paramref name="taken"/>; one in <paramref name="avoid"/> only when nothing else
+    /// is left.
+    /// </summary>
+    private static List<QuestSlot> PickEasy(
+        IReadOnlyList<QuestDutyRow> duties,
+        QuestCharacterFacts facts,
+        int count,
+        IReadOnlySet<uint> taken,
+        IReadOnlySet<uint> avoid,
+        bool withUnlock,
+        bool withLeveling,
+        Random rng)
     {
         var slots = new List<QuestSlot>();
-        if (facts.HasNextMsq)
-            slots.Add(new QuestSlot { Difficulty = QuestDifficulty.Easy, Kind = QuestSlotKind.Msq });
-
-        var pool = EasyPool(duties, facts).ToList();
-        var unlockable = pool
-            .Where(d => !facts.UnlockedDuties.Contains(d.ContentFinderConditionId)
-                        && facts.UnlockableDuties.Contains(d.ContentFinderConditionId))
-            .ToList();
+        var pool = EasyPool(duties, facts).Where(d => !taken.Contains(d.ContentFinderConditionId)).ToList();
         uint unlockTarget = 0;
-        if (unlockable.Count > 0)
+        if (withUnlock && slots.Count < count
+            && PreferNotAvoided(
+                    pool.Where(d => !facts.UnlockedDuties.Contains(d.ContentFinderConditionId)
+                                    && facts.UnlockableDuties.Contains(d.ContentFinderConditionId)),
+                    avoid) is { Count: > 0 } unlockable)
         {
             var pick = unlockable[rng.Next(unlockable.Count)];
             unlockTarget = pick.ContentFinderConditionId;
             slots.Add(DutySlot(QuestDifficulty.Easy, QuestSlotKind.Unlock, pick));
         }
 
-        if (facts.HasCombatJobBelowCap)
+        if (withLeveling && facts.HasCombatJobBelowCap && slots.Count < count)
             slots.Add(new QuestSlot { Difficulty = QuestDifficulty.Easy, Kind = QuestSlotKind.LevelingRoulette });
 
         var unlocked = pool
             .Where(d => facts.UnlockedDuties.Contains(d.ContentFinderConditionId) && d.ContentFinderConditionId != unlockTarget)
             .ToList();
-        foreach (var pick in Pick(unlocked, EasySlots - slots.Count, rng))
-            slots.Add(DutySlot(QuestDifficulty.Easy, QuestSlotKind.Duty, pick));
+        var fresh = Pick(unlocked.Where(d => !avoid.Contains(d.ContentFinderConditionId)).ToList(), count - slots.Count, rng);
+        if (fresh.Count < count - slots.Count)
+        {
+            var chosen = fresh.Select(d => d.ContentFinderConditionId).ToHashSet();
+            fresh.AddRange(Pick(unlocked.Where(d => !chosen.Contains(d.ContentFinderConditionId)).ToList(), count - slots.Count - fresh.Count, rng));
+        }
 
+        slots.AddRange(fresh.Select(pick => DutySlot(QuestDifficulty.Easy, QuestSlotKind.Duty, pick)));
         return slots;
     }
+
+    /// <summary>The English Duty Roulette name prefix (Chocobo races are roulettes too, and never count).</summary>
+    public const string DutyRoulettePrefix = "Duty Roulette:";
+
+    /// <summary>
+    /// Whether a roulette, by its English name and PvP flag, counts for the Daily slot: PvP (Frontline, Crystalline
+    /// Conflict), or a Duty Roulette other than Normal Raids and Trials.
+    /// </summary>
+    public static bool CountsForDaily(string englishName, bool isPvp) =>
+        isPvp
+        || (englishName.StartsWith(DutyRoulettePrefix, StringComparison.OrdinalIgnoreCase)
+            && !englishName.Contains("Normal Raids", StringComparison.OrdinalIgnoreCase)
+            && !englishName.Contains("Trials", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The day's Daily slot: complete <see cref="QuestRewardRules.DailyRoulettes"/> roulettes.</summary>
+    public static QuestSlot RollDaily() => new()
+    {
+        Difficulty = QuestDifficulty.Daily,
+        Kind = QuestSlotKind.Roulettes,
+        Target = QuestRewardRules.DailyRoulettes,
+    };
 
     /// <summary>The Medium pool: the Extremes (unreal trials excluded) of the highest bracket the character's level reaches.</summary>
     public static List<QuestDutyRow> MediumPool(IReadOnlyList<QuestDutyRow> duties, QuestCharacterFacts facts)
@@ -269,61 +305,72 @@ public static class QuestRollRules
         return preferred.Count > 0 ? preferred : all;
     }
 
-    public static bool IsRerollUsed(QuestBoardState state, QuestDifficulty difficulty) => difficulty switch
+    /// <summary>
+    /// The reroll of <paramref name="difficulty"/> is used: Easy's for today's daily period (it rerolls once a day),
+    /// Medium's and Hard's for this week. Daily never rerolls.
+    /// </summary>
+    public static bool IsRerollUsed(QuestBoardState state, QuestDifficulty difficulty, DateTimeOffset? now = null) => difficulty switch
     {
+        QuestDifficulty.Easy => state.EasyRerollDailyPeriodUtc is { } used
+                                && used >= QuestResetClock.DailyPeriodStart(now ?? DateTimeOffset.UtcNow),
         QuestDifficulty.Medium => state.MediumRerollUsed,
         QuestDifficulty.Hard => state.HardRerollUsed,
         _ => true,
     };
 
-    /// <summary>A reroll is left this week for <paramref name="difficulty"/> (Medium or Hard) and it has an open slot.</summary>
-    public static bool CanReroll(QuestBoardState state, QuestDifficulty difficulty) =>
-        !IsRerollUsed(state, difficulty) && state.SlotsOf(difficulty).Any(s => !s.Completed);
+    /// <summary>A reroll is left for <paramref name="difficulty"/> (Easy today, Medium or Hard this week) and it has an open slot.</summary>
+    public static bool CanReroll(QuestBoardState state, QuestDifficulty difficulty, DateTimeOffset? now = null) =>
+        !IsRerollUsed(state, difficulty, now) && state.SlotsOf(difficulty).Any(s => !s.Completed);
 
     /// <summary>
-    /// Replaces every open slot of <paramref name="difficulty"/> (Medium or Hard) and uses up its weekly reroll. Completed
-    /// slots stay as they are, so the week still allows at most 3 Medium and 2 Hard completions. The new duties follow the
-    /// roll's rules (<see cref="PickMedium"/>, <see cref="PickHard"/>): a cleared one is kept on the board unless a
-    /// completed slot already is one, and they avoid the replaced duties when the pool has others; when it doesn't, a
-    /// replaced duty may come back, but a completed one never does. Returns false (and changes nothing) when no reroll is
-    /// allowed.
+    /// Replaces every open slot of <paramref name="difficulty"/> (Easy, Medium or Hard) and uses up its reroll. Completed
+    /// slots stay as they are, so a week still allows at most 5 Easy, 3 Medium and 2 Hard completions. The new duties
+    /// follow the roll's rules (<see cref="PickEasy"/>, <see cref="PickMedium"/>, <see cref="PickHard"/>): a cleared one is
+    /// kept on the board unless a completed slot already is one, and they avoid the replaced duties when the pool has
+    /// others; when it doesn't, a replaced duty may come back, but a completed one never does. Returns false (and changes
+    /// nothing) when no reroll is allowed.
     /// </summary>
     public static bool Reroll(
-        QuestBoardState state, QuestDifficulty difficulty, IReadOnlyList<QuestDutyRow> duties, QuestCharacterFacts facts, Random rng)
+        QuestBoardState state,
+        QuestDifficulty difficulty,
+        IReadOnlyList<QuestDutyRow> duties,
+        QuestCharacterFacts facts,
+        Random rng,
+        DateTimeOffset? now = null)
     {
-        if (difficulty is not (QuestDifficulty.Medium or QuestDifficulty.Hard) || !CanReroll(state, difficulty))
+        if (difficulty is not (QuestDifficulty.Easy or QuestDifficulty.Medium or QuestDifficulty.Hard) || !CanReroll(state, difficulty, now))
             return false;
 
         var current = state.SlotsOf(difficulty).ToList();
         var open = current.Where(s => !s.Completed).ToList();
         var completed = current.Where(s => s.Completed).ToList();
-        var completedIds = completed.Select(s => s.ContentFinderConditionId).ToHashSet();
-        var openIds = open.Select(s => s.ContentFinderConditionId).ToHashSet();
-        var fresh = difficulty == QuestDifficulty.Medium
+        var completedIds = completed.Select(s => s.ContentFinderConditionId).Where(id => id != 0).ToHashSet();
+        var openIds = open.Select(s => s.ContentFinderConditionId).Where(id => id != 0).ToHashSet();
+
+        if (difficulty == QuestDifficulty.Easy)
+        {
+            // A Leveling Roulette or Unlock slot already done isn't offered again this week.
+            var fresh = PickEasy(
+                duties, facts, open.Count, completedIds, openIds,
+                withUnlock: completed.All(s => s.Kind != QuestSlotKind.Unlock),
+                withLeveling: completed.All(s => s.Kind != QuestSlotKind.LevelingRoulette),
+                rng);
+            ReplaceOpen(state, difficulty, fresh);
+            state.EasyRerollDailyPeriodUtc = QuestResetClock.DailyPeriodStart(now ?? DateTimeOffset.UtcNow);
+            return true;
+        }
+
+        var picks = difficulty == QuestDifficulty.Medium
             ? PickMedium(
                 MediumPool(duties, facts), facts, open.Count, completedIds, openIds,
                 needCleared: !completed.Any(s => facts.HasCleared(s.ContentFinderConditionId)), rng)
             : PickHard(
                 duties, facts, open.Count, completedIds, openIds,
                 needCleared: !completed.Any(s => s.Kind == QuestSlotKind.Savage && facts.HasCleared(s.ContentFinderConditionId)), rng);
-
-        // Each open slot is replaced where it stands; one the pool can't refill is dropped.
-        var next = 0;
-        for (var i = 0; i < state.Slots.Count; i++)
-        {
-            var slot = state.Slots[i];
-            if (slot.Difficulty != difficulty || slot.Completed)
-                continue;
-            if (next < fresh.Count)
-            {
-                var duty = fresh[next++];
-                state.Slots[i] = DutySlot(difficulty, difficulty == QuestDifficulty.Medium ? QuestSlotKind.Extreme : KindForHard(duty.Category), duty);
-            }
-            else
-            {
-                state.Slots.RemoveAt(i--);
-            }
-        }
+        ReplaceOpen(
+            state,
+            difficulty,
+            picks.Select(d => DutySlot(difficulty, difficulty == QuestDifficulty.Medium ? QuestSlotKind.Extreme : KindForHard(d.Category), d)).ToList());
 
         if (difficulty == QuestDifficulty.Medium)
             state.MediumRerollUsed = true;
@@ -332,19 +379,40 @@ public static class QuestRollRules
         return true;
     }
 
-    /// <summary>The board has Easy slots and every one is done (a full clear rolls a new set before the daily reset).</summary>
-    public static bool AllEasyDone(QuestBoardState state)
+    /// <summary>Each open slot of <paramref name="difficulty"/> is replaced where it stands; one there's nothing to refill with is dropped.</summary>
+    private static void ReplaceOpen(QuestBoardState state, QuestDifficulty difficulty, IReadOnlyList<QuestSlot> fresh)
     {
-        var easy = state.SlotsOf(QuestDifficulty.Easy).ToList();
-        return easy.Count > 0 && easy.All(s => s.Completed);
+        var next = 0;
+        for (var i = 0; i < state.Slots.Count; i++)
+        {
+            var slot = state.Slots[i];
+            if (slot.Difficulty != difficulty || slot.Completed)
+                continue;
+            if (next < fresh.Count)
+                state.Slots[i] = fresh[next++];
+            else
+                state.Slots.RemoveAt(i--);
+        }
     }
 
-    /// <summary>Puts this reset's Easy slots in place of the old ones (Easy stays first).</summary>
-    public static void ReplaceEasy(QuestBoardState state, IEnumerable<QuestSlot> easy, DateTimeOffset dailyPeriodStart)
+    /// <summary>Puts today's Daily slot in place of the old one (Daily stays first).</summary>
+    public static void ReplaceDaily(QuestBoardState state, QuestSlot daily, DateTimeOffset dailyPeriodStart)
+    {
+        state.Slots.RemoveAll(s => s.Difficulty == QuestDifficulty.Daily);
+        state.Slots.Insert(0, daily);
+        state.DailyPeriodStartUtc = dailyPeriodStart;
+    }
+
+    /// <summary>
+    /// Puts this week's Easy slots in place of the old ones (after Daily). The day's Easy reroll stays as it was: Easy
+    /// rerolls once a day, even on the day of a weekly reset.
+    /// </summary>
+    public static void ReplaceEasy(QuestBoardState state, IEnumerable<QuestSlot> easy)
     {
         state.Slots.RemoveAll(s => s.Difficulty == QuestDifficulty.Easy);
-        state.Slots.InsertRange(0, easy);
-        state.DailyPeriodStartUtc = dailyPeriodStart;
+        var at = state.Slots.TakeWhile(s => s.Difficulty == QuestDifficulty.Daily).Count();
+        state.Slots.InsertRange(at, easy);
+        state.RulesVersion = QuestBoardState.CurrentRules;
     }
 
     /// <summary>Puts this week's Medium and Hard slots in place of the old ones and gives the rerolls back.</summary>
@@ -365,7 +433,6 @@ public static class QuestRollRules
         Difficulty = difficulty,
         Kind = kind,
         ContentFinderConditionId = duty.ContentFinderConditionId,
-        HalfWind = difficulty == QuestDifficulty.Easy && IsHalfWind(duty.Category),
     };
 
     /// <summary>Up to <paramref name="count"/> distinct items of <paramref name="source"/>, in random order.</summary>

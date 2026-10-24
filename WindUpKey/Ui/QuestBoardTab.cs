@@ -46,11 +46,14 @@ public sealed class QuestBoardTab
     private static readonly TimeSpan ClearAnimation = TimeSpan.FromSeconds(1.6);
 
     private static readonly Vector4 DoneColor = new(0.4f, 0.85f, 0.45f, 1f);
-    private static readonly Vector4 UnsyncedColor = new(1f, 0.55f, 0.2f, 1f);
+    private static readonly Vector4 NoticeColor = new(1f, 0.55f, 0.2f, 1f);
 
     private readonly QuestBoardService _quests;
     private readonly ITextureProvider _textures;
     private QuestDifficulty? _rerollConfirm;
+
+    /// <summary>The Information pop-out is open.</summary>
+    private bool _infoOpen;
 
     public QuestBoardTab(QuestBoardService quests, ITextureProvider textures)
     {
@@ -61,27 +64,22 @@ public sealed class QuestBoardTab
     public void Draw()
     {
         ImGui.Spacing();
+        ImGui.AlignTextToFramePadding();
         ImGui.TextUnformatted("Quest Board");
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Information"))
+            _infoOpen = !_infoOpen;
         ImGui.Separator();
-        ImGui.TextWrapped(_quests.ForDoll
-            ? "Clear duties for stickers: Easy duties give 1, Medium 2 and Hard 3, and every sticker winds your key. " +
-              "Finish a line (row, column or diagonal) for bonus wind and a spare spring; that line is then wiped, and the " +
-              "rest of the board stays. A first clear gives triple wind, and so does an Ultimate; a partner in your " +
-              "party adds half again, or your owner doubles it. Quest wind can take you past your max wind hours, up to " +
-              "twice the max. Easy duties reset daily (or as soon as you finish them all), Medium and Hard weekly."
-            : "Clear duties for stickers: Easy duties give 1, Medium 2 and Hard 3. Finish a line (row, column or " +
-              "diagonal) for 2 spare springs; that line is then wiped, and the rest of the board stays. Easy duties " +
-              "reset daily (or as soon as you finish them all), Medium and Hard weekly.");
         ImGui.Spacing();
 
         if (_quests.OnVacation)
         {
-            ImGui.TextColored(UnsyncedColor, "You're on vacation: the board is paused until you're back.");
+            ImGui.TextColored(NoticeColor, "You're on vacation: the board is paused until you're back.");
             ImGui.Spacing();
         }
         else if (!_quests.IsRolled)
         {
-            ImGui.TextDisabled("The board is getting today's duties ready…");
+            ImGui.TextDisabled("The board is getting its quests ready…");
             ImGui.Spacing();
         }
 
@@ -134,7 +132,7 @@ public sealed class QuestBoardTab
                 fade = 1f - (float)(elapsed / ClearAnimation);
         }
 
-        // A finished line's stickers flash and fade out as it's wiped; the rest of the board stays.
+        // A finished line flashes, and the board's stickers fade out as it clears.
         for (var i = 0; i < StickerBoard.CellCount; i++)
         {
             var (min, max) = CellRect(origin, unit, i);
@@ -193,24 +191,28 @@ public sealed class QuestBoardTab
     private void DrawDuties()
     {
         var now = DateTimeOffset.UtcNow;
-        DrawTier(QuestDifficulty.Easy, $"Easy — resets in {FormatDuration(QuestResetClock.NextDailyReset(now) - now)}");
+        var daily = FormatDuration(QuestResetClock.NextDailyReset(now) - now);
+        var weekly = FormatDuration(QuestResetClock.NextWeeklyReset(now) - now);
+        DrawTier(QuestDifficulty.Daily, $"Daily — resets in {daily}");
         ImGui.Spacing();
-        DrawTier(QuestDifficulty.Medium, $"Medium — resets in {FormatDuration(QuestResetClock.NextWeeklyReset(now) - now)}");
+        DrawTier(QuestDifficulty.Easy, $"Easy — resets in {weekly}");
         ImGui.Spacing();
-        DrawTier(QuestDifficulty.Hard, $"Hard — resets in {FormatDuration(QuestResetClock.NextWeeklyReset(now) - now)}");
+        DrawTier(QuestDifficulty.Medium, $"Medium — resets in {weekly}");
+        ImGui.Spacing();
+        DrawTier(QuestDifficulty.Hard, $"Hard — resets in {weekly}");
     }
 
     private void DrawTier(QuestDifficulty difficulty, string heading)
     {
         ImGui.TextUnformatted(heading);
-        if (difficulty is QuestDifficulty.Medium or QuestDifficulty.Hard)
+        if (difficulty is QuestDifficulty.Easy or QuestDifficulty.Medium or QuestDifficulty.Hard)
             DrawRerollButton(difficulty);
         ImGui.Separator();
 
         var slots = _quests.Board.SlotsOf(difficulty).ToList();
         if (slots.Count == 0)
         {
-            ImGui.TextDisabled(difficulty == QuestDifficulty.Easy
+            ImGui.TextDisabled(difficulty is QuestDifficulty.Daily or QuestDifficulty.Easy
                 ? "Nothing yet."
                 : "None for your level yet (they start at level 50).");
             return;
@@ -220,69 +222,45 @@ public sealed class QuestBoardTab
             DrawSlot(slot);
     }
 
+    /// <summary>
+    /// 0.2.10.0: a slot shows only what it asks and its stickers and turns. How the board works is in the Information
+    /// window; what changes a reward (and what doesn't count) is for players to find out, so nothing here says.
+    /// </summary>
     private void DrawSlot(QuestSlot slot)
     {
         var label = SlotLabel(slot);
-        var reward = RewardLabel(slot);
-        var msqOpen = slot.Kind == QuestSlotKind.Msq;
         var box = slot.Completed ? "[x]" : "[ ]";
-        if (slot.CompletedUnsynced)
-            ImGui.TextColored(UnsyncedColor, $"{box} {label} — done unsynced");
-        else if (slot.Completed && !msqOpen)
+        if (slot.Completed)
             ImGui.TextColored(DoneColor, $"{box} {label}");
         else
             ImGui.TextUnformatted($"{box} {label}");
 
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(SlotTooltip(slot));
-
         ImGui.SameLine();
-        ImGui.TextDisabled(reward);
+        ImGui.TextDisabled(RewardLabel(slot));
     }
 
     private string SlotLabel(QuestSlot slot) => slot.Kind switch
     {
-        QuestSlotKind.Msq => _quests.TrackedMsqName() is { } name ? $"Main scenario: {name}" : "Main scenario quest",
+        QuestSlotKind.Roulettes => $"Complete {slot.Target} roulettes ({slot.Progress}/{slot.Target})",
         QuestSlotKind.LevelingRoulette => "Leveling Roulette on a job below the level cap",
         QuestSlotKind.Unlock => $"Unlock and clear: {_quests.DutyName(slot.ContentFinderConditionId)}",
         _ => _quests.DutyName(slot.ContentFinderConditionId),
     };
 
+    /// <summary>The tier's own stickers and wind, in turns (winders get no wind), never a slot's hidden multiplier.</summary>
     private string RewardLabel(QuestSlot slot)
     {
-        // A winder's board pays stickers (and springs for lines), never wind.
-        var doll = _quests.ForDoll;
-        if (slot.Kind == QuestSlotKind.Msq)
-        {
-            if (!doll)
-                return slot.Completed ? "(today's sticker done)" : "(1 sticker)";
-            return slot.Completed
-                ? $"({QuestRewardRules.MsqHours:0}h each turn-in; today's sticker done)"
-                : $"(1 sticker, {QuestRewardRules.MsqHours:0}h each turn-in)";
-        }
-
-        // A slot done unsynced shows what it gave, not what a synced clear would have.
-        var reward = QuestRewardRules.ForDutyClear(slot, synced: !slot.CompletedUnsynced);
-        var noun = reward.Stickers == 1 ? "sticker" : "stickers";
-        if (!doll)
-            return $"({reward.Stickers} {noun})";
-        return $"({reward.Stickers} {noun}, {reward.Hours:0}h{(slot.HalfWind ? ", half wind" : string.Empty)})";
+        var stickers = QuestRewardRules.StickersFor(slot.Difficulty);
+        var noun = stickers == 1 ? "sticker" : "stickers";
+        if (!_quests.ForDoll)
+            return $"({stickers} {noun})";
+        return $"({stickers} {noun}, {QuestRewardRules.Turns(QuestRewardRules.BaseHoursFor(slot.Difficulty))})";
     }
-
-    private static string SlotTooltip(QuestSlot slot) => slot.Difficulty switch
-    {
-        QuestDifficulty.Easy when slot.Kind == QuestSlotKind.Msq =>
-            "Every main scenario quest you turn in winds the key. The first one each day also gives a sticker.",
-        QuestDifficulty.Easy =>
-            "Must be done synced. Unrestricted Party counts only with Level Sync on; an unsynced clear doesn't count.",
-        _ =>
-            "Best done synced. Unsynced (Unrestricted Party without Level Sync), it gives a quarter of the wind and no stickers, and uses up the duty.",
-    };
 
     private void DrawRerollButton(QuestDifficulty difficulty)
     {
         ImGui.SameLine();
-        var used = QuestRollRules.IsRerollUsed(_quests.Board, difficulty);
+        var used = QuestRollRules.IsRerollUsed(_quests.Board, difficulty, DateTimeOffset.UtcNow);
         var can = _quests.CanReroll(difficulty);
         if (!can)
             ImGui.BeginDisabled();
@@ -291,18 +269,12 @@ public sealed class QuestBoardTab
         if (!can)
             ImGui.EndDisabled();
 
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-        {
-            ImGui.SetTooltip(used
-                ? "This week's reroll is used."
-                : "Replaces the open duties of this tier (completed ones stay). One reroll a week.");
-        }
-
         ImGui.SameLine();
+        var period = difficulty == QuestDifficulty.Easy ? "today" : "this week";
         if (used)
             ImGui.TextDisabled("(used)");
         else if (can)
-            ImGui.TextDisabled("(1 left this week)");
+            ImGui.TextDisabled($"(1 left {period})");
     }
 
     private void DrawRerollConfirm()
@@ -314,8 +286,9 @@ public sealed class QuestBoardTab
         var open = true;
         if (ImGui.BeginPopupModal("RerollQuests###WindUpKeyRerollConfirm", ref open, ImGuiWindowFlags.AlwaysAutoResize))
         {
+            var period = pending == QuestDifficulty.Easy ? "today's" : "this week's";
             ImGui.TextWrapped(
-                $"Reroll the open {QuestLabel(pending)} duties? Completed ones stay. This uses this week's {QuestLabel(pending)} reroll.");
+                $"Reroll the open {QuestLabel(pending)} duties? Completed ones stay. This uses {period} {QuestLabel(pending)} reroll.");
             ImGui.Spacing();
             if (ImGui.Button("Reroll", new Vector2(120, 0)))
             {
@@ -338,8 +311,65 @@ public sealed class QuestBoardTab
             _rerollConfirm = null;
     }
 
+    /// <summary>
+    /// The Information pop-out: how the board works, in turns. Drawn every frame by the config window (on any tab), so it
+    /// stays open while the player looks around. It never explains the hidden bonuses, the unsynced rules or the picks.
+    /// </summary>
+    public void DrawInfoWindow()
+    {
+        if (!_infoOpen)
+            return;
+
+        ImGui.SetNextWindowSize(new Vector2(460, 0) * ImGuiHelpers.GlobalScale, ImGuiCond.FirstUseEver);
+        if (ImGui.Begin("Quest Board Information###WindUpKeyQuestInfo", ref _infoOpen, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.PushTextWrapPos(ImGui.GetFontSize() * 30);
+            var doll = _quests.ForDoll;
+            ImGui.TextUnformatted("The board");
+            ImGui.Separator();
+            ImGui.TextWrapped(doll
+                ? "Complete quests for stickers on the 4×4 board. Every completion also winds your key and gives a spare spring."
+                : "Complete quests for stickers on the 4×4 board. Every completion also gives spare springs.");
+            ImGui.TextWrapped(doll
+                ? "Finish a line (a row, column or diagonal) for bonus wind and a spare spring. A line clears the whole board."
+                : "Finish a line (a row, column or diagonal) for spare springs. A line clears the whole board.");
+            if (doll)
+                ImGui.TextWrapped("Wind is counted in turns of the key. Quest wind can take you past your max wind, up to twice it.");
+            ImGui.Spacing();
+
+            ImGui.TextUnformatted("Quests");
+            ImGui.Separator();
+            InfoRow("Daily", "Complete 2 roulettes; the same one may count twice.", QuestDifficulty.Daily, doll);
+            InfoRow("Easy", "Dungeons and guildhests.", QuestDifficulty.Easy, doll);
+            InfoRow("Medium", "Extreme trials.", QuestDifficulty.Medium, doll);
+            InfoRow("Hard", "Savage raids.", QuestDifficulty.Hard, doll);
+            ImGui.Spacing();
+
+            ImGui.TextUnformatted("Resets and rerolls");
+            ImGui.Separator();
+            ImGui.TextWrapped("Daily resets every day. Easy, Medium and Hard reset every week.");
+            ImGui.TextWrapped(
+                "Rerolling replaces a tier's open quests; completed ones stay. Easy can be rerolled once a day, Medium and Hard once a week.");
+            ImGui.PopTextWrapPos();
+        }
+
+        ImGui.End();
+    }
+
+    private static void InfoRow(string tier, string what, QuestDifficulty difficulty, bool doll)
+    {
+        var stickers = QuestRewardRules.StickersFor(difficulty);
+        var noun = stickers == 1 ? "sticker" : "stickers";
+        // Winders' springs are doubled by the relay.
+        var reward = doll
+            ? $"{stickers} {noun}, {QuestRewardRules.Turns(QuestRewardRules.BaseHoursFor(difficulty))} and a spare spring"
+            : $"{stickers} {noun} and 2 spare springs";
+        ImGui.TextWrapped($"{tier}: {what} ({reward}.)");
+    }
+
     private static string QuestLabel(QuestDifficulty difficulty) => difficulty switch
     {
+        QuestDifficulty.Daily => "Daily",
         QuestDifficulty.Easy => "Easy",
         QuestDifficulty.Medium => "Medium",
         QuestDifficulty.Hard => "Hard",

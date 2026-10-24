@@ -29,11 +29,11 @@ public static class SpringRules
     /// </summary>
     public const int MaxSpringsPerUnwind = 100;
 
-    /// <summary>Quest board lines a character can be paid for per day: one full board (all ten lines).</summary>
-    public const int MaxQuestLinesPerDay = 10;
+    /// <summary>Quest board spring units (lines and completed slots) a character can be paid for per day.</summary>
+    public const int MaxQuestLinesPerDay = 20;
 
-    /// <summary>Lines a single grant may claim: one clear can finish a whole board.</summary>
-    public const int MaxLinesPerGrant = 10;
+    /// <summary>Spring units (lines and completed slots) a single grant may claim.</summary>
+    public const int MaxLinesPerGrant = 20;
 
     /// <summary>The game's daily reset, 15:00 UTC: the free spring and the quest line limit follow it.</summary>
     public static readonly TimeSpan DailyResetUtc = TimeSpan.FromHours(15);

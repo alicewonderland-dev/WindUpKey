@@ -7,7 +7,7 @@ public enum QuestSlotKind : byte
 {
     None = 0,
 
-    /// <summary>Easy: turn in the next main scenario quest. Open all day; only the first each day gives a sticker.</summary>
+    /// <summary>Retired (0.2.10.0): the Easy main scenario slot. A saved one is dropped; turn-ins give wind only.</summary>
     Msq = 1,
 
     /// <summary>Easy: clear (synced) a mentor-roulette duty the character can unlock but hasn't yet.</summary>
@@ -27,6 +27,9 @@ public enum QuestSlotKind : byte
 
     /// <summary>Hard: an Ultimate raid the character has cleared before.</summary>
     Ultimate = 7,
+
+    /// <summary>Daily: complete <see cref="QuestSlot.Target"/> roulettes (any that count, the same one more than once).</summary>
+    Roulettes = 8,
 }
 
 /// <summary>One duty on the quest board (per character, saved in <see cref="QuestBoardState"/>).</summary>
@@ -37,28 +40,35 @@ public sealed class QuestSlot
 
     public QuestSlotKind Kind { get; set; }
 
-    /// <summary>The ContentFinderCondition row the slot asks for; 0 for <see cref="QuestSlotKind.Msq"/> and
-    /// <see cref="QuestSlotKind.LevelingRoulette"/>.</summary>
+    /// <summary>The ContentFinderCondition row the slot asks for; 0 for <see cref="QuestSlotKind.LevelingRoulette"/> and
+    /// <see cref="QuestSlotKind.Roulettes"/>.</summary>
     public uint ContentFinderConditionId { get; set; }
 
-    /// <summary>An Easy trial or normal raid: half wind for its sticker.</summary>
+    /// <summary>Retired with the Easy trials and normal raids (0.2.10.0); kept so older configs still read.</summary>
     public bool HalfWind { get; set; }
 
-    /// <summary>Done for this reset. For <see cref="QuestSlotKind.Msq"/>: today's sticker was given (it still gives wind).</summary>
+    /// <summary>Done for this reset.</summary>
     public bool Completed { get; set; }
 
     /// <summary>A Medium or Hard slot completed unsynced (a quarter of the wind and no stickers).</summary>
     public bool CompletedUnsynced { get; set; }
+
+    /// <summary><see cref="QuestSlotKind.Roulettes"/>: how many count so far, and how many finish it.</summary>
+    public int Progress { get; set; }
+
+    public int Target { get; set; }
 
     public QuestSlot Clone() => (QuestSlot)MemberwiseClone();
 
     /// <summary>True when the slot's tier and kind belong together (a hand-edited or damaged config fails this).</summary>
     public bool IsValid => Kind switch
     {
-        QuestSlotKind.Msq or QuestSlotKind.LevelingRoulette => Difficulty == QuestDifficulty.Easy,
+        QuestSlotKind.LevelingRoulette => Difficulty == QuestDifficulty.Easy,
         QuestSlotKind.Unlock or QuestSlotKind.Duty => Difficulty == QuestDifficulty.Easy && ContentFinderConditionId != 0,
         QuestSlotKind.Extreme => Difficulty == QuestDifficulty.Medium && ContentFinderConditionId != 0,
         QuestSlotKind.Savage or QuestSlotKind.Ultimate => Difficulty == QuestDifficulty.Hard && ContentFinderConditionId != 0,
+        QuestSlotKind.Roulettes => Difficulty == QuestDifficulty.Daily && Target > 0,
+        // The retired MSQ slot (and anything unknown) is dropped.
         _ => false,
     };
 }

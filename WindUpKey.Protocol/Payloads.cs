@@ -142,14 +142,15 @@ public sealed class RepairPayload
     public string To { get; set; } = string.Empty;
 }
 
-/// <summary>Client → relay: quest board lines completed (the relay pays them in springs, within a daily limit).</summary>
+/// <summary>Client → relay: quest board spring units earned (the relay pays them in springs, within a daily limit).</summary>
 public sealed class SpringGrantPayload
 {
     [JsonPropertyName("requestId")]
     public string RequestId { get; set; } = string.Empty;
 
     /// <summary>
-    /// Lines completed and not yet paid. The client resends them under the same <see cref="RequestId"/> until the relay
+    /// Spring units earned and not yet paid: a line or a completed slot each (0.2.10.0; lines only before). The client
+    /// resends them under the same <see cref="RequestId"/> until the relay
     /// answers, and the relay settles each requestId once.
     /// </summary>
     [JsonPropertyName("lines")]

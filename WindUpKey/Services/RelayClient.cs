@@ -2979,7 +2979,7 @@ public sealed class RelayClient : IDisposable
             case SpringReasons.Quest:
                 SpringGrantSettled?.Invoke(payload.RequestId);
                 if (payload.Delta > 0)
-                    PluginChat.Print(_chat, $"Quest board: {payload.Delta} spare {plural} for your lines.", PluginChat.Green);
+                    PluginChat.Print(_chat, $"Quest board: {payload.Delta} spare {plural} from the board.", PluginChat.Green);
                 break;
             case SpringReasons.Refund when payload.Delta > 0:
                 PluginChat.Print(_chat, $"{payload.Delta} spare {plural} came back to you.", PluginChat.Yellow);

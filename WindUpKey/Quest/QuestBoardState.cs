@@ -14,13 +14,22 @@ public sealed class QuestBoardState
     /// <summary>The sticker board: bit <c>row * 4 + column</c> is set when that cell has a sticker.</summary>
     public ushort Stickers { get; set; }
 
-    /// <summary>The daily period (<see cref="QuestResetClock.DailyPeriodStart"/>) the Easy slots were rolled for.</summary>
+    /// <summary>The daily period (<see cref="QuestResetClock.DailyPeriodStart"/>) the Daily slot was rolled for.</summary>
     public DateTimeOffset? DailyPeriodStartUtc { get; set; }
 
-    /// <summary>The weekly period (<see cref="QuestResetClock.WeeklyPeriodStart"/>) the Medium and Hard slots were rolled for.</summary>
+    /// <summary>The weekly period (<see cref="QuestResetClock.WeeklyPeriodStart"/>) the Easy, Medium and Hard slots were rolled for.</summary>
     public DateTimeOffset? WeeklyPeriodStartUtc { get; set; }
 
-    /// <summary>This reset's slots, all tiers (Easy first, then Medium, then Hard).</summary>
+    /// <summary>The board's rules when its Easy slots were rolled (<see cref="CurrentRules"/>; older boards roll Easy again).</summary>
+    public int RulesVersion { get; set; }
+
+    /// <summary>2 (0.2.10.0): Daily roulettes, a weekly Easy set of dungeons and guildhests, no MSQ slot.</summary>
+    public const int CurrentRules = 2;
+
+    /// <summary>The daily period whose Easy reroll was used (Easy rerolls once a day), or null.</summary>
+    public DateTimeOffset? EasyRerollDailyPeriodUtc { get; set; }
+
+    /// <summary>This reset's slots, all tiers (Daily first, then Easy, Medium and Hard).</summary>
     public List<QuestSlot> Slots { get; set; } = [];
 
     /// <summary>The Medium reroll was used this week.</summary>
@@ -52,6 +61,8 @@ public sealed class QuestBoardState
         Stickers = Stickers,
         DailyPeriodStartUtc = DailyPeriodStartUtc,
         WeeklyPeriodStartUtc = WeeklyPeriodStartUtc,
+        RulesVersion = RulesVersion,
+        EasyRerollDailyPeriodUtc = EasyRerollDailyPeriodUtc,
         Slots = (Slots ?? []).Where(s => s is not null).Select(s => s.Clone()).ToList(),
         MediumRerollUsed = MediumRerollUsed,
         HardRerollUsed = HardRerollUsed,

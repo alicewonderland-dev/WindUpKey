@@ -5,10 +5,10 @@ using WindUpKey.Protocol;
 
 namespace WindUpKey.Quest;
 
-/// <summary>One sticker put on the board, and the lines it finished (their cells are wiped; the rest stays).</summary>
+/// <summary>One sticker put on the board, and the lines it finished (the board clears when there are any).</summary>
 /// <param name="Cell">The cell it went in (row * 4 + column).</param>
 /// <param name="Lines">How many lines it finished.</param>
-/// <param name="BoardBefore">The board with this sticker, before its lines were wiped (for the line animation).</param>
+/// <param name="BoardBefore">The board with this sticker, before a line cleared it (for the clear's animation).</param>
 /// <param name="LineCells">The cells of the finished lines (0 when none).</param>
 public readonly record struct StickerPlacement(int Cell, int Lines, ushort BoardBefore, ushort LineCells);
 
@@ -69,10 +69,9 @@ public static class QuestBoardEngine
     }
 
     /// <summary>
-    /// The turn-in of main scenario quest <paramref name="questId"/>. Always wind, and a sticker when today's MSQ slot
-    /// hasn't given one yet (the slot is marked completed, but stays open for wind; a day rolled without an MSQ slot gives
-    /// wind only). Each quest is credited once ever, so replaying the story (New Game+) earns nothing. Null when
-    /// <paramref name="questId"/> was already credited.
+    /// The turn-in of main scenario quest <paramref name="questId"/>: wind only (no slot, sticker or spring). Each quest is
+    /// credited once ever, so replaying the story (New Game+) earns nothing. Null when <paramref name="questId"/> was
+    /// already credited.
     /// </summary>
     public static QuestSlotCredit? CreditMsq(QuestBoardState state, uint questId)
     {
@@ -80,19 +79,40 @@ public static class QuestBoardEngine
             return null;
 
         state.CreditedMsqQuestIds.Add(questId);
-        var slot = state.Slots.FirstOrDefault(s => s.Kind == QuestSlotKind.Msq);
-        var sticker = slot is { Completed: false };
-        if (slot is not null)
-            slot.Completed = true;
-        return new QuestSlotCredit(slot, QuestRewardRules.ForMsq(sticker));
+        return new QuestSlotCredit(null, QuestRewardRules.ForMsq());
     }
+
+    /// <summary>
+    /// A roulette that counts was completed: today's open Daily slot moves on, and the one that reaches its target is
+    /// completed (its sticker and wind). Null when it moved on without finishing (or there was no open Daily slot).
+    /// </summary>
+    public static QuestSlotCredit? CreditRoulette(QuestBoardState state)
+    {
+        var slot = state.Slots.FirstOrDefault(s => s.Kind == QuestSlotKind.Roulettes && !s.Completed);
+        if (slot is null)
+            return null;
+
+        slot.Progress = Math.Min(slot.Target, slot.Progress + 1);
+        if (slot.Progress < slot.Target)
+            return null;
+
+        slot.Completed = true;
+        return new QuestSlotCredit(slot, QuestRewardRules.ForDaily());
+    }
+
+    /// <summary>
+    /// Spare springs a set of credits pays: one per completed slot (MSQ turn-ins have none, and neither does a slot completed
+    /// unsynced, which gives no stickers either). Lines add theirs.
+    /// </summary>
+    public static int CompletionSprings(IEnumerable<QuestSlotCredit> credits) =>
+        credits.Count(c => c.Slot is { CompletedUnsynced: false }) * QuestRewardRules.SpringsPerCompletion;
 
     /// <summary>More main scenario quests than this done between two polls means the history is out of step.</summary>
     public const int MaxMsqCreditsAtOnce = 3;
 
     /// <summary>
     /// The main scenario quests done since the last poll: every one in <paramref name="completedMsqQuestIds"/> not
-    /// credited yet. The first may give today's sticker. More than <see cref="MaxMsqCreditsAtOnce"/> at once means the
+    /// credited yet. More than <see cref="MaxMsqCreditsAtOnce"/> at once means the
     /// history was seeded before the game's quest data loaded: those are recorded without wind, and only
     /// <paramref name="tracked"/> (the quest the board was waiting on) counts.
     /// </summary>
@@ -171,8 +191,8 @@ public static class QuestBoardEngine
 
     /// <summary>
     /// Puts <paramref name="stickers"/> on the board one at a time in random empty cells (<paramref name="nextIndex"/>
-    /// returns 0 ≤ i &lt; n for n empty cells). After each sticker, the lines it finished earn their bonus and their cells
-    /// are wiped; the rest of the board stays. <paramref name="baseHours"/> is the slots' wind; line bonuses add to it.
+    /// returns 0 ≤ i &lt; n for n empty cells). Lines are checked after each sticker: any line clears the whole board at
+    /// once, and the stickers left go on the fresh board. <paramref name="baseHours"/> is the slots' wind; line bonuses add to it.
     /// </summary>
     public static QuestAward PlaceStickers(QuestBoardState state, int stickers, double baseHours, Func<int, int> nextIndex)
     {
@@ -181,7 +201,7 @@ public static class QuestBoardEngine
         var placements = new List<StickerPlacement>();
         for (var i = 0; i < stickers; i++)
         {
-            // Can't happen (a full board always has a line, which is wiped), but never loop on a damaged config.
+            // Can't happen (a full board always has a line), but never loop on a damaged config.
             if (StickerBoard.EmptyCount(state.Stickers) == 0)
                 state.Stickers = 0;
 
@@ -189,8 +209,8 @@ public static class QuestBoardEngine
             var lines = StickerBoard.CompletedLines(board);
             var lineCells = StickerBoard.CompletedLineCells(board);
             placements.Add(new StickerPlacement(cell, lines, board, lineCells));
-            // Only the finished lines are wiped; the rest of the board stays.
-            state.Stickers = (ushort)(board & ~lineCells);
+            // A line wipes the whole board.
+            state.Stickers = lines == 0 ? board : (ushort)0;
             if (lines == 0)
                 continue;
 

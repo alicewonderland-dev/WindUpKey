@@ -12,13 +12,19 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.10.0 — Quest board rework",
+            [
+                "New Daily quest: complete 2 roulettes (the same one may count twice) for 1½ turns, a sticker and a spare spring.",
+                "Easy quests now reset weekly, give 1½ turns, a sticker and a spare spring, and are dungeons and guildhests only. Easy can be rerolled once a day.",
+                "Medium and Hard quests also give a spare spring.",
+                "A finished line clears the whole board again.",
+                "Wind is shown in turns of the key. The board's details are in its Information window; some things are yours to find out.",
+                "Main scenario quests no longer have a board slot; each turn-in still winds the key.",
+            ]),
+        new(
             "0.2.9.0 — Quest board tuning and vacation mode",
             [
-                "Hard duties now come only from the newest Savage tier, starting with the first fights. One is always a fight you've cleared, if you have one. Ultimates you've cleared can still come up, now and then, for triple wind.",
-                "One Medium Extreme is always one you've cleared, if you have one.",
-                "A first clear of a board duty gives triple wind. A partner in your party adds half again, and your owner doubles it.",
-                "Finishing a line now wipes only that line; the rest of the board stays.",
-                "Finish every Easy duty and a fresh set appears right away. Up to 10 lines a day pay spare springs.",
+                "Hard duties were retuned.",
                 "Vacation mode (General tab): for a long break, it freezes a doll's wind and lets them move freely. Winding, springs, Calls and the quest board pause until they're back.",
                 "The Discord button moved to the General tab.",
             ]),
@@ -26,7 +32,7 @@ public sealed class ChangelogWindow : Window
             "0.2.8.0 — Spare springs (Testing)",
             [
                 "Winding now costs spare springs: each spring winds a partner for 8 hours, or 12 from a doll's owner. Dolls hold up to 10 springs and winders up to 20.",
-                "You get free springs on your first login each day (winders get two), and more for each quest board line. Winders can now use the quest board too.",
+                "You get free springs on your first login each day (winders get two), and more from the quest board. Winders can now use the quest board too.",
                 "Dolls can wind other dolls with springs, and anyone can give springs to a paired player.",
                 "Other players can overwind a doll past 100%. The first overwind is always safe; wind an overwound doll too far and they break until someone repairs them or they recover by themselves.",
                 "Unwinding costs a spring per 8 hours of the doll's wind (free for their owner), and never takes quest overwind.",
@@ -36,11 +42,9 @@ public sealed class ChangelogWindow : Window
         new(
             "0.2.7.0 — Quest board (Testing)",
             [
-                "The quest board replaces daily quests: 5 Easy duties a day, and 3 Medium and 2 Hard duties a week.",
-                "Easy duties give 1 sticker, Medium 2 and Hard 3, and every sticker winds your key. Finish a line on the 4×4 board for bonus wind.",
-                "Quest wind can take you past your max wind hours, up to twice the max.",
-                "Duties must be done synced. Medium and Hard done unsynced give a quarter of the wind and no stickers.",
-                "One Medium and one Hard reroll a week; completed duties stay.",
+                "The quest board replaces daily quests.",
+                "Quests give stickers, and every sticker winds your key. Finish a line on the 4×4 board for bonus wind.",
+                "Quest wind can take you past your max wind, up to twice it.",
                 "Any daily quest in progress is dropped when you update.",
             ]),
         new(

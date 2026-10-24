@@ -22,9 +22,6 @@ public sealed class QuestBoardService : IWindUpSource
     /// <summary>How often the board checks for resets and MSQ progress.</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
 
-    /// <summary>How long a daily roll waits for the scenario guide after login before rolling without an MSQ slot.</summary>
-    private static readonly TimeSpan MsqReadyWait = TimeSpan.FromSeconds(60);
-
     private readonly Configuration _config;
     private readonly WindTimerService _timer;
     private readonly IDutyState _dutyState;
@@ -51,7 +48,11 @@ public sealed class QuestBoardService : IWindUpSource
     /// <summary>The board's periods when the doll entered the current duty's area (null outside duties).</summary>
     private BoardPeriods? _boardAtZoneIn;
     private long _lastPoll;
-    private long _loggedInAt = Stopwatch.GetTimestamp();
+
+    /// <summary>The roulette the doll is in (one the Daily slot counts), from entering its duty until leaving it.</summary>
+    private RouletteRun? _rouletteRun;
+
+    private bool _wasBoundByDuty;
 
     public QuestBoardService(
         Configuration config,
@@ -143,7 +144,6 @@ public sealed class QuestBoardService : IWindUpSource
 
         _dutyState.DutyStarted += OnDutyStarted;
         _dutyState.DutyCompleted += OnDutyCompleted;
-        _clientState.Login += OnLogin;
         _clientState.Logout += OnLogout;
         _clientState.TerritoryChanged += OnTerritoryChanged;
         _framework.Update += OnFrameworkUpdate;
@@ -160,7 +160,6 @@ public sealed class QuestBoardService : IWindUpSource
 
         _dutyState.DutyStarted -= OnDutyStarted;
         _dutyState.DutyCompleted -= OnDutyCompleted;
-        _clientState.Login -= OnLogin;
         _clientState.Logout -= OnLogout;
         _clientState.TerritoryChanged -= OnTerritoryChanged;
         _framework.Update -= OnFrameworkUpdate;
@@ -175,15 +174,18 @@ public sealed class QuestBoardService : IWindUpSource
         {
             // At or after the current periods: a PC clock set back doesn't make the board roll again when it returns.
             var now = DateTimeOffset.UtcNow;
-            return Board.DailyPeriodStartUtc >= QuestResetClock.DailyPeriodStart(now)
-                   && Board.WeeklyPeriodStartUtc >= QuestResetClock.WeeklyPeriodStart(now);
+            var board = Board;
+            return board.DailyPeriodStartUtc >= QuestResetClock.DailyPeriodStart(now)
+                   && board.WeeklyPeriodStartUtc >= QuestResetClock.WeeklyPeriodStart(now)
+                   && board.RulesVersion >= QuestBoardState.CurrentRules
+                   && board.Slots.Any(s => s.Difficulty == QuestDifficulty.Daily);
         }
     }
 
     public bool CanReroll(QuestDifficulty difficulty) =>
-        _config.HasChosenRole && !_config.IsOnVacation && IsRolled && QuestRollRules.CanReroll(Board, difficulty);
+        _config.HasChosenRole && !_config.IsOnVacation && IsRolled && QuestRollRules.CanReroll(Board, difficulty, DateTimeOffset.UtcNow);
 
-    /// <summary>Rerolls the open Medium or Hard slots (once a week each). Returns false when it isn't allowed.</summary>
+    /// <summary>Rerolls the open Easy (once a day), Medium or Hard (once a week) slots. Returns false when it isn't allowed.</summary>
     public bool TryReroll(QuestDifficulty difficulty)
     {
         if (!CanReroll(difficulty) || !IsActiveCharacterReady())
@@ -191,7 +193,7 @@ public sealed class QuestBoardService : IWindUpSource
 
         var duties = QuestContentCatalog.Duties(_data);
         var facts = _facts.Read(duties, hasNextMsq: false);
-        if (facts is null || !QuestRollRules.Reroll(Board, difficulty, duties, facts, _rng))
+        if (facts is null || !QuestRollRules.Reroll(Board, difficulty, duties, facts, _rng, DateTimeOffset.UtcNow))
             return false;
 
         _config.Save();
@@ -212,19 +214,6 @@ public sealed class QuestBoardService : IWindUpSource
         return $"Duty #{contentFinderConditionId}";
     }
 
-    /// <summary>The name of the MSQ the board is waiting on, in the client language, or null.</summary>
-    public string? TrackedMsqName()
-    {
-        var id = Board.MsqTrackedQuestId;
-        if (id == 0 || _data.GetExcelSheet<Lumina.Excel.Sheets.Quest>()?.TryGetRow(id, out var quest) != true)
-            return null;
-
-        var name = quest.Name.ExtractText();
-        return string.IsNullOrWhiteSpace(name) ? null : name;
-    }
-
-    private void OnLogin() => _loggedInAt = Stopwatch.GetTimestamp();
-
     private void OnFrameworkUpdate(IFramework framework)
     {
         // DutyStarted doesn't fire when joining a duty in progress or loading back in after a disconnect, so a duty that
@@ -235,6 +224,14 @@ public sealed class QuestBoardService : IWindUpSource
             _boardAtZoneIn = null;
         else if (_boardAtZoneIn is null)
             _boardAtZoneIn = new BoardPeriods(IsRolled, Board.DailyPeriodStartUtc, Board.WeeklyPeriodStartUtc);
+
+        // A roulette run, from the queue the doll entered by, for the Daily slot. Leaving the duty ends it.
+        var bound = _condition[ConditionFlag.BoundByDuty] || _condition[ConditionFlag.BoundByDuty56] || _condition[ConditionFlag.BoundByDuty95];
+        if (bound)
+            TrackRouletteRun();
+        else if (_wasBoundByDuty)
+            OnLeftDuty();
+        _wasBoundByDuty = bound;
 
         var dutyStarted = _dutyState.IsDutyStarted;
         if (dutyStarted && !_wasDutyStarted && !_ignoreCurrentDuty)
@@ -265,12 +262,7 @@ public sealed class QuestBoardService : IWindUpSource
             // Also while bound by duty before it starts (zoned in, waiting on the party; joined in progress before
             // combat): the duty is only watched from its start.
             if (_duty is null && !_condition[ConditionFlag.BoundByDuty])
-            {
                 EnsureRolled();
-                // An award that finished the Easy set while the board waited on a reset (or couldn't read the
-                // character) rerolls it here once the board is up to date.
-                RerollEasyIfAllDone();
-            }
             PollMsq();
         }
         catch (Exception ex)
@@ -304,46 +296,55 @@ public sealed class QuestBoardService : IWindUpSource
         _log.Information("Quest board: MSQ history seeded ({Count} quests)", board.CreditedMsqQuestIds.Count);
     }
 
-    /// <summary>Rolls the Easy slots after a daily reset and the Medium/Hard slots after a weekly one.</summary>
+    /// <summary>
+    /// Rolls the Daily slot after a daily reset, and the Easy, Medium and Hard slots after a weekly one. A board from
+    /// before 0.2.10.0 (<see cref="QuestBoardState.RulesVersion"/>) rolls its Easy set again at once, under the new rules.
+    /// </summary>
     private void EnsureRolled()
     {
         var now = DateTimeOffset.UtcNow;
         var daily = QuestResetClock.DailyPeriodStart(now);
         var weekly = QuestResetClock.WeeklyPeriodStart(now);
         var board = Board;
-        var needDaily = board.DailyPeriodStartUtc is not { } rolledDaily || rolledDaily < daily;
+        var needDaily = board.DailyPeriodStartUtc is not { } rolledDaily || rolledDaily < daily
+                        || !board.Slots.Any(s => s.Difficulty == QuestDifficulty.Daily);
         var needWeekly = board.WeeklyPeriodStartUtc is not { } rolledWeekly || rolledWeekly < weekly;
-        if (!needDaily && !needWeekly)
+        var needEasy = needWeekly || board.RulesVersion < QuestBoardState.CurrentRules;
+        if (!needDaily && !needWeekly && !needEasy)
             return;
 
-        var nextMsq = _facts.NextMsqQuestId(out var msqReady);
-        // The scenario guide loads a little after login; give it a minute before rolling the day without an MSQ slot.
-        if (needDaily && !msqReady && Stopwatch.GetElapsedTime(_loggedInAt) < MsqReadyWait)
-            return;
-
-        var duties = QuestContentCatalog.Duties(_data);
-        var facts = _facts.Read(duties, nextMsq != 0);
-        if (facts is null)
-            return;
-
-        // The MSQ the board waits on is left alone: PollMsq hands it over, crediting it first if it was just turned in.
+        // The Daily slot needs nothing from the character; the rest do.
         if (needDaily)
-            QuestRollRules.ReplaceEasy(board, QuestRollRules.RollEasy(duties, facts, _rng), daily);
+            QuestRollRules.ReplaceDaily(board, QuestRollRules.RollDaily(), daily);
 
-        if (needWeekly)
-            QuestRollRules.ReplaceWeekly(board, QuestRollRules.RollWeekly(duties, facts, _rng), weekly);
+        if (needEasy || needWeekly)
+        {
+            var duties = QuestContentCatalog.Duties(_data);
+            if (_facts.Read(duties, hasNextMsq: false) is { } facts)
+            {
+                if (needEasy)
+                    QuestRollRules.ReplaceEasy(board, QuestRollRules.RollEasy(duties, facts, _rng));
+                if (needWeekly)
+                    QuestRollRules.ReplaceWeekly(board, QuestRollRules.RollWeekly(duties, facts, _rng), weekly);
+            }
+            else if (!needDaily)
+            {
+                return;
+            }
+        }
 
         _config.Save();
         _log.Information(
-            "Quest board rolled (daily={Daily}, weekly={Weekly}, slots={Slots})",
+            "Quest board rolled (daily={Daily}, easy={Easy}, weekly={Weekly}, slots={Slots})",
             needDaily,
+            needEasy,
             needWeekly,
             board.Slots.Count);
     }
 
     /// <summary>
-    /// Watches the next MSQ: when the one the board waits on is turned in, it gives its wind (once ever per quest), and
-    /// a sticker when today's MSQ slot hasn't given one yet. The board then waits on the new next MSQ.
+    /// Watches the next MSQ: when the one the board waits on is turned in, it gives its wind (once ever per quest; no
+    /// sticker or spring since 0.2.10.0). The board then waits on the new next MSQ.
     /// </summary>
     private void PollMsq()
     {
@@ -365,10 +366,11 @@ public sealed class QuestBoardService : IWindUpSource
         // Company paths), and two turn-ins can fall between polls.
         var done = _facts.Completed(QuestContentCatalog.MainScenarioQuestIds(_data)).ToList();
         var credits = QuestBoardEngine.CreditMsqTurnIns(board, done, tracked);
-        if (credits.Count > 0)
+        // Turn-ins give wind only, so a winder's board has nothing to give for them (they're still recorded above).
+        if (credits.Count > 0 && _config.IsDoll)
         {
             _log.Information("Quest board: {Count} MSQ turn-in(s) credited", credits.Count);
-            Award(credits, "Main scenario progress");
+            Award(credits, "Main scenario progress", msq: true);
             return;
         }
 
@@ -458,15 +460,18 @@ public sealed class QuestBoardService : IWindUpSource
         // in the duty before it was watched. The queue still says how it was entered, so it's read now.
         if (_duty is null && _dutyState.ContentFinderCondition.RowId != 0)
             BeginObservedDuty();
-        if (_duty is not { } watched)
-            return;
-
+        TrackRouletteRun();
+        var watched = _duty;
         _duty = null;
         _ignoreCurrentDuty = _dutyState.IsDutyStarted;
         try
         {
-            if (IsActiveCharacterReady() && watched.ContentFinderConditionId != 0 && watched.ContentId == _facts.ContentId)
-                CreditClear(watched);
+            if (!IsActiveCharacterReady())
+                return;
+            var duty = watched is { ContentFinderConditionId: not 0 } w && w.ContentId == _facts.ContentId ? w : null;
+            var roulette = TakeRoulette();
+            if (duty is not null || roulette)
+                CreditClear(duty, roulette);
         }
         catch (Exception ex)
         {
@@ -474,42 +479,128 @@ public sealed class QuestBoardService : IWindUpSource
         }
     }
 
-    private void CreditClear(DutyObservation watched)
+    /// <summary>
+    /// While bound by duty: notes a roulette the Daily slot counts (from the queue the doll entered by), once per run. It
+    /// counts when the game reports the duty completed (PvP too, by the owner's choice: a match the game never reports
+    /// completed doesn't count).
+    /// </summary>
+    private void TrackRouletteRun()
+    {
+        if (_rouletteRun is not null)
+            return;
+
+        try
+        {
+            var queue = _facts.ReadQueue();
+            if (queue.RouletteId == 0 || !QuestContentCatalog.CountsForDaily(_data, queue.RouletteId))
+                return;
+            _rouletteRun = new RouletteRun(queue.RouletteId, _facts.ContentId);
+        }
+        catch (Exception ex)
+        {
+            _log.Debug("Quest board: roulette read failed: {Type}", ex.GetType().Name);
+        }
+    }
+
+    /// <summary>The current run's roulette counts now (once per run, for the character it began on).</summary>
+    private bool TakeRoulette()
+    {
+        if (_rouletteRun is not { Credited: false } run || run.ContentId != _facts.ContentId)
+            return false;
+
+        _rouletteRun = run with { Credited = true };
+        return true;
+    }
+
+    /// <summary>
+    /// The doll left the duty: the roulette run ends. It counted only if the game reported the duty completed (a PvP match
+    /// too: one the game never reports completed simply doesn't count).
+    /// </summary>
+    private void OnLeftDuty() => _rouletteRun = null;
+
+    /// <summary>
+    /// Credits a duty clear (<paramref name="watched"/>, when one was watched) and a roulette that counts for the Daily
+    /// slot, as one award.
+    /// </summary>
+    private void CreditClear(DutyObservation? watched, bool roulette)
     {
         // Vacation: the board doesn't award (the board's periods catch up once the doll is back).
         if (_config.IsOnVacation)
             return;
 
-        var clear = new QuestDutyClear(watched.ContentFinderConditionId, watched.Synced, watched.LevelingRouletteBelowCap, watched.FirstClear);
-
         // A reset that passed during the duty waited (see OnFrameworkUpdate): the slots the board had when it began still
         // count, and the tick rolls the new ones once it ends. Any other slots are brought up to date first.
         var board = Board;
-        var heldOver = watched.BoardRolledAtStart
+        var heldOver = watched is not null
+                       && watched.BoardRolledAtStart
                        && board.DailyPeriodStartUtc == watched.DailyPeriodAtStart
                        && board.WeeklyPeriodStartUtc == watched.WeeklyPeriodAtStart;
         if (!heldOver)
         {
             EnsureRolled();
             if (!IsRolled)
-                return;
+            {
+                // The duty's slots wait on a board that can't be brought up to date (the character couldn't be read);
+                // the Daily needs nothing from the character, so a roulette still counts.
+                if (!roulette)
+                    return;
+                watched = null;
+            }
         }
 
-        var credit = QuestBoardEngine.CreditDuty(board, clear);
-        if (credit.Credits.Count == 0)
+        var credits = new List<QuestSlotCredit>();
+        var unsyncedEasy = false;
+        var firstClear = false;
+        var what = "Roulette";
+        if (watched is not null)
         {
-            if (credit.UnsyncedEasyMatch)
-                PluginChat.Print(_chat, "Quest board: that clear wasn't synced, so it doesn't count.", PluginChat.Orange);
+            var clear = new QuestDutyClear(watched.ContentFinderConditionId, watched.Synced, watched.LevelingRouletteBelowCap, watched.FirstClear);
+            var credit = QuestBoardEngine.CreditDuty(board, clear);
+            credits.AddRange(credit.Credits);
+            unsyncedEasy = credit.UnsyncedEasyMatch;
+            firstClear = clear.FirstClear && credit.Credits.Any(c => c.Slot is { } slot && QuestRewardRules.CanBeFirstClear(slot.Kind));
+            what = DutyName(clear.ContentFinderConditionId);
+            if (credit.Credits.Count > 0)
+            {
+                _log.Information(
+                    "Quest board: clear credited (cfc={Cfc}, synced={Synced}, slots={Slots})",
+                    clear.ContentFinderConditionId,
+                    clear.Synced,
+                    credit.Credits.Count);
+            }
+        }
+
+        var dailyProgress = false;
+        if (roulette)
+        {
+            // A roulette counts toward the Daily of the day it ends, even when the duty's other slots were held over from
+            // before a reset (the Daily slot needs nothing from the character to roll).
+            var today = QuestResetClock.DailyPeriodStart(DateTimeOffset.UtcNow);
+            if (board.DailyPeriodStartUtc is not { } dailyPeriod || dailyPeriod < today)
+                QuestRollRules.ReplaceDaily(board, QuestRollRules.RollDaily(), today);
+            if (QuestBoardEngine.CreditRoulette(board) is { } daily)
+                credits.Add(daily);
+            else
+                dailyProgress = board.SlotsOf(QuestDifficulty.Daily).Any(s => !s.Completed && s.Progress > 0);
+            _log.Information("Quest board: roulette counted for the Daily slot");
+        }
+
+        if (credits.Count == 0)
+        {
+            // 0.2.10.0: the rules behind a clear that doesn't count are for players to find out.
+            if (unsyncedEasy)
+                PluginChat.Print(_chat, "Quest board: that clear didn't count this time.", PluginChat.Orange);
+            if (dailyProgress && board.SlotsOf(QuestDifficulty.Daily).FirstOrDefault() is { } open)
+                PluginChat.Print(_chat, $"Quest board: a roulette toward today's Daily ({open.Progress}/{open.Target}).", PluginChat.Green);
+            if (roulette)
+                _config.Save();
             return;
         }
 
-        _log.Information(
-            "Quest board: clear credited (cfc={Cfc}, synced={Synced}, slots={Slots})",
-            clear.ContentFinderConditionId,
-            clear.Synced,
-            credit.Credits.Count);
-        var firstClear = clear.FirstClear && credit.Credits.Any(c => c.Slot is { } slot && QuestRewardRules.CanBeFirstClear(slot.Kind));
-        Award(credit.Credits, DutyName(clear.ContentFinderConditionId), firstClear);
+        Award(credits, what, firstClear);
+        // The same clear also moved the Daily on without finishing it.
+        if (dailyProgress && board.SlotsOf(QuestDifficulty.Daily).FirstOrDefault() is { } progressed)
+            PluginChat.Print(_chat, $"Quest board: a roulette toward today's Daily ({progressed.Progress}/{progressed.Target}).", PluginChat.Green);
     }
 
     /// <summary>
@@ -544,7 +635,7 @@ public sealed class QuestBoardService : IWindUpSource
         return bonus;
     }
 
-    private void Award(IReadOnlyList<QuestSlotCredit> credits, string what, bool firstClear = false)
+    private void Award(IReadOnlyList<QuestSlotCredit> credits, string what, bool firstClear = false, bool msq = false)
     {
         var stickers = credits.Sum(c => c.Reward.Stickers);
         var party = ReadPartyBonus();
@@ -559,9 +650,11 @@ public sealed class QuestBoardService : IWindUpSource
         var cleared = award.Placements.LastOrDefault(p => p.Lines > 0);
         if (cleared.Lines > 0)
             LastLineClear = new QuestLineClear(cleared.BoardBefore, cleared.LineCells, Stopwatch.GetTimestamp());
-        // Each line is paid a spare spring by the relay (it holds the balance), sent from SendSpringGrants until it answers.
-        if (award.LinesCleared > 0)
-            QuestBoardEngine.AddSpringLines(board, award.LinesCleared, () => Guid.NewGuid().ToString("N"));
+        // Each line and each completed slot is paid a spare spring by the relay (it holds the balance), sent from
+        // SendSpringGrants until it answers.
+        var springUnits = award.LinesCleared + QuestBoardEngine.CompletionSprings(credits);
+        if (springUnits > 0)
+            QuestBoardEngine.AddSpringLines(board, springUnits, () => Guid.NewGuid().ToString("N"));
 
         // The board is saved before the wind (AddQuestWind saves too), so a failed wind never re-awards stickers.
         _config.Save();
@@ -574,55 +667,22 @@ public sealed class QuestBoardService : IWindUpSource
                 _timer.AddQuestWind(windHours);
         }
 
-        if (award.LinesCleared > 0)
+        if (springUnits > 0)
             SendSpringGrants(force: true);
 
         var doll = _config.IsDoll;
-        PluginChat.Print(_chat, Message(what, stickers, award, doll), PluginChat.Green);
-        if (doll && BonusMessage(firstClear, ultimate, party) is { } bonusLine)
-            PluginChat.Print(_chat, bonusLine, PluginChat.Green);
+        PluginChat.Print(_chat, msq && award.LinesCleared == 0 ? $"Quest board: {what}, and the key turns." : Message(what, stickers, award, doll), PluginChat.Green);
+        // 0.2.10.0: a hidden bonus is only hinted at, never explained.
+        if (doll && (firstClear || ultimate || party != QuestPartyBonus.None))
+            PluginChat.Print(_chat, "Quest board: the key turns more than usual.", PluginChat.Green);
         _log.Information(
-            "Quest board award: stickers={Stickers}, lines={Lines}, fill={Fill}, first={First}, party={Party}",
+            "Quest board award: stickers={Stickers}, lines={Lines}, springs={Springs}, fill={Fill}, first={First}, party={Party}",
             stickers,
             award.LinesCleared,
+            springUnits,
             award.FillToCap,
             firstClear,
             party);
-
-        RerollEasyIfAllDone();
-    }
-
-    /// <summary>
-    /// Every Easy slot of this set is done: a new set is rolled at once, before the daily reset. The day's MSQ sticker
-    /// stays given (a turn-in still gives one sticker a day), so a new MSQ slot starts done when the last one was.
-    /// </summary>
-    private void RerollEasyIfAllDone()
-    {
-        var board = Board;
-        if (!QuestRollRules.AllEasyDone(board) || !IsRolled || board.DailyPeriodStartUtc is not { } daily)
-            return;
-
-        var nextMsq = _facts.NextMsqQuestId(out _);
-        var duties = QuestContentCatalog.Duties(_data);
-        if (_facts.Read(duties, nextMsq != 0) is not { } facts)
-            return;
-
-        var msqStickerGiven = board.SlotsOf(QuestDifficulty.Easy).Any(s => s.Kind == QuestSlotKind.Msq && s.Completed);
-        var easy = QuestRollRules.RollEasy(duties, facts, _rng);
-        if (msqStickerGiven)
-        {
-            foreach (var slot in easy.Where(s => s.Kind == QuestSlotKind.Msq))
-                slot.Completed = true;
-        }
-
-        // A set that would start all done (only an MSQ slot whose sticker is given) isn't rolled: it would roll again at once.
-        if (easy.Count == 0 || easy.All(s => s.Completed))
-            return;
-
-        QuestRollRules.ReplaceEasy(board, easy, daily);
-        _config.Save();
-        PluginChat.Print(_chat, "Quest board: every Easy duty is done. A fresh set is on the board.", PluginChat.Green);
-        _log.Information("Quest board: Easy set done, rerolled ({Slots} slots)", easy.Count);
     }
 
     /// <summary>The chat line for an award. 06: it never names hours or how much wind the doll has.</summary>
@@ -631,7 +691,7 @@ public sealed class QuestBoardService : IWindUpSource
         if (!doll)
         {
             if (award.LinesCleared > 0)
-                return $"Quest board: {what}. {(award.LinesCleared == 1 ? "A line" : $"{award.LinesCleared} lines at once")}!";
+                return $"Quest board: {what}. {(award.LinesCleared == 1 ? "A line" : $"{award.LinesCleared} lines at once")}! The board clears.";
             return stickers switch
             {
                 0 => $"Quest board: {what}. No sticker this time.",
@@ -643,9 +703,9 @@ public sealed class QuestBoardService : IWindUpSource
         if (award.TripleLine)
             return $"Quest board: {what}. Three lines at once! The key turns and turns and turns.";
         if (award.LinesCleared >= 2)
-            return $"Quest board: {what}. {award.LinesCleared} lines! The key turns with fresh wind.";
+            return $"Quest board: {what}. Two lines at once! The board clears and the key turns with fresh wind.";
         if (award.LinesCleared == 1)
-            return $"Quest board: {what}. A line! The key turns with fresh wind.";
+            return $"Quest board: {what}. A line! The board clears and the key turns with fresh wind.";
         if (stickers == 0)
             return $"Quest board: {what}. No sticker this time, but the key turns a little.";
         return stickers == 1
@@ -653,30 +713,16 @@ public sealed class QuestBoardService : IWindUpSource
             : $"Quest board: {what}. {stickers} stickers for your board, and the key turns.";
     }
 
-    /// <summary>Why the wind was bigger, without naming hours (06), or null when nothing added to it.</summary>
-    private static string? BonusMessage(bool firstClear, bool ultimate, QuestPartyBonus party)
-    {
-        var reasons = new List<string>();
-        if (firstClear)
-            reasons.Add("a first clear");
-        if (ultimate)
-            reasons.Add("an Ultimate");
-        if (party == QuestPartyBonus.Owner)
-            reasons.Add("your owner at your side");
-        else if (party == QuestPartyBonus.Partner)
-            reasons.Add("a partner at your side");
-        if (reasons.Count == 0)
-            return null;
-
-        var joined = reasons.Count == 1 ? reasons[0] : string.Join(", ", reasons.Take(reasons.Count - 1)) + " and " + reasons[^1];
-        return $"Quest board: extra wind for {joined}.";
-    }
-
     /// <summary>
     /// A logout keeps the watched duty, so a reconnect into it resumes it. Logging in anywhere else is a territory change
     /// that drops it, and another character never resumes it (its ContentId differs).
     /// </summary>
-    private void OnLogout(int type, int code) => _ignoreCurrentDuty = false;
+    private void OnLogout(int type, int code)
+    {
+        _ignoreCurrentDuty = false;
+        // The run is dropped (a reconnect into the duty notes it again).
+        _rouletteRun = null;
+    }
 }
 
 /// <summary>A sticker that finished a line: the board just before it cleared, the line cells, and when.</summary>
@@ -699,3 +745,6 @@ internal sealed record DutyObservation(
 
 /// <summary>The board's reset periods at one moment, and whether it was rolled for the periods current then.</summary>
 internal readonly record struct BoardPeriods(bool Rolled, DateTimeOffset? Daily, DateTimeOffset? Weekly);
+
+/// <summary>A roulette the doll entered a duty by (one the Daily slot counts), and whether it has counted yet.</summary>
+internal sealed record RouletteRun(uint RouletteId, ulong ContentId, bool Credited = false);

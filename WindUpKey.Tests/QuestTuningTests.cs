@@ -211,7 +211,7 @@ public sealed class QuestTuningTests
     [Fact]
     public void AFirstClear_TriplesTheWind_ButNotTheStickers()
     {
-        Assert.Equal(new QuestRewardRules.SlotReward(1, 24), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Easy, QuestSlotKind.Unlock), true, firstClear: true));
+        Assert.Equal(new QuestRewardRules.SlotReward(1, 36), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Easy, QuestSlotKind.Unlock), true, firstClear: true));
         Assert.Equal(new QuestRewardRules.SlotReward(2, 48), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Medium, QuestSlotKind.Extreme), true, firstClear: true));
         Assert.Equal(new QuestRewardRules.SlotReward(3, 72), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Hard, QuestSlotKind.Savage), true, firstClear: true));
         // Unsynced: a quarter of the tripled wind, and no stickers.
@@ -223,7 +223,7 @@ public sealed class QuestTuningTests
     [Fact]
     public void TheLevelingRoulette_NeverGetsTheFirstClearBonus()
     {
-        Assert.Equal(new QuestRewardRules.SlotReward(1, 8), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Easy, QuestSlotKind.LevelingRoulette), true, firstClear: true));
+        Assert.Equal(new QuestRewardRules.SlotReward(1, 12), QuestRewardRules.ForDutyClear(Slot(QuestDifficulty.Easy, QuestSlotKind.LevelingRoulette), true, firstClear: true));
         Assert.False(QuestRewardRules.CanBeFirstClear(QuestSlotKind.Msq));
         Assert.False(QuestRewardRules.CanBeFirstClear(QuestSlotKind.LevelingRoulette));
     }
@@ -260,97 +260,6 @@ public sealed class QuestTuningTests
         // The first clear is read when the duty starts, before the game marks it completed.
         var begin = ProfileSettingsTests.MethodBody(service, "    private void BeginObservedDuty(");
         Assert.Contains("firstClear = _facts.IsUncleared(cfcId);", begin);
-    }
-
-    // ---------- the board ----------
-
-    private static ushort Cells(params int[] cells) => (ushort)cells.Aggregate(0, (mask, c) => mask | (1 << c));
-
-    private static Func<int, int> InCells(QuestBoardState state, params int[] cells)
-    {
-        var queue = new Queue<int>(cells);
-        return _ =>
-        {
-            var cell = queue.Dequeue();
-            return Enumerable.Range(0, cell).Count(c => !StickerBoard.HasSticker(state.Stickers, c));
-        };
-    }
-
-    [Fact]
-    public void ALine_WipesOnlyItsOwnStickers()
-    {
-        // Row 0 (cells 0-3) less one, plus two stickers elsewhere.
-        var state = new QuestBoardState { Stickers = Cells(0, 1, 2, 5, 10) };
-        var award = QuestBoardEngine.PlaceStickers(state, 1, 0, InCells(state, 3));
-
-        Assert.Equal(1, award.LinesCleared);
-        Assert.Equal(Cells(5, 10), state.Stickers);
-        Assert.Equal(Cells(0, 1, 2, 3), award.Placements[0].LineCells);
-    }
-
-    [Fact]
-    public void OneSticker_CanFinishARowAColumnAndADiagonal()
-    {
-        // Cell 0 finishes row 0, column 0 and the main diagonal; only their cells go.
-        var state = new QuestBoardState { Stickers = Cells(1, 2, 3, 4, 8, 12, 5, 10, 15, 6) };
-        var award = QuestBoardEngine.PlaceStickers(state, 1, 0, InCells(state, 0));
-
-        Assert.Equal(3, award.LinesCleared);
-        Assert.True(award.FillToCap);
-        Assert.Equal(Cells(6), state.Stickers);
-    }
-
-    [Fact]
-    public void TheBoard_NeverFills()
-    {
-        var state = new QuestBoardState();
-        var rng = new Random(3);
-        for (var i = 0; i < 500; i++)
-        {
-            QuestBoardEngine.PlaceStickers(state, 1, 0, n => rng.Next(n));
-            Assert.True(StickerBoard.EmptyCount(state.Stickers) > 0);
-            Assert.Equal(0, StickerBoard.CompletedLines(state.Stickers));
-        }
-    }
-
-    // ---------- Easy ----------
-
-    [Fact]
-    public void AllEasyDone_NeedsEasySlots_AndEveryOneDone()
-    {
-        Assert.False(QuestRollRules.AllEasyDone(new QuestBoardState()));
-        var state = new QuestBoardState
-        {
-            Slots =
-            [
-                new QuestSlot { Difficulty = QuestDifficulty.Easy, Kind = QuestSlotKind.Duty, ContentFinderConditionId = 1, Completed = true },
-                new QuestSlot { Difficulty = QuestDifficulty.Easy, Kind = QuestSlotKind.Duty, ContentFinderConditionId = 2 },
-                new QuestSlot { Difficulty = QuestDifficulty.Medium, Kind = QuestSlotKind.Extreme, ContentFinderConditionId = 3 },
-            ],
-        };
-        Assert.False(QuestRollRules.AllEasyDone(state));
-        state.Slots[1].Completed = true;
-        Assert.True(QuestRollRules.AllEasyDone(state));
-    }
-
-    [Fact]
-    public void TheService_RerollsEasyAfterAnAward_KeepingTheDaysMsqSticker()
-    {
-        var service = ProfileSettingsTests.PluginSource(Path.Combine("Services", "QuestBoardService.cs"));
-        Assert.Contains("RerollEasyIfAllDone();", ProfileSettingsTests.MethodBody(service, "    private void Award("));
-        var reroll = ProfileSettingsTests.MethodBody(service, "    private void RerollEasyIfAllDone(");
-        Assert.Contains("QuestRollRules.ReplaceEasy(board, easy, daily);", reroll);
-        Assert.Contains("slot.Completed = true;", reroll);
-    }
-
-    // ---------- springs ----------
-
-    [Fact]
-    public void TenLinesADay_AreTheSpringLimit()
-    {
-        Assert.Equal(10, SpringRules.MaxQuestLinesPerDay);
-        Assert.Equal(10, SpringRules.MaxLinesPerGrant);
-        Assert.Equal(SpringRules.MaxLinesPerGrant, QuestBoardEngine.MaxLinesPerGrant);
     }
 
     // ---------- vacation ----------

@@ -118,6 +118,8 @@ public sealed class ConfigWindow : Window, IDisposable
     public override void Draw()
     {
         DropStaleConfirms();
+        // The quest board's Information pop-out stays open on any tab.
+        _questTab.DrawInfoWindow();
 
         if (!_config.HasChosenRole)
         {
@@ -560,7 +562,7 @@ public sealed class ConfigWindow : Window, IDisposable
         {
             ImGui.SetTooltip(
                 "Each spare spring winds a partner for 8 hours (12 from a doll's owner). You get free springs on your " +
-                "first login each day, and more for each quest board line. You can't wind yourself with them.");
+                "first login each day, and more from the quest board. You can't wind yourself with them.");
         }
 
         DrawRelayIdentitySection();
