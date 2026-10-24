@@ -115,6 +115,20 @@ public sealed class QuestReworkTests
     }
 
     [Fact]
+    public void Easy_OffersAGuildhest_OnlyUntilItsCompleted()
+    {
+        Assert.Contains(QuestRollRules.EasyPool(Duties, Facts()), d => d.ContentFinderConditionId == 7);
+
+        var done = Facts() with { ClearedGuildhests = new HashSet<uint> { 7 } };
+        var pool = QuestRollRules.EasyPool(Duties, done).ToList();
+        Assert.DoesNotContain(pool, d => d.ContentFinderConditionId == 7);
+        // Dungeons stay, completed or not.
+        Assert.Contains(pool, d => d.ContentFinderConditionId == 1);
+        for (var seed = 0; seed < 30; seed++)
+            Assert.DoesNotContain(QuestRollRules.RollEasy(Duties, done, new Random(seed)), s => s.ContentFinderConditionId == 7);
+    }
+
+    [Fact]
     public void Easy_RerollsOnceADay_KeepingCompletedSlots()
     {
         var state = EasyState();

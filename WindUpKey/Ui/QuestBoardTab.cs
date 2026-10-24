@@ -340,7 +340,7 @@ public sealed class QuestBoardTab
             ImGui.TextUnformatted("Quests");
             ImGui.Separator();
             InfoRow("Daily", "Complete 2 roulettes; the same one may count twice.", QuestDifficulty.Daily, doll);
-            InfoRow("Easy", "Dungeons and guildhests.", QuestDifficulty.Easy, doll);
+            InfoRow("Easy", "Dungeons, and guildhests you haven't done yet.", QuestDifficulty.Easy, doll);
             InfoRow("Medium", "Extreme trials.", QuestDifficulty.Medium, doll);
             InfoRow("Hard", "Savage raids.", QuestDifficulty.Hard, doll);
             ImGui.Spacing();

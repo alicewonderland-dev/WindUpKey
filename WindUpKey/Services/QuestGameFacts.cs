@@ -71,6 +71,7 @@ public sealed unsafe class QuestGameFacts
         var unlockable = new HashSet<uint>();
         var cleared = new HashSet<uint>();
         var clearedHighEnd = new HashSet<uint>();
+        var clearedGuildhests = new HashSet<uint>();
         foreach (var duty in duties)
         {
             var instance = QuestContentCatalog.InstanceContentId(_data, duty.ContentFinderConditionId);
@@ -86,6 +87,8 @@ public sealed unsafe class QuestGameFacts
 
             if (duty.Category is QuestDutyCategory.Extreme or QuestDutyCategory.Savage && UIState.IsInstanceContentCompleted(instance))
                 clearedHighEnd.Add(duty.ContentFinderConditionId);
+            if (duty.Category == QuestDutyCategory.Guildhest && UIState.IsInstanceContentCompleted(instance))
+                clearedGuildhests.Add(duty.ContentFinderConditionId);
 
             if (UIState.IsInstanceContentUnlocked(instance))
                 unlocked.Add(duty.ContentFinderConditionId);
@@ -93,7 +96,8 @@ public sealed unsafe class QuestGameFacts
                 unlockable.Add(duty.ContentFinderConditionId);
         }
 
-        return new QuestCharacterFacts(highest, levels.Any(l => l < cap), hasNextMsq, unlocked, unlockable, cleared, clearedHighEnd);
+        return new QuestCharacterFacts(
+            highest, levels.Any(l => l < cap), hasNextMsq, unlocked, unlockable, cleared, clearedHighEnd, clearedGuildhests);
     }
 
     /// <summary>

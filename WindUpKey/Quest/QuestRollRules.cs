@@ -36,6 +36,7 @@ public readonly record struct QuestDutyRow(
 /// <param name="UnlockableDuties">The locked duties whose unlock quest the character can take now.</param>
 /// <param name="ClearedUltimates">The Ultimate raids the character has cleared.</param>
 /// <param name="ClearedHighEnd">The Extremes and Savage raids the character has cleared.</param>
+/// <param name="ClearedGuildhests">The guildhests the character has completed (Easy offers only the others).</param>
 public sealed record QuestCharacterFacts(
     int HighestCombatLevel,
     bool HasCombatJobBelowCap,
@@ -43,12 +44,16 @@ public sealed record QuestCharacterFacts(
     IReadOnlySet<uint> UnlockedDuties,
     IReadOnlySet<uint> UnlockableDuties,
     IReadOnlySet<uint> ClearedUltimates,
-    IReadOnlySet<uint>? ClearedHighEnd = null)
+    IReadOnlySet<uint>? ClearedHighEnd = null,
+    IReadOnlySet<uint>? ClearedGuildhests = null)
 {
     private static readonly IReadOnlySet<uint> None = new HashSet<uint>();
 
     /// <summary>Whether the character has cleared Extreme or Savage <paramref name="contentFinderConditionId"/>.</summary>
     public bool HasCleared(uint contentFinderConditionId) => (ClearedHighEnd ?? None).Contains(contentFinderConditionId);
+
+    /// <summary>Whether the character has completed guildhest <paramref name="contentFinderConditionId"/>.</summary>
+    public bool HasCompletedGuildhest(uint contentFinderConditionId) => (ClearedGuildhests ?? None).Contains(contentFinderConditionId);
 }
 
 /// <summary>Rolling and rerolling the board's slots. No Dalamud dependency.</summary>
@@ -73,11 +78,15 @@ public static class QuestRollRules
         return best;
     }
 
-    /// <summary>The Easy pool: mentor-roulette dungeons and guildhests the character's level allows (no trials or raids).</summary>
+    /// <summary>
+    /// The Easy pool: mentor-roulette dungeons the character's level allows, and the guildhests they haven't completed
+    /// yet (no trials or raids).
+    /// </summary>
     public static IEnumerable<QuestDutyRow> EasyPool(IEnumerable<QuestDutyRow> duties, QuestCharacterFacts facts) =>
         duties.Where(d => d.InMentorPool
-                          && d.Category is QuestDutyCategory.Dungeon or QuestDutyCategory.Guildhest
-                          && d.Level <= facts.HighestCombatLevel);
+                          && d.Level <= facts.HighestCombatLevel
+                          && (d.Category == QuestDutyCategory.Dungeon
+                              || (d.Category == QuestDutyCategory.Guildhest && !facts.HasCompletedGuildhest(d.ContentFinderConditionId))));
 
     /// <summary>
     /// The week's Easy slots, in order: one duty the character can unlock but hasn't (if any), a Leveling Roulette (if a
