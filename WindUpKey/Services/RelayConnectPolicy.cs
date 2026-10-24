@@ -273,10 +273,10 @@ public sealed class RelayConnectPolicy
         {
             ErrorCodes.AuthFailed =>
                 "The relay rejected this character's relay identity. If you use Wind-Up Key on another PC, " +
-                "copy the relay identity there and import it here (Pairing tab). " +
+                "copy the relay identity there and import it here (Settings, Connection). " +
                 "If you no longer have it, ask the relay operator to reset your pairing key, then press Reconnect.",
             ErrorCodes.AuthRequired =>
-                "The relay needs this character's relay identity. Import it in the Pairing tab, or press Reconnect.",
+                "The relay needs this character's relay identity. Import it in Settings, under Connection, or press Reconnect.",
             _ =>
                 "This character connected to the relay from somewhere else, so this session was closed. " +
                 "Press Reconnect to take it back.",

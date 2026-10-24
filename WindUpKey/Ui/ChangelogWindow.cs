@@ -12,6 +12,17 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.11.0 — New main window",
+            [
+                "A new main window (/windup): your springs and connection, your wind Moodles, partners online, and buttons that open each part in its own window.",
+                "Winding has its own window: pick a partner to wind with springs, give springs, repair, ask to be wound, or unwind. A doll's wind shows as last heard.",
+                "Pairing and permissions moved to the Pairs window, and the quest board to the Quests window.",
+                "Settings are grouped in a sidebar: Timer and emote, Vacation, Safeword, Moodles, Audio and messages, Connection, and Role.",
+                "The Safeword window uses your safeword (as /windup safeword does) and ends a pause early; its setup is in Settings.",
+                "Easy quests offer a guildhest only until you've completed it. Quests now have real check boxes.",
+                "The Discord invite link is new.",
+            ]),
+        new(
             "0.2.10.0 — Quest board rework",
             [
                 "New Daily quest: complete 2 roulettes (the same one may count twice) for 1½ turns, a sticker and a spare spring.",

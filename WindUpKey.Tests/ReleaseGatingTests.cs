@@ -237,7 +237,7 @@ public sealed class ReleaseGatingTests
         "_callPrompt = new CallPromptWindow();",
         "_callTravel = new CallTravelService(",
         "_relay.AttachCallTravel(_callTravel);",
-        "quests,",
+        "var questsWindow = new QuestsWindow(Configuration, quests, Textures);",
         "_windowSystem.AddWindow(_callPrompt);",
         "_sources.Add(quests);",
         "+ \"\\n/windup stopcall declines an active owner call (not in Hardcore).\"",

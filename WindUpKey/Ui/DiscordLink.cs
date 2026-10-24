@@ -7,7 +7,7 @@ namespace WindUpKey.Ui;
 /// <summary>The Discord's invite (shared with LookingGlass) and its icon button.</summary>
 public static class DiscordLink
 {
-    public const string Invite = "https://discord.gg/WY6hPnrNJ3";
+    public const string Invite = "https://discord.gg/5mRHH9gr6N";
 
     /// <summary>
     /// A square button with no background until hovered, showing the embedded Discord icon (as in LookingGlass). Opens the

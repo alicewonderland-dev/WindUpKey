@@ -50,6 +50,7 @@ public sealed class Plugin : IDalamudPlugin
     public Configuration Configuration { get; }
     private readonly WindowSystem _windowSystem = new("WindUpKey");
     private readonly ConfigWindow _configWindow;
+    private readonly MainWindow _mainWindow;
     private readonly ChangelogWindow _changelogWindow;
     private readonly InputDiagnosticLog _inputDiagnostics;
     private readonly LockController _lockController;
@@ -171,19 +172,33 @@ public sealed class Plugin : IDalamudPlugin
 #endif
 
         _changelogWindow = new ChangelogWindow();
+        var version = PluginInterface.Manifest.AssemblyVersion.ToString();
         _configWindow = new ConfigWindow(
             Configuration,
             _relay,
             _timer,
-            quests,
+            PluginInterface,
             TargetManager,
             commands,
             _moodlesStatus,
             lowWindMessages.FilePath,
             _changelogWindow,
             Textures,
-            PluginInterface.Manifest.AssemblyVersion.ToString());
+            version);
         _windowSystem.AddWindow(_configWindow);
+        // The main window and the pop-outs it opens (GagSpeak-style); Settings is the window above.
+        var windWindow = new WindWindow(Configuration, _relay, _configWindow);
+        var pairsWindow = new PairsWindow(Configuration, _configWindow);
+        var questsWindow = new QuestsWindow(Configuration, quests, Textures);
+        var safewordWindow = new SafewordWindow(Configuration, _configWindow, UseSafeword);
+        _mainWindow = new MainWindow(
+            Configuration, _relay, _timer, _moodlesStatus, Textures, _configWindow,
+            windWindow, pairsWindow, questsWindow, safewordWindow, _changelogWindow, version);
+        _windowSystem.AddWindow(_mainWindow);
+        _windowSystem.AddWindow(windWindow);
+        _windowSystem.AddWindow(pairsWindow);
+        _windowSystem.AddWindow(questsWindow);
+        _windowSystem.AddWindow(safewordWindow);
         _windowSystem.AddWindow(_changelogWindow);
         _windowSystem.AddWindow(_callPrompt);
         _unwindConfirm = new UnwindConfirmWindow(_relay);
@@ -206,7 +221,7 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
             HelpMessage =
-                "Open Wind-Up Key config.\n/windup safeword <word> uses your safeword (and pauses remote control).\n/windup safeword resume ends that pause early.\n/windup unlock clears Hardcore and all owners (confirmation required)."
+                "Open Wind-Up Key.\n/windup safeword <word> uses your safeword (and pauses remote control).\n/windup safeword resume ends that pause early.\n/windup unlock clears Hardcore and all owners (confirmation required)."
                 + "\n/windup stopcall declines an active owner call (not in Hardcore)."
 #if WINDUP_TESTING
                 + "\n/windup selftest runs the relay self-test (debug mode)."
@@ -216,7 +231,7 @@ public sealed class Plugin : IDalamudPlugin
 
         PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
         PluginInterface.UiBuilder.OpenConfigUi += OpenConfig;
-        PluginInterface.UiBuilder.OpenMainUi += OpenConfig;
+        PluginInterface.UiBuilder.OpenMainUi += OpenMain;
 
         // 06-A2: login work runs once the logged-in character's profile is active (also after a load while logged in).
         // 06-A13: subscribed before Framework.Update: this constructor runs off the framework thread, and a tick in
@@ -231,7 +246,7 @@ public sealed class Plugin : IDalamudPlugin
         _relay.Start();
 
         if (!Configuration.HasChosenRole)
-            OpenConfig();
+            OpenMain();
 
         Log.Information("WindUpKey loaded.");
     }
@@ -244,7 +259,7 @@ public sealed class Plugin : IDalamudPlugin
         _relay.ProfileActivated -= OnProfileActivated;
         PluginInterface.UiBuilder.Draw -= _windowSystem.Draw;
         PluginInterface.UiBuilder.OpenConfigUi -= OpenConfig;
-        PluginInterface.UiBuilder.OpenMainUi -= OpenConfig;
+        PluginInterface.UiBuilder.OpenMainUi -= OpenMain;
         CommandManager.RemoveHandler(CommandName);
 
         foreach (var source in _sources)
@@ -266,6 +281,8 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     private void OpenConfig() => _configWindow.IsOpen = true;
+
+    private void OpenMain() => _mainWindow.IsOpen = true;
 
     private bool _pendingLoginServices;
     private bool _wasBetweenAreas;
@@ -388,7 +405,7 @@ public sealed class Plugin : IDalamudPlugin
         var trimmed = args.Trim();
         if (string.IsNullOrEmpty(trimmed))
         {
-            OpenConfig();
+            OpenMain();
             return;
         }
 
@@ -520,41 +537,50 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
-            if (!Configuration.IsDoll)
-            {
-                PluginChat.PrintError(ChatGui, "Safeword is only available in Doll mode.");
-                return;
-            }
-
-            if (!Configuration.SafewordEnabled)
-            {
-                PluginChat.PrintError(ChatGui, "Safeword is disabled in config.");
-                return;
-            }
-
-            if (Configuration.HardcoreMode)
-            {
-                PluginChat.PrintError(ChatGui, "Safeword is disabled while Hardcore is on.");
-                return;
-            }
-
-            // 06-A4: compared trimmed, as it is stored.
-            if (!SafewordText.Matches(rest, Configuration.Safeword))
-            {
-                PluginChat.PrintError(ChatGui, "Incorrect safeword.");
-                return;
-            }
-
-            // 06-B1: pauses remote control, adds the safeword hours ignoring the owner's cap (never shortening the timer),
-            // and stops an owner's Call. The safeword itself is never logged.
-            // 06-B3: wind first, so cancelling the Call never briefly sees her unwound (re-lock, sit, then stand up).
-            _timer.UseSafeword(Configuration.SafewordHours);
-            _relay.CancelActiveCall();
-            // Confirmation only — never print remaining time to the doll.
-            PluginChat.Print(ChatGui, "Safeword used. Remote control is paused for now.", PluginChat.Green);
+            UseSafeword(rest);
             return;
         }
 
         PluginChat.PrintError(ChatGui, "Unknown command. Try /windup, /windup safeword <word>, or /windup unlock.");
+    }
+
+    /// <summary>
+    /// The safeword typed by the doll, from <c>/windup safeword &lt;word&gt;</c> or the Safeword window. The result is
+    /// printed to chat either way.
+    /// </summary>
+    private void UseSafeword(string word)
+    {
+        if (!Configuration.IsDoll)
+        {
+            PluginChat.PrintError(ChatGui, "Safeword is only available in Doll mode.");
+            return;
+        }
+
+        if (!Configuration.SafewordEnabled)
+        {
+            PluginChat.PrintError(ChatGui, "Safeword is disabled in Settings.");
+            return;
+        }
+
+        if (Configuration.HardcoreMode)
+        {
+            PluginChat.PrintError(ChatGui, "Safeword is disabled while Hardcore is on.");
+            return;
+        }
+
+        // 06-A4: compared trimmed, as it is stored.
+        if (!SafewordText.Matches(word, Configuration.Safeword))
+        {
+            PluginChat.PrintError(ChatGui, "Incorrect safeword.");
+            return;
+        }
+
+        // 06-B1: pauses remote control, adds the safeword hours ignoring the owner's cap (never shortening the timer),
+        // and stops an owner's Call. The safeword itself is never logged.
+        // 06-B3: wind first, so cancelling the Call never briefly sees her unwound (re-lock, sit, then stand up).
+        _timer.UseSafeword(Configuration.SafewordHours);
+        _relay.CancelActiveCall();
+        // Confirmation only — never print remaining time to the doll.
+        PluginChat.Print(ChatGui, "Safeword used. Remote control is paused for now.", PluginChat.Green);
     }
 }

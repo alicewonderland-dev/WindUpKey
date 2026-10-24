@@ -238,24 +238,24 @@ public sealed class ProfileSettingsTests
     public void Safeword_TheCommandComparesWithTheRule()
     {
         var plugin = PluginSource("Plugin.cs");
-        Assert.Contains("if (!SafewordText.Matches(rest, Configuration.Safeword))", plugin);
+        Assert.Contains("if (!SafewordText.Matches(word, Configuration.Safeword))", plugin);
         Assert.DoesNotContain("string.Equals(rest, Configuration.Safeword", plugin);
     }
 
     [Theory]
     // Max wind hours: on a +/- step at once, and when a typed edit ends.
-    [InlineData("    private void DrawGeneralTab()", "ImGui.InputInt(\"Max wind hours\"", "ImGui.Checkbox(\"Play emote when unwound\"",
-        "                if (!ImGui.IsItemActive())\n                    _config.Save();")]
-    [InlineData("    private void DrawGeneralTab()", "ImGui.InputInt(\"Max wind hours\"", "ImGui.Checkbox(\"Play emote when unwound\"",
-        "            if (ImGui.IsItemDeactivatedAfterEdit())\n                _config.Save();")]
+    [InlineData("    private void DrawTimerSection()", "ImGui.InputInt(\"Max wind hours\"", "ImGui.Checkbox(\"Play emote when unwound\"",
+        "            if (!ImGui.IsItemActive())\n                _config.Save();")]
+    [InlineData("    private void DrawTimerSection()", "ImGui.InputInt(\"Max wind hours\"", "ImGui.Checkbox(\"Play emote when unwound\"",
+        "        if (ImGui.IsItemDeactivatedAfterEdit())\n            _config.Save();")]
     // The safeword checkbox, at once.
-    [InlineData("    private void DrawSafewordTab()", "ImGui.Checkbox(\"Enable safeword\"", "ImGui.InputText(\"Safeword",
+    [InlineData("    public void DrawSafewordTab()", "ImGui.Checkbox(\"Enable safeword\"", "ImGui.InputText(\"Safeword",
         "                _config.SafewordEnabled = safewordOn;\n                _config.Save();")]
     // The safeword text, stored (trimmed) when the edit ends.
-    [InlineData("    private void DrawSafewordTab()", "ImGui.InputText(\"Safeword", "ImGui.SliderInt(\"Safeword hours\"",
+    [InlineData("    public void DrawSafewordTab()", "ImGui.InputText(\"Safeword", "ImGui.SliderInt(\"Safeword hours\"",
         "            if (ImGui.IsItemDeactivatedAfterEdit())\n            {\n                _config.Safeword = SafewordText.Store(_safewordDraft, _config.Safeword);\n                _config.Save();")]
     // The safeword hours, when the slider is let go.
-    [InlineData("    private void DrawSafewordTab()", "ImGui.SliderInt(\"Safeword hours\"", "ImGui.Spacing();",
+    [InlineData("    public void DrawSafewordTab()", "ImGui.SliderInt(\"Safeword hours\"", "ImGui.Spacing();",
         "            if (ImGui.IsItemDeactivatedAfterEdit())\n                _config.Save();")]
     public void Settings_TheA4FieldsSaveOnCommit(string member, string widget, string nextWidget, string save)
     {

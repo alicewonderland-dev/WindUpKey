@@ -516,7 +516,7 @@ public sealed class EmoteCancelTests
         Assert.NotNull(SelfTestCatalog.PostPatch.SingleOrDefault(e => e.Id == "P-addr-emote-loop"));
         var manual = Assert.Single(SelfTestCatalog.PostPatch, e => e.Id == "P-emote-cancel");
         var steps = string.Join(" ", manual.ManualSteps);
-        foreach (var pose in new[] { "groundsit", "chair sit", "/doze", "another looping emote", "Self wind \"1h\"", "without moving" })
+        foreach (var pose in new[] { "groundsit", "chair sit", "/doze", "another looping emote", "\"1 spring\" on Yourself (debug)", "without moving" })
             Assert.Contains(pose, steps);
         Assert.NotNull(SelfTestCatalog.Find("X-lock-emote"));
     }

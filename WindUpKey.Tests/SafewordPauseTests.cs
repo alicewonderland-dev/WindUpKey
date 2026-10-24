@@ -181,11 +181,11 @@ public sealed class SafewordPauseTests
         Assert.Contains("_config.SafewordPausedUntilUtc = null;\n            _config.Save();", resume);
 
         // The config button and the command both end it through that method.
-        var ui = ProfileSettingsTests.MethodBody(ConfigWindowSource, "    private void DrawSafewordPause()");
+        var ui = ProfileSettingsTests.MethodBody(ConfigWindowSource, "    public void DrawSafewordPause()");
         Assert.Contains("if (_timer.SafewordPauseEndsAt is not { } pauseEnd)", ui);
         Assert.Contains("if (ImGui.Button(\"End pause now\"))\n            _timer.ResumeRemoteControl();", ui);
         Assert.Contains("pauseEnd.ToLocalTime()", ui);
-        Assert.Contains("DrawSafewordPause();", ProfileSettingsTests.MethodBody(ConfigWindowSource, "    private void DrawSafewordTab()"));
+        Assert.Contains("DrawSafewordPause();", ProfileSettingsTests.MethodBody(ConfigWindowSource, "    public void DrawSafewordTab()"));
         Assert.Contains("if (SafewordPause.IsResume(rest, safewordUsable, Configuration.Safeword))", SafewordCommand);
         Assert.Contains("if (_timer.ResumeRemoteControl())", SafewordCommand);
     }
@@ -212,7 +212,7 @@ public sealed class SafewordPauseTests
         Assert.Null(SafewordPause.EndsAt(Now.AddHours(5), Now, hardcore: true));
 
         // Turning it on clears it, and a profile or config in Hardcore never keeps one.
-        var tab = ProfileSettingsTests.MethodBody(ConfigWindowSource, "    private void DrawSafewordTab()");
+        var tab = ProfileSettingsTests.MethodBody(ConfigWindowSource, "    public void DrawSafewordTab()");
         var confirm = tab[tab.IndexOf("if (ImGui.Button(\"Confirm Hardcore\"))", StringComparison.Ordinal)..];
         Assert.Contains("_config.HardcoreMode = true;", confirm);
         Assert.Contains("_config.SafewordPausedUntilUtc = null;", confirm[..confirm.IndexOf("_config.Save();", StringComparison.Ordinal)]);
@@ -260,7 +260,7 @@ public sealed class SafewordPauseTests
             "the pause is set after the wind");
 
         var command = SafewordCommand;
-        var match = command.IndexOf("if (!SafewordText.Matches(rest, Configuration.Safeword))", StringComparison.Ordinal);
+        var match = command.IndexOf("if (!SafewordText.Matches(word, Configuration.Safeword))", StringComparison.Ordinal);
         var cancel = command.IndexOf("_relay.CancelActiveCall();", StringComparison.Ordinal);
         var used = command.IndexOf("_timer.UseSafeword(Configuration.SafewordHours);", StringComparison.Ordinal);
         Assert.True(match >= 0 && match < used && cancel >= 0, "the safeword doesn't pause and cancel the Call after matching");
@@ -403,7 +403,9 @@ public sealed class SafewordPauseTests
             Assert.True(start >= 0, "the safeword verb not found");
             var end = plugin.IndexOf("PluginChat.PrintError(ChatGui, \"Unknown command.", start, StringComparison.Ordinal);
             Assert.True(end > start, "end of the safeword verb not found");
-            return plugin[start..end];
+            Assert.Contains("UseSafeword(rest);", plugin[start..end]);
+            // The verb uses the safeword through the same method as the Safeword window.
+            return plugin[start..end] + ProfileSettingsTests.MethodBody(plugin, "    private void UseSafeword(string word)");
         }
     }
 

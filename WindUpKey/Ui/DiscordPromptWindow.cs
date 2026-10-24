@@ -7,7 +7,7 @@ namespace WindUpKey.Ui;
 
 /// <summary>
 /// A one-time note inviting players to the Discord, shown once after a login (any character), then never again: the
-/// Discord button stays on the General tab.
+/// Discord button stays on the main window.
 /// </summary>
 public sealed class DiscordPromptWindow : Window
 {
@@ -73,6 +73,6 @@ public sealed class DiscordPromptWindow : Window
             IsOpen = false;
         }
 
-        ImGui.TextDisabled("The Discord button is also on the General tab.");
+        ImGui.TextDisabled("The Discord button is also on the main window.");
     }
 }

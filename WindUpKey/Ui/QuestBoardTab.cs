@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Interface.Utility;
 using Dalamud.Plugin.Services;
@@ -229,14 +230,44 @@ public sealed class QuestBoardTab
     private void DrawSlot(QuestSlot slot)
     {
         var label = SlotLabel(slot);
-        var box = slot.Completed ? "[x]" : "[ ]";
+        DrawCheckBox(slot.Completed);
+        ImGui.SameLine();
         if (slot.Completed)
-            ImGui.TextColored(DoneColor, $"{box} {label}");
+            ImGui.TextColored(DoneColor, label);
         else
-            ImGui.TextUnformatted($"{box} {label}");
+            ImGui.TextUnformatted(label);
 
         ImGui.SameLine();
         ImGui.TextDisabled(RewardLabel(slot));
+    }
+
+    /// <summary>
+    /// A check box the height of a line of text: an empty outlined box, or a filled one with a check mark once done. Only
+    /// drawn (the game marks a quest done, not the player).
+    /// </summary>
+    private static void DrawCheckBox(bool done)
+    {
+        var size = ImGui.GetTextLineHeight();
+        var min = ImGui.GetCursorScreenPos() + new Vector2(0, 1);
+        var max = min + new Vector2(size - 2, size - 2);
+        var drawList = ImGui.GetWindowDrawList();
+        var rounding = 3 * ImGuiHelpers.GlobalScale;
+        if (done)
+        {
+            drawList.AddRectFilled(min, max, ImGui.GetColorU32(DoneColor), rounding);
+            var check = FontAwesomeIcon.Check.ToIconString();
+            ImGui.PushFont(UiBuilder.IconFont);
+            var fontSize = (size - 2) * 0.7f;
+            var glyph = ImGui.CalcTextSize(check) * (fontSize / ImGui.GetFontSize());
+            drawList.AddText(UiBuilder.IconFont, fontSize, (min + max - glyph) / 2, ImGui.GetColorU32(new Vector4(0.08f, 0.08f, 0.08f, 1f)), check);
+            ImGui.PopFont();
+        }
+        else
+        {
+            drawList.AddRect(min, max, ImGui.GetColorU32(ImGuiCol.TextDisabled), rounding, ImDrawFlags.None, 1.5f * ImGuiHelpers.GlobalScale);
+        }
+
+        ImGui.Dummy(new Vector2(size, size));
     }
 
     private string SlotLabel(QuestSlot slot) => slot.Kind switch
@@ -312,8 +343,8 @@ public sealed class QuestBoardTab
     }
 
     /// <summary>
-    /// The Information pop-out: how the board works, in turns. Drawn every frame by the config window (on any tab), so it
-    /// stays open while the player looks around. It never explains the hidden bonuses, the unsynced rules or the picks.
+    /// The Information pop-out: how the board works, in turns. Drawn every frame by the Quests window, so it stays open
+    /// beside the board while the player looks around (and comes back with it). It never explains the hidden bonuses, the unsynced rules or the picks.
     /// </summary>
     public void DrawInfoWindow()
     {

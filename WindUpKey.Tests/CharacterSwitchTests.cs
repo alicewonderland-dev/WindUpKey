@@ -283,7 +283,7 @@ public sealed class CharacterSwitchTests
         var role = draw.IndexOf("if (!_config.HasChosenRole)", StringComparison.Ordinal);
         Assert.True(drop >= 0 && role > drop, "Draw doesn't drop stale confirms before anything else");
 
-        var stale = ProfileSettingsTests.MethodBody(window, "    private void DropStaleConfirms()");
+        var stale = ProfileSettingsTests.MethodBody(window, "    public void DropStaleConfirms()");
         Assert.Contains("if (_hardcoreConfirm is not null && !_hardcoreConfirm.StillValid(_config.ActiveContentId, _config.IsDoll, _ => true))\n            _hardcoreConfirm = null;", stale);
     }
 
@@ -291,7 +291,7 @@ public sealed class CharacterSwitchTests
     public void OwnerConfirmError_IsDismissedOnACharacterChange_ATabChange_OrClosing()
     {
         var window = ProfileSettingsTests.PluginSource(Path.Combine("Ui", "ConfigWindow.cs"));
-        var stale = ProfileSettingsTests.MethodBody(window, "    private void DropStaleConfirms()");
+        var stale = ProfileSettingsTests.MethodBody(window, "    public void DropStaleConfirms()");
         Assert.Contains("&& !string.Equals(_ownerConfirmErrorContentId, _config.ActiveContentId, StringComparison.Ordinal))\n            _ownerConfirmError = null;", stale);
 
         var confirm = ProfileSettingsTests.MethodBody(window, "    private void DrawOwnerGrantConfirm()");
@@ -299,10 +299,15 @@ public sealed class CharacterSwitchTests
         // Confirm and Cancel both dismiss it.
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(confirm, @"_ownerConfirm = null;\n            _ownerConfirmError = null;").Count);
 
-        var draw = ProfileSettingsTests.MethodBody(window, "    public override void Draw()");
-        Assert.Contains("            DrawPairingTab();\n            pairingDrawn = true;", draw);
-        Assert.Contains("        if (!pairingDrawn)\n            _ownerConfirmError = null;", draw);
-        Assert.Contains("_ownerConfirmError = null;", ProfileSettingsTests.MethodBody(window, "    public override void OnClose()"));
+        // The refusal belongs to the Pairs window (where the confirm is drawn): closing it dismisses the refusal, and it
+        // drops stale confirms every frame before drawing.
+        Assert.Contains("    public void OnPairsClosed() => _ownerConfirmError = null;", window);
+        var pairs = ProfileSettingsTests.PluginSource(Path.Combine("Ui", "PairsWindow.cs"));
+        Assert.Contains("    public override void OnClose() => _host.OnPairsClosed();", pairs);
+        var draw = ProfileSettingsTests.MethodBody(pairs, "    public override void Draw()");
+        Assert.True(
+            draw.IndexOf("_host.DropStaleConfirms();", StringComparison.Ordinal) is >= 0 and var drop
+            && draw.IndexOf("_host.DrawPairsContent();", StringComparison.Ordinal) > drop);
     }
 
     // ---------- 06-A9: a queued message from a superseded connection ----------

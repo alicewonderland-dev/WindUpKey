@@ -16,7 +16,7 @@ public static class ProbeJudge
     /// <summary>What to do when a probe was accepted as this character (04-D5).</summary>
     public const string RecoverySteps =
         "A self-test probe was accepted as this character, so the relay may now hold a wrong identity for it. " +
-        "Ask the relay operator to run reset-account for this pairing key, then press Reconnect (Pairing tab).";
+        "Ask the relay operator to run reset-account for this pairing key, then press Reconnect (Settings, Connection).";
 
     /// <summary>The clock skew over which <c>X-clock</c> warns (04-D4).</summary>
     public static readonly TimeSpan MaxClockSkew = TimeSpan.FromMinutes(2);

@@ -88,7 +88,7 @@ public sealed class RelayClient : IDisposable
     /// <summary>The partner (a doll) is on vacation: nothing was spent.</summary>
     public const string PartnerOnVacationFailure = "That doll is on vacation.";
     /// <summary>This doll is on vacation: winding, unwinding, repairs and gifts wait until they're back.</summary>
-    public const string SelfOnVacationFailure = "You're on vacation. End it on the General tab to do that.";
+    public const string SelfOnVacationFailure = "You're on vacation. End it in Settings, under Vacation, to do that.";
     public static readonly TimeSpan WindRequestCooldown = TimeSpan.FromHours(1);
     private static readonly TimeSpan PresenceThrottle = TimeSpan.FromSeconds(10);
 
@@ -520,9 +520,17 @@ public sealed class RelayClient : IDisposable
             return _ownerSettingsByDollKey.TryGetValue(key, out var snap) ? CloneOwnerSettings(snap) : null;
     }
 
-    /// <summary>Throttled presence refresh while the pairing tab is visible.</summary>
-    public void EnsurePresenceFresh(string partnerKey)
+    /// <summary>
+    /// How often a window that stays open (the main window, the Wind window's list) asks each partner's presence. Each
+    /// query costs the sender, and an online partner's answer costs them, a message from the relay's rate limit.
+    /// </summary>
+    public static readonly TimeSpan IdlePresenceAge = TimeSpan.FromMinutes(2);
+
+    /// <summary>Throttled presence refresh, from the windows that list partners.</summary>
+    /// <param name="maxAge">How old the last query may be before another is sent (never under 10 s).</param>
+    public void EnsurePresenceFresh(string partnerKey, TimeSpan? maxAge = null)
     {
+        var throttle = maxAge is { } age && age > PresenceThrottle ? age : PresenceThrottle;
         var key = PairingKeyUtil.Normalize(partnerKey);
         if (!PairingKeyUtil.IsValid(key))
             return;
@@ -537,7 +545,7 @@ public sealed class RelayClient : IDisposable
         var now = DateTime.UtcNow;
         lock (_presenceLock)
         {
-            if (_presenceLastQueryUtc.TryGetValue(key, out var last) && now - last < PresenceThrottle)
+            if (_presenceLastQueryUtc.TryGetValue(key, out var last) && now - last < throttle)
                 return;
             _presenceLastQueryUtc[key] = now;
         }
@@ -2897,6 +2905,10 @@ public sealed class RelayClient : IDisposable
             return;
 
         var percent = Math.Clamp(payload.PercentRemaining, 0, 100);
+        // A request carries only the percentage, which says nothing either way about overwind or breaking (a raised max
+        // lowers a broken doll's percentage; a recovered one can still read 100%). So it is remembered as the percentage
+        // alone: "broken" is only ever shown from a wind result, which carries it, and Repair is always offered.
+        RememberPartnerWind(fromKey, percent, overwound: false, broken: false);
         var label = GetPairMessageLabel(fromKey);
         PluginChat.Print(
             _chat,
@@ -2929,6 +2941,11 @@ public sealed class RelayClient : IDisposable
             wasUnwind = _pendingUnwinds.Remove(payload.RequestId);
             wasRepair = _pendingRepairs.Remove(payload.RequestId);
         }
+
+        // What the Wind window shows for this doll: a percentage, never a time (a doll about herself never gets here).
+        // Only while still paired: a result arriving after an unpair must not bring back the entry the unpair cleared.
+        if (payload.Percent is { } known && !aboutSelf && _consent.IsPairedByKey(fromKey))
+            RememberPartnerWind(fromKey, known, payload.Overwound, payload.Broken);
 
         var label = GetPairMessageLabel(fromKey);
         if (wasUnwind)
@@ -3404,6 +3421,26 @@ public sealed class RelayClient : IDisposable
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Each partner doll's wind as last heard (a wind or repair result, or their wind request): a percentage and flags,
+    /// never a time. In memory only, for the Wind window; it is as old as <see cref="PartnerWindView.SeenAt"/> says.
+    /// </summary>
+    private readonly Dictionary<string, PartnerWindView> _partnerWind = new(StringComparer.Ordinal);
+
+    public PartnerWindView? LastKnownWind(string partnerKey)
+    {
+        lock (_presenceLock)
+            return _partnerWind.TryGetValue(PairingKeyUtil.Normalize(partnerKey), out var view) ? view : null;
+    }
+
+    private void RememberPartnerWind(string peerKey, int percent, bool overwound, bool broken)
+    {
+        if (!PairingKeyUtil.IsValid(peerKey))
+            return;
+        lock (_presenceLock)
+            _partnerWind[peerKey] = new PartnerWindView(Math.Clamp(percent, 0, 100), overwound, broken, DateTimeOffset.UtcNow);
     }
 
     /// <summary>Partners last known to be dolls on vacation (from presence answers; in memory only).</summary>
@@ -4213,6 +4250,8 @@ public sealed class RelayClient : IDisposable
         {
             _presenceByKey.Remove(peerKey);
             _presenceLastQueryUtc.Remove(peerKey);
+            _partnerWind.Remove(peerKey);
+            _partnersOnVacation.Remove(peerKey);
         }
     }
 
@@ -4222,6 +4261,9 @@ public sealed class RelayClient : IDisposable
         {
             _presenceByKey.Clear();
             _presenceLastQueryUtc.Clear();
+            // Another character's partners: their wind and vacation as last heard aren't this one's.
+            _partnerWind.Clear();
+            _partnersOnVacation.Clear();
         }
     }
 
@@ -4428,3 +4470,6 @@ public sealed class RelayClient : IDisposable
 
 /// <summary>A doll's unwind quote, for the confirm popup: who, their label, the cost, and whether it is free (owner).</summary>
 public sealed record UnwindQuoteView(string DollKey, string Label, int Springs, bool Free);
+
+/// <summary>A partner doll's wind as last heard: a percentage of normal wind (overwind reads 100), the flags, and when.</summary>
+public readonly record struct PartnerWindView(int Percent, bool Overwound, bool Broken, DateTimeOffset SeenAt);

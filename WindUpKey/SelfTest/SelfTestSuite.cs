@@ -87,11 +87,11 @@ public sealed class SelfTestSuite(ISelfTestHost host, IProbeConnector connector,
     };
 
     private const string ReconnectRecovery =
-        "Press Reconnect in the Pairing tab, or log out and back in. The self-test's hold is memory-only and has been cleared.";
+        "Press Reconnect in Settings, under Connection, or log out and back in. The self-test's hold is memory-only and has been cleared.";
 
     private const string TakeoverRecovery =
         "The self-test did not reconnect, so it took nothing back from another PC. If this PC should hold the key, press " +
-        "Reconnect in the Pairing tab yourself. The self-test's hold is memory-only and has been cleared.";
+        "Reconnect in Settings, under Connection, yourself. The self-test's hold is memory-only and has been cleared.";
 
     private readonly SelfTestTimings _t = timings ?? new SelfTestTimings();
 

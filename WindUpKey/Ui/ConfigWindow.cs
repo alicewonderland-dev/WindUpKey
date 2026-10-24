@@ -1,22 +1,42 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Objects.SubKinds;
+using Dalamud.Interface.Utility;
 using Dalamud.Interface.Windowing;
+using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using WindUpKey.Protocol;
 using WindUpKey.Services;
 
 namespace WindUpKey.Ui;
 
+/// <summary>The settings window's sections, in sidebar order.</summary>
+public enum SettingsSection
+{
+    Timer,
+    Vacation,
+    Safeword,
+    Moodles,
+    Audio,
+    Connection,
+    Role,
+    Debug,
+}
+
+/// <summary>
+/// The Settings window (sidebar sections, as GagSpeak's settings). It also hosts the pairing and safeword drawing that the
+/// Pairs and Safeword windows call, so that code (and its confirms) lives in one place.
+/// </summary>
 public sealed class ConfigWindow : Window, IDisposable
 {
     private readonly Configuration _config;
     private readonly RelayClient _relay;
     private readonly WindTimerService _timer;
-    private readonly QuestBoardTab _questTab;
+    private readonly IDalamudPluginInterface _pluginInterface;
     private readonly ITargetManager _targets;
     private readonly GameCommandRunner _commands;
     private readonly MoodlesWindStatusService _moodlesStatus;
@@ -57,16 +77,17 @@ public sealed class ConfigWindow : Window, IDisposable
     private string? _pairOwnerKey;
     private Vector2 _pairOwnerPos;
     private static readonly Vector2 PairSettingsWindowOffset = new(12f, 12f);
-    private static readonly int[] WindSpringPresets = [1, 2, 3];
-
-    /// <summary>How many springs each partner's Give button sends, while editing (by partner key).</summary>
-    private readonly Dictionary<string, int> _springGiftDrafts = new(StringComparer.Ordinal);
 
     /// <summary>Max wind hours while typed, committed when the edit ends (null when not editing).</summary>
     private int? _maxHoursDraft;
 
     /// <summary>The vacation confirm is open.</summary>
     private bool _vacationConfirm;
+
+    /// <summary>The section the sidebar has selected.</summary>
+    private SettingsSection _section = SettingsSection.Timer;
+
+    private const string GitHubUrl = "https://github.com/alicewonderland-dev/WindUpKey";
 
     private sealed class OwnerSettingsDraft
     {
@@ -86,7 +107,7 @@ public sealed class ConfigWindow : Window, IDisposable
         Configuration config,
         RelayClient relay,
         WindTimerService timer,
-        QuestBoardService quests,
+        IDalamudPluginInterface pluginInterface,
         ITargetManager targets,
         GameCommandRunner commands,
         MoodlesWindStatusService moodlesStatus,
@@ -94,12 +115,12 @@ public sealed class ConfigWindow : Window, IDisposable
         ChangelogWindow changelogWindow,
         ITextureProvider textures,
         string pluginVersion)
-        : base("Wind-Up Key###WindUpKeyConfig")
+        : base("Wind-Up Key Settings###WindUpKeyConfig")
     {
         _config = config;
         _relay = relay;
         _timer = timer;
-        _questTab = new QuestBoardTab(quests, textures);
+        _pluginInterface = pluginInterface;
         _targets = targets;
         _commands = commands;
         _moodlesStatus = moodlesStatus;
@@ -107,8 +128,16 @@ public sealed class ConfigWindow : Window, IDisposable
         _changelogWindow = changelogWindow;
         _textures = textures;
         _pluginVersion = pluginVersion;
-        Size = new Vector2(520, 480);
+        Size = new Vector2(620, 460);
         SizeCondition = ImGuiCond.FirstUseEver;
+    }
+
+    /// <summary>Opens the window at <paramref name="section"/> (the main window's Vacation button, the Safeword window's link).</summary>
+    public void Open(SettingsSection section)
+    {
+        _section = section;
+        IsOpen = true;
+        BringToFront();
     }
 
     public void Dispose()
@@ -118,8 +147,6 @@ public sealed class ConfigWindow : Window, IDisposable
     public override void Draw()
     {
         DropStaleConfirms();
-        // The quest board's Information pop-out stays open on any tab.
-        _questTab.DrawInfoWindow();
 
         if (!_config.HasChosenRole)
         {
@@ -127,70 +154,160 @@ public sealed class ConfigWindow : Window, IDisposable
             return;
         }
 
+        SyncDebugSelfOwnership();
+        DrawSettingsHeader();
+        ImGui.Separator();
+
+        var sections = VisibleSections();
+        if (!sections.Contains(_section))
+            _section = sections[0];
+
+        if (ImGui.BeginChild("##settings_nav", new Vector2(170 * ImGuiHelpers.GlobalScale, 0), true))
+        {
+            foreach (var section in sections)
+            {
+                if (ImGui.Selectable($"{SectionLabel(section)}##nav_{section}", _section == section))
+                    _section = section;
+            }
+        }
+
+        ImGui.EndChild();
+        ImGui.SameLine();
+        if (ImGui.BeginChild("##settings_body", Vector2.Zero, false))
+        {
+            switch (_section)
+            {
+                case SettingsSection.Timer:
+                    DrawTimerSection();
+                    break;
+                case SettingsSection.Vacation:
+                    DrawVacation();
+                    break;
+                case SettingsSection.Safeword:
+                    DrawSafewordTab();
+                    break;
+                case SettingsSection.Moodles:
+                    DrawMoodlesSection();
+                    break;
+                case SettingsSection.Audio:
+                    DrawAudioSection();
+                    break;
+                case SettingsSection.Connection:
+                    DrawConnectionSection();
+                    break;
+                case SettingsSection.Role:
+                    DrawRoleSection();
+                    break;
+                case SettingsSection.Debug:
+                    DrawDebugTab();
+                    break;
+            }
+        }
+
+        ImGui.EndChild();
+    }
+
+    /// <summary>The sections this character sees: the doll's own ones only for dolls, Debug only in debug mode.</summary>
+    private List<SettingsSection> VisibleSections()
+    {
+        var sections = new List<SettingsSection>();
+        if (_config.IsDoll)
+            sections.AddRange([SettingsSection.Timer, SettingsSection.Vacation, SettingsSection.Safeword]);
+        sections.AddRange([SettingsSection.Moodles, SettingsSection.Audio, SettingsSection.Connection, SettingsSection.Role]);
         if (_config.IsDebugEnabled)
-            _relay.SyncDebugSelfOwnership();
+            sections.Add(SettingsSection.Debug);
+        return sections;
+    }
 
-        if (!ImGui.BeginTabBar("WindUpKeySettingsTabs"))
-            return;
+    private static string SectionLabel(SettingsSection section) => section switch
+    {
+        SettingsSection.Timer => "Timer and emote",
+        SettingsSection.Vacation => "Vacation",
+        SettingsSection.Safeword => "Safeword",
+        SettingsSection.Moodles => "Moodles",
+        SettingsSection.Audio => "Audio and messages",
+        SettingsSection.Connection => "Connection",
+        SettingsSection.Role => "Role",
+        _ => "Debug",
+    };
 
-        if (ImGui.BeginTabItem("General"))
+    /// <summary>The optional plugins as status pills, and the links (Discord, changelog, GitHub).</summary>
+    private void DrawSettingsHeader()
+    {
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("Optional:");
+        foreach (var (internalName, label) in OptionalPlugins)
         {
-            DrawGeneralTab();
-            ImGui.EndTabItem();
+            ImGui.SameLine();
+            var loaded = IsPluginLoaded(internalName);
+            ImGui.TextColored(loaded ? new Vector4(0.35f, 0.92f, 0.45f, 1f) : new Vector4(0.75f, 0.35f, 0.35f, 1f), $"● {label}");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(loaded ? $"{label} is installed." : $"{label} isn't installed or isn't loaded.");
         }
 
-        var pairingDrawn = false;
-        if (ImGui.BeginTabItem("Pairing"))
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("Links:");
+        ImGui.SameLine();
+        DiscordLink.IconButton(_textures);
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Changelog"))
+            _changelogWindow.IsOpen = true;
+        ImGui.SameLine();
+        if (ImGui.SmallButton("GitHub"))
+            Dalamud.Utility.Util.OpenLink(GitHubUrl);
+        ImGui.SameLine();
+        ImGui.TextDisabled($"Version {_pluginVersion}");
+    }
+
+    /// <summary>The plugins Wind-Up Key works with: Moodles for the wind Moodle, Lifestream and vnavmesh for Calls.</summary>
+    private static readonly (string InternalName, string Label)[] OptionalPlugins =
+        [("Moodles", "Moodles"), ("Lifestream", "Lifestream"), ("vnavmesh", "vnavmesh")];
+
+    /// <summary>Which optional plugins are loaded, read every few seconds rather than every frame (the list is long).</summary>
+    private HashSet<string> _loadedOptional = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _loadedOptionalReadAt = DateTime.MinValue;
+
+    private bool IsPluginLoaded(string internalName)
+    {
+        var now = DateTime.UtcNow;
+        if (now - _loadedOptionalReadAt >= TimeSpan.FromSeconds(5))
         {
-            DrawPairingTab();
-            pairingDrawn = true;
-            ImGui.EndTabItem();
+            _loadedOptionalReadAt = now;
+            try
+            {
+                _loadedOptional = _pluginInterface.InstalledPlugins
+                    .Where(p => p.IsLoaded && OptionalPlugins.Any(o => string.Equals(o.InternalName, p.InternalName, StringComparison.OrdinalIgnoreCase)))
+                    .Select(p => p.InternalName)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                _loadedOptional = new(StringComparer.OrdinalIgnoreCase);
+            }
         }
 
-        if (_config.IsDoll && ImGui.BeginTabItem("Safeword"))
-        {
-            DrawSafewordTab();
-            ImGui.EndTabItem();
-        }
-
-        if (_config.HasChosenRole && ImGui.BeginTabItem("Quests"))
-        {
-            _questTab.Draw();
-            ImGui.EndTabItem();
-        }
-
-        if (ImGui.BeginTabItem("About"))
-        {
-            DrawAboutTab();
-            ImGui.EndTabItem();
-        }
-
-        // Debug is intentionally last so conditional tabs never appear after it.
-        if (_config.IsDebugEnabled && ImGui.BeginTabItem("Debug"))
-        {
-            DrawDebugTab();
-            ImGui.EndTabItem();
-        }
-
-        ImGui.EndTabBar();
-
-        // 06-A12: the ownership confirm's refusal belongs to the Pairing tab: another tab dismisses it.
-        if (!pairingDrawn)
-            _ownerConfirmError = null;
+        return _loadedOptional.Contains(internalName);
     }
 
     public override void OnClose()
     {
-        // 06-A12: closing the window dismisses the ownership confirm's refusal too.
-        _ownerConfirmError = null;
     }
 
     /// <summary>
-    /// 06-A12: every frame, whichever tab is drawn. The Hardcore confirm is dropped once it no longer belongs to the
-    /// active character or she is no longer a doll (the Safeword tab, which draws it, is hidden then), and the ownership
-    /// confirm's refusal once another character is active.
+    /// Debug mode, each frame Settings or Pairs is drawn: repairs the self-pair's ownership so its Owner button shows.
     /// </summary>
-    private void DropStaleConfirms()
+    public void SyncDebugSelfOwnership()
+    {
+        if (_config.IsDebugEnabled)
+            _relay.SyncDebugSelfOwnership();
+    }
+
+    /// <summary>
+    /// 06-A12: every frame, by every window that draws these confirms (Settings, Pairs). The Hardcore confirm is
+    /// dropped once it no longer belongs to the active character or she is no longer a doll (the Safeword section, which
+    /// draws it, is hidden then), and the ownership confirm's refusal once another character is active.
+    /// </summary>
+    public void DropStaleConfirms()
     {
         if (_hardcoreConfirm is not null && !_hardcoreConfirm.StillValid(_config.ActiveContentId, _config.IsDoll, _ => true))
             _hardcoreConfirm = null;
@@ -200,23 +317,11 @@ public sealed class ConfigWindow : Window, IDisposable
             _ownerConfirmError = null;
     }
 
-    private void DrawAboutTab()
-    {
-        ImGui.Spacing();
-        ImGui.TextUnformatted("Wind-Up Key");
-        ImGui.TextDisabled($"Version {_pluginVersion}");
-        ImGui.Separator();
-        ImGui.Spacing();
-        ImGui.TextWrapped(
-            "A (hopefully) simple plugin. Become the wind-up doll of your dreams, " +
-            "or assist dolls by helping to wind them.");
-        ImGui.Spacing();
+    /// <summary>06-A12: the Pairs window closed: the ownership confirm's refusal belongs to it, so it is dismissed.</summary>
+    public void OnPairsClosed() => _ownerConfirmError = null;
 
-        if (ImGui.Button("Change Log"))
-            _changelogWindow.IsOpen = true;
-    }
-
-    private void DrawRoleSetup()
+    /// <summary>The first-time role picker (the main window shows it until a role is chosen).</summary>
+    public void DrawRoleSetup()
     {
         if (_config.HardcoreMode)
         {
@@ -279,6 +384,8 @@ public sealed class ConfigWindow : Window, IDisposable
     private void DrawVacation()
     {
         ImGui.Spacing();
+        ImGui.TextUnformatted("Vacation");
+        ImGui.Separator();
         if (_timer.IsOnVacation)
         {
             var since = _config.VacationSinceUtc?.ToLocalTime().ToString("d MMM yyyy");
@@ -332,85 +439,75 @@ public sealed class ConfigWindow : Window, IDisposable
             _vacationConfirm = false;
     }
 
-    private void DrawGeneralTab()
+    /// <summary>The doll's timer: max wind hours, break recovery, and the unwound emote (an owner can lock them).</summary>
+    private void DrawTimerSection()
     {
         ImGui.Spacing();
-        var right = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
-        ImGui.AlignTextToFramePadding();
-        ImGui.TextUnformatted("Connection");
-        ImGui.SameLine(right - ImGui.GetFrameHeight());
-        DiscordLink.IconButton(_textures);
+        ImGui.TextUnformatted("Timer");
         ImGui.Separator();
 
-        ImGui.TextUnformatted(_relay.IsConnected ? "Status: Online" : "Status: Offline");
-        if (!_relay.IsConnected && !string.IsNullOrEmpty(_relay.LastStatus))
-            ImGui.TextWrapped(_relay.LastStatus);
+        if (_config.OwnerSettingsLocked)
+            ImGui.TextWrapped("An owner has locked max hours and unwound emote settings.");
 
-        if (ImGui.Button("Reconnect"))
+        var settingsLocked = _config.OwnerSettingsLocked;
+        if (settingsLocked)
+            ImGui.BeginDisabled();
+
+        // 06-A4: saved when committed (Enter, focus leaving, or a +/- step), so a crash can't lose it.
+        // Typed digits are held here until the edit ends: a part-typed value (1, then 10…) read as the max would break
+        // the doll on a partner's wind or cap quest wind low.
+        if (settingsLocked)
+            _maxHoursDraft = null;
+        var maxHours = _maxHoursDraft ?? (int)Math.Round(_config.MaxWindHours);
+        ImGui.SetNextItemWidth(80);
+        if (ImGui.InputInt("Max wind hours", ref maxHours))
         {
-            _config.ApplyRelayDefaults();
-            _relay.Start();
+            _maxHoursDraft = Math.Clamp(maxHours, 1, 168);
+            if (!ImGui.IsItemActive())
+                CommitMaxWindHours();
         }
 
+        if (_maxHoursDraft is not null && !ImGui.IsItemActive())
+            CommitMaxWindHours();
+
+        // How long a break by careless winding lasts before the doll recovers by itself.
+        var breakMinutes = _config.BrokenRecoveryMinutes;
+        ImGui.SetNextItemWidth(80);
+        if (ImGui.InputInt("Break recovery (minutes)", ref breakMinutes))
+        {
+            _config.BrokenRecoveryMinutes = WindLayers.ClampRecoveryMinutes(breakMinutes);
+            if (!ImGui.IsItemActive())
+                _config.Save();
+        }
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            _config.Save();
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Unwound emote");
+        ImGui.Separator();
+        var autoSit = _config.AutoGroundSit;
+        if (ImGui.Checkbox("Play emote when unwound", ref autoSit))
+        {
+            _config.AutoGroundSit = autoSit;
+            _config.Save();
+        }
+
+        if (autoSit)
+            DrawLockEmoteCombo();
+
+        if (settingsLocked)
+            ImGui.EndDisabled();
+    }
+
+    /// <summary>The wind charge Moodle (dolls) and the Moodles automation re-apply (everyone).</summary>
+    private void DrawMoodlesSection()
+    {
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Moodles");
+        ImGui.Separator();
         if (_config.IsDoll)
         {
-            ImGui.Spacing();
-            ImGui.TextUnformatted("Timer");
-            ImGui.Separator();
-
-            if (_config.OwnerSettingsLocked)
-                ImGui.TextWrapped("An owner has locked max hours and unwound emote settings.");
-
-            var settingsLocked = _config.OwnerSettingsLocked;
-            if (settingsLocked)
-                ImGui.BeginDisabled();
-
-            // 06-A4: saved when committed (Enter, focus leaving, or a +/- step), so a crash can't lose it.
-            // Typed digits are held here until the edit ends: a part-typed value (1, then 10…) read as the max would break
-            // the doll on a partner's wind or cap quest wind low.
-            if (settingsLocked)
-                _maxHoursDraft = null;
-            var maxHours = _maxHoursDraft ?? (int)Math.Round(_config.MaxWindHours);
-            ImGui.SetNextItemWidth(80);
-            if (ImGui.InputInt("Max wind hours", ref maxHours))
-            {
-                _maxHoursDraft = Math.Clamp(maxHours, 1, 168);
-                if (!ImGui.IsItemActive())
-                    CommitMaxWindHours();
-            }
-
-            if (_maxHoursDraft is not null && !ImGui.IsItemActive())
-                CommitMaxWindHours();
-
-            // How long a break by careless winding lasts before the doll recovers by itself.
-            var breakMinutes = _config.BrokenRecoveryMinutes;
-            ImGui.SetNextItemWidth(80);
-            if (ImGui.InputInt("Break recovery (minutes)", ref breakMinutes))
-            {
-                _config.BrokenRecoveryMinutes = WindLayers.ClampRecoveryMinutes(breakMinutes);
-                if (!ImGui.IsItemActive())
-                    _config.Save();
-            }
-
-            if (ImGui.IsItemDeactivatedAfterEdit())
-                _config.Save();
-
-            var autoSit = _config.AutoGroundSit;
-            if (ImGui.Checkbox("Play emote when unwound", ref autoSit))
-            {
-                _config.AutoGroundSit = autoSit;
-                _config.Save();
-            }
-
-            if (autoSit)
-                DrawLockEmoteCombo();
-
-            if (settingsLocked)
-                ImGui.EndDisabled();
-
-            // Vacation is the doll's own choice: never locked by an owner or Hardcore.
-            DrawVacation();
-
             var moodlesOn = _config.MoodlesStatusEnabled;
             if (ImGui.Checkbox("Show wind charge as Moodle (requires Moodles)", ref moodlesOn))
             {
@@ -422,26 +519,8 @@ public sealed class ConfigWindow : Window, IDisposable
             }
 
             ImGui.Spacing();
-            if (ImGui.Button("Open messages file"))
-            {
-                try
-                {
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = _lowWindMessagesPath,
-                        UseShellExecute = true,
-                    });
-                }
-                catch
-                {
-                    // Ignore launch failures.
-                }
-            }
         }
 
-        ImGui.Spacing();
-        ImGui.TextUnformatted("Moodles");
-        ImGui.Separator();
         var reapplyAutomation = _config.ReapplyMoodlesAutomationOnAreaChange;
         if (ImGui.Checkbox("Re-apply Moodles automation after area changes", ref reapplyAutomation))
         {
@@ -450,7 +529,11 @@ public sealed class ConfigWindow : Window, IDisposable
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Moodles only runs automation on login and job change.\nThis also runs it after every zone change, so automation moodles you removed come back.");
+    }
 
+    /// <summary>Sound effects, and the doll's low-wind and Moodle text file.</summary>
+    private void DrawAudioSection()
+    {
         ImGui.Spacing();
         ImGui.TextUnformatted("Audio");
         ImGui.Separator();
@@ -461,13 +544,64 @@ public sealed class ConfigWindow : Window, IDisposable
             _config.Save();
         }
 
+        if (!_config.IsDoll)
+            return;
+
         ImGui.Spacing();
-        if (ImGui.Button("Save"))
-            _config.Save();
+        ImGui.TextUnformatted("Messages");
+        ImGui.Separator();
+        ImGui.TextWrapped("The doll's low-wind lines and wind Moodle text can be changed in a messages file.");
+        if (ImGui.Button("Open messages file"))
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = _lowWindMessagesPath,
+                    UseShellExecute = true,
+                });
+            }
+            catch
+            {
+                // Ignore launch failures.
+            }
+        }
+    }
+
+    /// <summary>The relay connection, and this character's relay identity.</summary>
+    private void DrawConnectionSection()
+    {
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Connection");
+        ImGui.Separator();
+
+        ImGui.TextUnformatted(_relay.IsConnected ? "Status: Online" : "Status: Offline");
+        if (!_relay.IsConnected && !string.IsNullOrEmpty(_relay.LastStatus))
+            ImGui.TextWrapped(_relay.LastStatus);
+
+        if (ImGui.Button("Reconnect"))
+            Reconnect();
+
+        DrawRelayIdentitySection();
+    }
+
+    /// <summary>The Reconnect button's path: compiled defaults, then Start (the main window's connection pill uses it too).</summary>
+    public void Reconnect()
+    {
+        _config.ApplyRelayDefaults();
+        _relay.Start();
+    }
+
+    /// <summary>Change role (not in Hardcore), and debug mode for the debug owner.</summary>
+    private void DrawRoleSection()
+    {
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Role");
+        ImGui.Separator();
+        ImGui.TextUnformatted(_config.IsDoll ? "You're a doll." : "You're a winder.");
 
         if (!_config.HardcoreMode)
         {
-            ImGui.SameLine();
             if (ImGui.Button("Change role"))
             {
                 if (_config.IsDoll)
@@ -526,7 +660,11 @@ public sealed class ConfigWindow : Window, IDisposable
             missingName: view.Preview);
     }
 
-    private void DrawPairingTab()
+    /// <summary>
+    /// The Pairs window's content: this character's pairing key, adding a partner, pending requests, and each partner's
+    /// labels, permissions and owner settings, with Unpair. Winding lives in the Wind window.
+    /// </summary>
+    public void DrawPairsContent()
     {
         ImGui.Spacing();
         ImGui.TextUnformatted("Your pairing key");
@@ -552,20 +690,6 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.PopStyleColor(4);
             ImGui.SetWindowFontScale(1f);
         }
-
-        // Spare springs: the wind currency, held by the relay.
-        ImGui.Spacing();
-        ImGui.TextUnformatted(_relay.SpringBalance is { } springs
-            ? $"Spare springs: {springs} / {_relay.SpringCap}"
-            : "Spare springs: …");
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "Each spare spring winds a partner for 8 hours (12 from a doll's owner). You get free springs on your " +
-                "first login each day, and more from the quest board. You can't wind yourself with them.");
-        }
-
-        DrawRelayIdentitySection();
 
         ImGui.Spacing();
         ImGui.SetNextItemWidth(120);
@@ -644,57 +768,8 @@ public sealed class ConfigWindow : Window, IDisposable
                         }
                     }
 
-                    ImGui.TextUnformatted("Wind");
-                    ImGui.SameLine();
                     if (!hasValidPartnerKey)
                         ImGui.BeginDisabled();
-                    DrawWindSpringButtons(
-                        springs => _relay.Forget(_relay.SendWindByKeyAsync(actionPartnerKey, springs), "wind"),
-                        smallButtons: true);
-
-                    // Unwinding asks the doll for its cost first; the confirm popup shows it.
-                    if (ImGui.SmallButton("Unwind"))
-                        _relay.Forget(_relay.SendUnwindByKeyAsync(actionPartnerKey), "unwind");
-                    if (ImGui.IsItemHovered())
-                        ImGui.SetTooltip("Costs a spring per 8 hours of their wind (free for their owner). You'll see the cost first.");
-
-                    ImGui.SameLine();
-                    if (ImGui.SmallButton("Repair"))
-                        _relay.Forget(_relay.SendRepairAsync(actionPartnerKey), "repair");
-                    if (ImGui.IsItemHovered())
-                        ImGui.SetTooltip("Repair a doll who was broken by being wound too far. Free.");
-
-                    ImGui.TextUnformatted("Give springs");
-                    ImGui.SameLine();
-                    var gift = _springGiftDrafts.TryGetValue(actionPartnerKey, out var draftGift) ? draftGift : 1;
-                    ImGui.SetNextItemWidth(70);
-                    if (ImGui.InputInt("##gift", ref gift))
-                        _springGiftDrafts[actionPartnerKey] = Math.Clamp(gift, 1, SpringRules.WinderCap);
-                    ImGui.SameLine();
-                    if (ImGui.SmallButton("Give"))
-                        _relay.Forget(_relay.SendSpringGiftAsync(actionPartnerKey, Math.Clamp(gift, 1, SpringRules.WinderCap)), "spring gift");
-
-                    if (_config.IsDoll)
-                    {
-                        var requestCooldown = _relay.WindRequestCooldownRemaining;
-                        var requestAvailable = hasValidPartnerKey
-                                               && _relay.IsConnected
-                                               && requestCooldown <= TimeSpan.Zero;
-                        if (!requestAvailable)
-                            ImGui.BeginDisabled();
-                        if (ImGui.SmallButton("Request winding"))
-                            _relay.Forget(_relay.SendWindRequestAsync(actionPartnerKey), "wind request");
-                        if (!requestAvailable)
-                            ImGui.EndDisabled();
-
-                        if (requestCooldown > TimeSpan.Zero)
-                        {
-                            var minutes = Math.Max(1, (int)Math.Ceiling(requestCooldown.TotalMinutes));
-                            ImGui.SameLine();
-                            ImGui.TextDisabled($"Available in {minutes}m");
-                        }
-                    }
-
                     ImGui.Spacing();
                     var danger = new Vector4(0.75f, 0.18f, 0.18f, 1f);
                     var dangerHover = new Vector4(0.88f, 0.28f, 0.28f, 1f);
@@ -823,7 +898,7 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.9f, 0.35f, 0.35f, 1f));
             ImGui.TextWrapped(blocked);
             ImGui.PopStyleColor();
-            // The message says to press Reconnect: same as the General tab's button.
+            // The message says to press Reconnect: same as the Connection section's button.
             if (ImGui.Button("Reconnect##relay_identity_block"))
             {
                 _config.ApplyRelayDefaults();
@@ -1580,24 +1655,7 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.EndCombo();
     }
 
-    /// <summary>1, 2 or 3 spare springs, labelled with the springs spent (the relay sets the hours they give).</summary>
-    private static void DrawWindSpringButtons(Action<int> onClick, bool smallButtons)
-    {
-        foreach (var springs in WindSpringPresets)
-        {
-            var label = $"{SpringLabel(springs)}###wind{springs}";
-            var clicked = smallButtons ? ImGui.SmallButton(label) : ImGui.Button(label);
-            if (clicked)
-                onClick(springs);
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip($"Spend {SpringLabel(springs)}.");
-            ImGui.SameLine();
-        }
-    }
-
-    private static string SpringLabel(int springs) => $"{springs} spring{(springs == 1 ? string.Empty : "s")}";
-
-    private void DrawSafewordTab()
+    public void DrawSafewordTab()
     {
         ImGui.Spacing();
 
@@ -1693,7 +1751,7 @@ public sealed class ConfigWindow : Window, IDisposable
     /// 06-B1: the pause of remote control that using the safeword started, when it ends, and the button that ends it
     /// early (as <c>/windup safeword resume</c> does).
     /// </summary>
-    private void DrawSafewordPause()
+    public void DrawSafewordPause()
     {
         ImGui.Spacing();
         if (_timer.SafewordPauseEndsAt is not { } pauseEnd)
@@ -1757,25 +1815,14 @@ public sealed class ConfigWindow : Window, IDisposable
             : "Store a point first, then Recall acts like an owner call to that spot.");
 
         ImGui.Spacing();
-        ImGui.TextUnformatted("Self wind");
-        // Wound locally as a player's wind (no springs are spent on yourself), so it can test overwind and breaking.
-        DrawWindSpringButtons(
-            springs =>
-            {
-                if (EnsureDebugSelfPair(canWind: true, canUnwind: false))
-                    _relay.Forget(_relay.SendWindByKeyAsync(_config.PairingKey, springs), "debug self-wind");
-            },
-            smallButtons: false);
-
-        if (ImGui.Button("Unwind") && EnsureDebugSelfPair(canWind: false, canUnwind: true))
-            _relay.Forget(_relay.SendUnwindByKeyAsync(_config.PairingKey), "debug self-unwind");
+        ImGui.TextDisabled("Self wind and unwind are in the Wind window, under Yourself (debug).");
     }
 
     /// <summary>
-    /// Ensures a local self-pair exists for debug relay wind/unwind.
+    /// Ensures a local self-pair exists for debug relay wind/unwind (the Wind window's Yourself row).
     /// Enables the needed consent flags so buttons work without manual checkbox toggles.
     /// </summary>
-    private bool EnsureDebugSelfPair(bool canWind, bool canUnwind)
+    public bool EnsureDebugSelfPair(bool canWind, bool canUnwind)
     {
         if (!PairingKeyUtil.IsValid(_config.PairingKey))
             return false;

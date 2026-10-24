@@ -61,7 +61,7 @@ public static class SelfTestCatalog
             [
                 "With a partner online on the new build: wind them, then have them wind you; each side sees the remaining time.",
                 "Unwind each other the same way.",
-                "As owner, open the doll's settings in the Owner tab, change one value, and check the doll gets it.",
+                "As owner, open the doll's owner settings (Owner, on their card in the Pairs window), change one value, and check the doll gets it.",
             ]),
         new("01-3", "Old client still works", CheckCoverage.Manual,
             "Never automated: it would need a secretless register, which the self-test never sends (04-D5).",
@@ -69,10 +69,10 @@ public static class SelfTestCatalog
                 "A partner on the current Release build (an unclaimed key) pairs with you.",
                 "Wind them and have them wind you; both work.",
             ]),
-        new("01-4", "Relay identity section (Pairing tab)", CheckCoverage.Partial,
+        new("01-4", "Relay identity section (Settings, Connection)", CheckCoverage.Partial,
             "Copy has a valid identity to give, and importing the current value is recognised as already this character's.",
             [
-                "Pairing tab, Relay identity: read the text.",
+                "Settings, Connection, Relay identity: read the text.",
                 "Press Copy; paste into a text editor: one line of 43 characters (don't share it).",
                 "Paste it into Import and press Import: it says it's already this character's identity.",
                 "Import a different valid identity (from another character's Copy): a confirmation appears, then it reconnects.",
@@ -89,7 +89,7 @@ public static class SelfTestCatalog
             "The UI can't be read by the self-test. /windup selftest reconnect confirm runs the button's code path.",
             [
                 "Get a block message (for example log into the same character on a second client).",
-                "In the Pairing tab the Reconnect button sits next to the block message; press it: it reconnects.",
+                "In Settings, under Connection, the Reconnect button sits next to the block message; press it: it reconnects.",
             ]),
         new("01-7", "Character switch", CheckCoverage.Manual,
             "Needs a logout and a second character.",
@@ -136,7 +136,7 @@ public static class SelfTestCatalog
         new("02-2", "Partner presence", CheckCoverage.Partial,
             "Presence queries to up to 10 partners are answered, and a random unpaired key looks offline.",
             [
-                "Pairing tab: each partner shows online when they're logged in and offline when not.",
+                "Pairs window: each partner shows online when they're logged in and offline when not.",
             ]),
         new("02-3", "Offline unpair", CheckCoverage.Partial,
             "No queued unpair is left pending once the register was accepted.",
@@ -148,7 +148,7 @@ public static class SelfTestCatalog
             "No owned-doll entry is left for a key that isn't a partner.",
             [
                 "As owner, unpair a doll.",
-                "The doll vanishes from the Owner tab, and no stale \"Owner\" button is left.",
+                "The doll vanishes from the Pairs window, and no stale \"Owner\" button is left.",
             ]),
         new("02-5", "Unpaired winds", CheckCoverage.Full,
             "A wind and an unwind to a random unpaired key are refused with not_allowed (relay 03 or newer only).",
@@ -245,9 +245,9 @@ public static class SelfTestCatalog
         new("P-emote-cancel", "Emote cancel", CheckCoverage.PostPatch,
             "Needs the game world and a wind; the self-test never sends the interrupt command itself (06-C2).",
             [
-                "With debug mode on and connected to the relay, stand next to a chair and press Unwind in the Debug tab.",
+                "With debug mode on and connected to the relay, stand next to a chair and press Unwind on Yourself (debug) in the Wind window.",
                 "Take a pose: groundsit (/groundsit), chair sit (/sit at the chair), /doze, or another looping emote (for example /pray).",
-                "Press Self wind \"1h\" in the Debug tab: the doll stands up (or the emote ends) by herself, without moving from her spot.",
+                "Press \"1 spring\" on Yourself (debug) in the Wind window: the doll stands up (or the emote ends) by herself, without moving from her spot.",
                 "Repeat from Unwind for each of the four poses.",
             ]),
         new("P-ui-doors", "Door names", CheckCoverage.PostPatch,

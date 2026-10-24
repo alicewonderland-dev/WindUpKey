@@ -764,6 +764,31 @@ public sealed class MoodlesWindStatusService : IDisposable
         return WindChargeLevel.NearlySpent;
     }
 
+    /// <summary>
+    /// The doll's wind Moodles right now (game icon, title, description), for the main window's icon row: the same level
+    /// and statuses the Moodles sync applies, so the two never disagree. Empty for winders and on vacation. Whether the
+    /// Moodles plugin is installed or the setting is on doesn't matter here. Never a time or a percentage.
+    /// </summary>
+    public IReadOnlyList<WindMoodleIcon> CurrentIcons()
+    {
+        if (!_config.IsDoll || _config.IsOnVacation)
+            return [];
+
+        var level = ResolveLevel(_timer.PercentForWinder, _timer.IsTimerEmpty, _timer.IsBroken, _timer.IsOverwound);
+        // Titles and descriptions come from the messages file, which checks the disk on each read: read again only when
+        // the level changes, or every few seconds to pick up an edit, not every frame the main window draws.
+        var now = DateTime.UtcNow;
+        if (_iconCache is { } cached && cached.Level == level && now - cached.ReadAt < IconCacheAge)
+            return cached.Icons;
+
+        var icons = LevelStatuses(level).Select(s => new WindMoodleIcon(s.IconId, s.Title, s.Description)).ToList();
+        _iconCache = (level, icons, now);
+        return icons;
+    }
+
+    private static readonly TimeSpan IconCacheAge = TimeSpan.FromSeconds(5);
+    private (WindChargeLevel Level, IReadOnlyList<WindMoodleIcon> Icons, DateTime ReadAt)? _iconCache;
+
     /// <summary>The statuses a level applies, the first being the one its presence is checked by.</summary>
     private IReadOnlyList<MoodleSpec> LevelStatuses(WindChargeLevel level) => level switch
     {
@@ -810,3 +835,6 @@ public sealed class MoodlesWindStatusService : IDisposable
         public bool AsPermanent;
     }
 }
+
+/// <summary>One wind Moodle the doll has now, as the main window shows it: its game icon, title and description.</summary>
+public readonly record struct WindMoodleIcon(int IconId, string Title, string Description);

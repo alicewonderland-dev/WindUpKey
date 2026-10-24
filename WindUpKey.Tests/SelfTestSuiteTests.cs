@@ -707,7 +707,7 @@ public sealed class SelfTestSuiteTests
 
         Assert.Equal(0, host.ReconnectCalls);
         Assert.False(host.Hold);
-        var takeover = Assert.Single(suite.Runner.Results, r => r.Reason.Contains("press Reconnect in the Pairing tab yourself"));
+        var takeover = Assert.Single(suite.Runner.Results, r => r.Reason.Contains("Reconnect in Settings, under Connection, yourself"));
         Assert.True(takeover is { Id: "03-2", Status: CheckStatus.Fail, Loud: true }, takeover.Reason);
     }
 
@@ -724,7 +724,7 @@ public sealed class SelfTestSuiteTests
 
         var fail = Assert.Single(suite.Runner.Results, r => r.Status == CheckStatus.Fail);
         Assert.True(fail is { Id: "03-2", Loud: true }, fail.Reason);
-        Assert.Contains("press Reconnect in the Pairing tab yourself", fail.Reason);
+        Assert.Contains("Reconnect in Settings, under Connection, yourself", fail.Reason);
         Assert.DoesNotContain(suite.Runner.Results, r => r.Reason.Contains("didn't reconnect") || r.Reason.Contains("1009"));
         Assert.Equal(0, host.ReconnectCalls);
         Assert.False(host.Hold);
@@ -739,7 +739,7 @@ public sealed class SelfTestSuiteTests
 
         Assert.Equal(0, host.ReconnectCalls);
         Assert.False(host.Hold);
-        var takeover = Assert.Single(suite.Runner.Results, r => r.Reason.Contains("press Reconnect in the Pairing tab yourself"));
+        var takeover = Assert.Single(suite.Runner.Results, r => r.Reason.Contains("Reconnect in Settings, under Connection, yourself"));
         Assert.True(takeover is { Id: "01-9", Status: CheckStatus.Fail, Loud: true }, takeover.Reason);
     }
 
@@ -755,7 +755,7 @@ public sealed class SelfTestSuiteTests
         var fail = Assert.Single(suite.Runner.Results, r => r.Status == CheckStatus.Fail);
         Assert.True(fail is { Id: "03-2", Loud: true }, fail.Reason);
         Assert.Contains("session_replaced", fail.Reason);
-        Assert.Contains("press Reconnect in the Pairing tab yourself", fail.Reason);
+        Assert.Contains("Reconnect in Settings, under Connection, yourself", fail.Reason);
         Assert.DoesNotContain(suite.Runner.Results, r => r.Reason.Contains("didn't reconnect"));
         Assert.Equal(0, host.ReconnectCalls);
         Assert.False(host.Hold);

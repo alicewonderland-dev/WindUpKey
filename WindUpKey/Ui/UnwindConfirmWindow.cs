@@ -7,7 +7,7 @@ namespace WindUpKey.Ui;
 
 /// <summary>
 /// Step 2 of an unwind: shows what the doll quoted (spare springs, or free for their owner) and sends the paid unwind
-/// on Confirm. It opens itself when a quote arrives, whether the unwind came from the Pairing tab or the context menu.
+/// on Confirm. It opens itself when a quote arrives, whether the unwind came from the Wind window or the context menu.
 /// </summary>
 public sealed class UnwindConfirmWindow : Window
 {
