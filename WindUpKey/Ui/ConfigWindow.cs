@@ -22,6 +22,7 @@ public enum SettingsSection
     Safeword,
     Moodles,
     Audio,
+    Interface,
     Connection,
     Role,
     Debug,
@@ -132,7 +133,7 @@ public sealed class ConfigWindow : Window, IDisposable
         SizeCondition = ImGuiCond.FirstUseEver;
     }
 
-    /// <summary>Opens the window at <paramref name="section"/> (the main window's Vacation button, the Safeword window's link).</summary>
+    /// <summary>Opens the window at <paramref name="section"/> (the Safeword window's link).</summary>
     public void Open(SettingsSection section)
     {
         _section = section;
@@ -175,6 +176,8 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.SameLine();
         if (ImGui.BeginChild("##settings_body", Vector2.Zero, false))
         {
+            // A role preview only shows; Debug, where it is turned off, stays usable.
+            var preview = _section != SettingsSection.Debug && RoleGate.BeginPreview(_config);
             switch (_section)
             {
                 case SettingsSection.Timer:
@@ -192,6 +195,9 @@ public sealed class ConfigWindow : Window, IDisposable
                 case SettingsSection.Audio:
                     DrawAudioSection();
                     break;
+                case SettingsSection.Interface:
+                    DrawInterfaceSection();
+                    break;
                 case SettingsSection.Connection:
                     DrawConnectionSection();
                     break;
@@ -202,6 +208,8 @@ public sealed class ConfigWindow : Window, IDisposable
                     DrawDebugTab();
                     break;
             }
+
+            RoleGate.EndPreview(preview);
         }
 
         ImGui.EndChild();
@@ -211,9 +219,9 @@ public sealed class ConfigWindow : Window, IDisposable
     private List<SettingsSection> VisibleSections()
     {
         var sections = new List<SettingsSection>();
-        if (_config.IsDoll)
+        if (_config.ShowsAsDoll)
             sections.AddRange([SettingsSection.Timer, SettingsSection.Vacation, SettingsSection.Safeword]);
-        sections.AddRange([SettingsSection.Moodles, SettingsSection.Audio, SettingsSection.Connection, SettingsSection.Role]);
+        sections.AddRange([SettingsSection.Moodles, SettingsSection.Audio, SettingsSection.Interface, SettingsSection.Connection, SettingsSection.Role]);
         if (_config.IsDebugEnabled)
             sections.Add(SettingsSection.Debug);
         return sections;
@@ -226,6 +234,7 @@ public sealed class ConfigWindow : Window, IDisposable
         SettingsSection.Safeword => "Safeword",
         SettingsSection.Moodles => "Moodles",
         SettingsSection.Audio => "Audio and messages",
+        SettingsSection.Interface => "Interface",
         SettingsSection.Connection => "Connection",
         SettingsSection.Role => "Role",
         _ => "Debug",
@@ -292,6 +301,9 @@ public sealed class ConfigWindow : Window, IDisposable
     public override void OnClose()
     {
     }
+
+    /// <summary>With tabs, Settings is drawn as the main window's tab, never as its own window too.</summary>
+    public override bool DrawConditions() => !_config.TabbedMainWindow;
 
     /// <summary>
     /// Debug mode, each frame Settings or Pairs is drawn: repairs the self-pair's ownership so its Owner button shows.
@@ -506,7 +518,7 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.Spacing();
         ImGui.TextUnformatted("Moodles");
         ImGui.Separator();
-        if (_config.IsDoll)
+        if (_config.ShowsAsDoll)
         {
             var moodlesOn = _config.MoodlesStatusEnabled;
             if (ImGui.Checkbox("Show wind charge as Moodle (requires Moodles)", ref moodlesOn))
@@ -531,6 +543,47 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.SetTooltip("Moodles only runs automation on login and job change.\nThis also runs it after every zone change, so automation moodles you removed come back.");
     }
 
+    /// <summary>The main window's layout: buttons that open pop-out windows, or icon tabs.</summary>
+    private void DrawInterfaceSection()
+    {
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Main window");
+        ImGui.Separator();
+        if (ImGui.RadioButton("Buttons that open each part in its own window", !_config.TabbedMainWindow))
+            SetTabbedMainWindow(false);
+        if (ImGui.RadioButton("Tabs, as icons (hover a tab for its name)", _config.TabbedMainWindow))
+            SetTabbedMainWindow(true);
+        ImGui.TextDisabled("With tabs, Settings opens as a tab too.");
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Server info bar");
+        ImGui.Separator();
+        var serverInfoBar = _config.ShowSpringsInServerInfoBar;
+        if (ImGui.Checkbox("Show your spare springs in the server info bar", ref serverInfoBar))
+        {
+            _config.ShowSpringsInServerInfoBar = serverInfoBar;
+            _config.Save();
+        }
+
+        ImGui.TextDisabled("Click it to open Wind-Up Key. Dalamud's own settings can also hide or move it.");
+    }
+
+    private void SetTabbedMainWindow(bool tabbed)
+    {
+        if (_config.TabbedMainWindow == tabbed)
+            return;
+
+        _config.TabbedMainWindow = tabbed;
+        _config.Save();
+        // Leaving tabs from the Settings tab: Settings opens as its own window, still on this section, rather than
+        // vanishing. (Into tabs, the open window is routed to the Settings tab.)
+        if (!tabbed)
+        {
+            _section = SettingsSection.Interface;
+            IsOpen = true;
+        }
+    }
+
     /// <summary>Sound effects, and the doll's low-wind and Moodle text file.</summary>
     private void DrawAudioSection()
     {
@@ -544,7 +597,7 @@ public sealed class ConfigWindow : Window, IDisposable
             _config.Save();
         }
 
-        if (!_config.IsDoll)
+        if (!_config.ShowsAsDoll)
             return;
 
         ImGui.Spacing();
@@ -664,7 +717,7 @@ public sealed class ConfigWindow : Window, IDisposable
     /// The Pairs window's content: this character's pairing key, adding a partner, pending requests, and each partner's
     /// labels, permissions and owner settings, with Unpair. Winding lives in the Wind window.
     /// </summary>
-    public void DrawPairsContent()
+    public void DrawPairsContent(bool viewOnly = false)
     {
         ImGui.Spacing();
         ImGui.TextUnformatted("Your pairing key");
@@ -692,6 +745,8 @@ public sealed class ConfigWindow : Window, IDisposable
         }
 
         ImGui.Spacing();
+        // A role preview can look around (headers, the Labels/Permissions/Owner buttons) but change nothing.
+        ImGui.BeginDisabled(viewOnly);
         ImGui.SetNextItemWidth(120);
         ImGui.InputText("Partner key", ref _pairKeyDraft, 16);
         ImGui.SameLine();
@@ -722,6 +777,8 @@ public sealed class ConfigWindow : Window, IDisposable
                 _relay.Forget(_relay.CancelPendingPairAsync(cancelPendingKey), "pair cancel");
         }
 
+        ImGui.EndDisabled();
+
         if (_config.PairedPartners.Count > 0)
         {
             ImGui.Spacing();
@@ -750,7 +807,7 @@ public sealed class ConfigWindow : Window, IDisposable
                     if (ImGui.Button("Labels"))
                         TogglePairSettingsWindow(ref _pairLabelsKey, ref _pairLabelsPos, partner.PartnerKey);
 
-                    if (_config.IsDoll)
+                    if (_config.ShowsAsDoll)
                     {
                         ImGui.SameLine();
                         if (ImGui.Button("Permissions"))
@@ -768,7 +825,8 @@ public sealed class ConfigWindow : Window, IDisposable
                         }
                     }
 
-                    if (!hasValidPartnerKey)
+                    var unpairOff = !hasValidPartnerKey || viewOnly;
+                    if (unpairOff)
                         ImGui.BeginDisabled();
                     ImGui.Spacing();
                     var danger = new Vector4(0.75f, 0.18f, 0.18f, 1f);
@@ -780,7 +838,7 @@ public sealed class ConfigWindow : Window, IDisposable
                     if (ImGui.Button("Unpair"))
                         ImGui.OpenPopup("unpair_confirm");
                     ImGui.PopStyleColor(3);
-                    if (!hasValidPartnerKey)
+                    if (unpairOff)
                         ImGui.EndDisabled();
 
                     var popupOpen = true;
@@ -807,19 +865,23 @@ public sealed class ConfigWindow : Window, IDisposable
                     }
                 }
 
-                // Keep settings windows alive even if the pair row is collapsed.
+                // Keep settings windows alive even if the pair row is collapsed. A preview shows them, disabled.
+                ImGui.BeginDisabled(viewOnly);
                 DrawPairLabelsWindow(partner);
-                if (_config.IsDoll)
+                if (_config.ShowsAsDoll)
                     DrawPairPermissionsWindow(partner, actionPartnerKey, hasValidPartnerKey);
                 if (isOwnedDoll)
                     DrawPairOwnerWindow(actionPartnerKey, partner.PartnerKey);
+                ImGui.EndDisabled();
 
                 ImGui.PopID();
                 ImGui.Spacing();
             }
         }
 
+        ImGui.BeginDisabled(viewOnly);
         DrawOwnerGrantConfirm();
+        ImGui.EndDisabled();
     }
 
     /// <summary>
@@ -1113,7 +1175,7 @@ public sealed class ConfigWindow : Window, IDisposable
                 _config.Save();
             });
 
-        if (_config.IsDoll && partner.IsOwner)
+        if (_config.ShowsAsDoll && partner.IsOwner)
         {
             DrawPairLabelField(
                 partner,
@@ -1659,7 +1721,7 @@ public sealed class ConfigWindow : Window, IDisposable
     {
         ImGui.Spacing();
 
-        if (!_config.IsDoll)
+        if (!_config.ShowsAsDoll)
             return;
 
         ImGui.TextUnformatted("Safeword");
@@ -1772,11 +1834,39 @@ public sealed class ConfigWindow : Window, IDisposable
     private const string SafewordPauseHelp =
         "Using the safeword also pauses remote control for the safeword hours. " + PausedRemoteControlText + " Winding still works.";
 
+    /// <summary>The Debug section's spring buttons (and Fill, up to the cap).</summary>
+    private static readonly int[] DebugSpringAmounts = [1, 5];
+
     private void DrawDebugTab()
     {
         ImGui.Spacing();
         ImGui.TextUnformatted("Debug tools");
         ImGui.Separator();
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Role preview");
+        // In memory only (never saved): every window shows the other role's UI, view only, until this is turned off.
+        var otherRole = _config.IsDoll ? "winder" : "doll";
+        var preview = _config.DebugPreviewOtherRole;
+        if (ImGui.Checkbox($"Preview the {otherRole} UI (view only)", ref preview))
+            _config.DebugPreviewOtherRole = preview;
+        ImGui.TextDisabled($"Your role stays {(_config.IsDoll ? "doll" : "winder")}; the windows and the right-click menu change nothing while previewing. Slash commands, Call prompts and this Debug section still work.");
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Spare springs");
+        ImGui.TextDisabled(_relay.SpringBalance is { } held ? $"{held} of {_relay.SpringCap}" : "Balance not known yet.");
+        // Added by the relay, and only for the keys its config lists (Relay:DebugSpringKeys).
+        foreach (var springs in DebugSpringAmounts)
+        {
+            if (ImGui.Button($"+{springs}##debug_springs_{springs}"))
+                _relay.Forget(_relay.SendDebugSpringGrantAsync(springs), "debug springs");
+            ImGui.SameLine();
+        }
+
+        if (ImGui.Button("Fill##debug_springs_fill"))
+            _relay.Forget(_relay.SendDebugSpringGrantAsync(SpringRules.WinderCap), "debug springs");
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Up to your cap.");
 
         ImGui.Spacing();
         ImGui.TextUnformatted("Hardcore");
@@ -1815,7 +1905,7 @@ public sealed class ConfigWindow : Window, IDisposable
             : "Store a point first, then Recall acts like an owner call to that spot.");
 
         ImGui.Spacing();
-        ImGui.TextDisabled("Self wind and unwind are in the Wind window, under Yourself (debug).");
+        ImGui.TextDisabled("Self wind and unwind are under Yourself (debug), in the Wind window or tab.");
     }
 
     /// <summary>

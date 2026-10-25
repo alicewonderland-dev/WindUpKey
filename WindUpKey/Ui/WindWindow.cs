@@ -11,9 +11,10 @@ using WindUpKey.Services;
 namespace WindUpKey.Ui;
 
 /// <summary>
-/// Winding, as its own window: the partners on the left (search, online, a doll's wind as last heard), and on the right
+/// Winding, as its own window: the partners on the left (search, online, a doll's wind as last seen), and on the right
 /// what can be done for the one selected: wind with springs, give springs, repair, ask to be wound, and unwind (set apart,
-/// and still behind the doll's cost quote). It only calls the relay's existing sends. A doll's own wind is never shown.
+/// and still behind the doll's cost quote). It only calls the relay's existing sends. A doll's own wind is never shown,
+/// except on the debug-only Yourself row.
 /// </summary>
 public sealed class WindWindow : Window
 {
@@ -26,36 +27,49 @@ public sealed class WindWindow : Window
 
     private readonly Configuration _config;
     private readonly RelayClient _relay;
+    private readonly WindTimerService _timer;
     private readonly ConfigWindow _host;
     private string _search = string.Empty;
     private string? _selectedKey;
     /// <summary>The gift amount typed for each partner, as the old Pairing tab kept it (never sent to another).</summary>
     private readonly Dictionary<string, int> _giftDrafts = new(StringComparer.Ordinal);
 
+    /// <param name="timer">Only for the debug Yourself row's bar.</param>
     /// <param name="host">Settings, for the debug self-pair the Yourself row winds.</param>
-    public WindWindow(Configuration config, RelayClient relay, ConfigWindow host)
+    public WindWindow(Configuration config, RelayClient relay, WindTimerService timer, ConfigWindow host)
         : base("Wind###WindUpKeyWind")
     {
         _config = config;
         _relay = relay;
+        _timer = timer;
         _host = host;
         Size = new Vector2(500, 330);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
+
+    /// <summary>With tabs, this is drawn as the main window's Wind tab, never as its own window too.</summary>
+    public override bool DrawConditions() => !_config.TabbedMainWindow;
 
     public override void Draw()
     {
         if (RoleGate.Blocks(_config))
             return;
 
-        var springs =_relay.SpringBalance is { } balance ? $"{balance} / {_relay.SpringCap} spare springs" : "… spare springs";
+        // A role preview can pick and search partners, but every action is off.
+        RoleGate.DrawPreviewBanner(_config);
+        DrawWindow();
+    }
+
+    private void DrawWindow()
+    {
+        var springs = _relay.SpringBalance is { } balance ? $"{balance} / {_relay.SpringCap} spare springs" : "… spare springs";
         ImGui.TextDisabled(springs);
         ImGui.Separator();
 
         var partners = Partners();
         if (partners.Length == 0)
         {
-            ImGui.TextWrapped("No partners yet. Pair with someone in the Pairs window.");
+            ImGui.TextWrapped("No partners yet. Pair with someone under Pairs.");
             return;
         }
 
@@ -83,7 +97,11 @@ public sealed class WindWindow : Window
         if (ImGui.BeginChild("##wind_actions", Vector2.Zero, false))
         {
             if (shown.FirstOrDefault(p => string.Equals(p.Key, _selectedKey, StringComparison.Ordinal)) is { Key: not null } selected)
+            {
+                ImGui.BeginDisabled(_config.IsPreviewingOtherRole);
                 DrawActions(selected);
+                ImGui.EndDisabled();
+            }
         }
 
         ImGui.EndChild();
@@ -99,8 +117,8 @@ public sealed class WindWindow : Window
             .Where(p => PairingKeyUtil.IsValid(p.PartnerKey) && !string.Equals(p.PartnerKey, _config.PairingKey, StringComparison.Ordinal))
             .Select(p => new Partner(PairingKeyUtil.Normalize(p.PartnerKey), p.GetChosenName(), false))
             .ToList();
-        // As the old Debug tab's Self wind: for a doll only (a winder has no wind of her own).
-        if (_config.IsDebugEnabled && _config.IsDoll && PairingKeyUtil.IsValid(_config.PairingKey))
+        // As the old Debug tab's Self wind: for a doll only (a winder has no wind of her own), and not in a winder preview.
+        if (_config.IsDebugEnabled && _config.IsDoll && _config.ShowsAsDoll && PairingKeyUtil.IsValid(_config.PairingKey))
             list.Add(new Partner(PairingKeyUtil.Normalize(_config.PairingKey), "Yourself (debug)", true));
         return list.ToArray();
     }
@@ -122,24 +140,31 @@ public sealed class WindWindow : Window
         ImGui.SameLine(ImGui.GetContentRegionMax().X - ImGui.CalcTextSize(status).X);
         ImGui.TextColored(color, status);
         if (ImGui.IsItemHovered() && _relay.LastKnownWind(partner.Key) is { } wind)
-            ImGui.SetTooltip(HeardAgo(wind.SeenAt));
+            ImGui.SetTooltip(SeenAgo(wind.SeenAt));
     }
 
-    /// <summary>"Heard just now", "Heard 5m ago", "Heard 3h ago", "Heard 2d ago".</summary>
-    internal static string HeardAgo(DateTimeOffset seenAt)
+    /// <summary>"Seen just now", "Seen 5m ago", "Seen 3h ago", "Seen 2d ago".</summary>
+    internal static string SeenAgo(DateTimeOffset seenAt)
     {
         var age = DateTimeOffset.UtcNow - seenAt;
         if (age < TimeSpan.FromMinutes(1))
-            return "Heard just now";
+            return "Seen just now";
         if (age < TimeSpan.FromHours(1))
-            return $"Heard {(int)age.TotalMinutes}m ago";
+            return $"Seen {(int)age.TotalMinutes}m ago";
         if (age < TimeSpan.FromDays(1))
-            return $"Heard {(int)age.TotalHours}h ago";
-        return $"Heard {(int)age.TotalDays}d ago";
+            return $"Seen {(int)age.TotalHours}h ago";
+        return $"Seen {(int)age.TotalDays}d ago";
+    }
+
+    /// <summary>The charge bar: always drawn, empty at 0% for an unwound doll.</summary>
+    private static void DrawWindBar(int percent, bool broken)
+    {
+        var clamped = Math.Clamp(percent, 0, 100);
+        ImGui.ProgressBar(clamped / 100f, new Vector2(-1, 0), broken ? "Broken" : $"{clamped}%");
     }
 
     /// <summary>
-    /// On the right of a row: a doll's wind as last heard, else "online" or "offline". The colour is the presence (green
+    /// On the right of a row: a doll's wind as last seen, else "online" or "offline". The colour is the presence (green
     /// online, grey otherwise), or amber for a doll low or broken.
     /// </summary>
     private string RowStatus(Partner partner, out Vector4 color)
@@ -183,12 +208,18 @@ public sealed class WindWindow : Window
             };
             ImGui.TextDisabled(_relay.IsPartnerOnVacation(partner.Key) ? $"{presence} · on vacation" : presence);
 
-            // A doll's wind as last heard: a percentage of normal wind, never a time.
+            // A doll's wind as last seen: a percentage of normal wind, never a time. An unwound doll's bar is empty, at 0%.
             if (_relay.LastKnownWind(partner.Key) is { } wind)
             {
-                ImGui.ProgressBar(wind.Percent / 100f, new Vector2(-1, 0), wind.Broken ? "Broken" : $"{wind.Percent}%");
-                ImGui.TextDisabled(HeardAgo(wind.SeenAt));
+                DrawWindBar(wind.Percent, wind.Broken);
+                ImGui.TextDisabled(SeenAgo(wind.SeenAt));
             }
+        }
+        else if (_config.IsDoll)
+        {
+            // Debug only (the Yourself row exists only in debug mode): your own wind as a winder would see it, so the
+            // self wind and unwind can be checked. Outside debug a doll never sees this.
+            DrawWindBar(_timer.PercentForWinder, _timer.IsBroken);
         }
 
         ImGui.Spacing();
@@ -221,7 +252,7 @@ public sealed class WindWindow : Window
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Repair a doll who was broken by being wound too far. Free.");
 
-            if (_config.IsDoll)
+            if (_config.ShowsAsDoll)
             {
                 ImGui.SameLine();
                 DrawWindRequest(partner.Key);

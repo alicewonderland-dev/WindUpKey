@@ -157,6 +157,17 @@ public sealed class SpringGrantPayload
     public int Lines { get; set; }
 }
 
+/// <summary>Client → relay: add spare springs for testing (debug keys only), up to the role's cap.</summary>
+public sealed class DebugSpringGrantPayload
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = string.Empty;
+
+    /// <summary>1 to <see cref="SpringRules.WinderCap"/>; what would go past the cap isn't added.</summary>
+    [JsonPropertyName("springs")]
+    public int Springs { get; set; }
+}
+
 /// <summary>Client → relay: give springs to a paired player; relay → recipient: springs were given to you.</summary>
 public sealed class SpringGiftPayload
 {
@@ -212,6 +223,8 @@ public static class SpringReasons
     public const string Refund = "refund";
     public const string GiftSent = "giftSent";
     public const string GiftReceived = "giftReceived";
+    /// <summary>Springs added by a debug grant (<see cref="MessageTypes.DebugSpringGrant"/>).</summary>
+    public const string Debug = "debug";
 }
 
 /// <summary>
@@ -458,6 +471,30 @@ public sealed class PresenceResultPayload
     /// <summary>The partner is a doll on vacation (set by the relay from its record, and by the doll itself); null when unknown.</summary>
     [JsonPropertyName("vacation")]
     public bool? Vacation { get; set; }
+
+    /// <summary>
+    /// 0.2.12.0: a doll's normal wind as a percentage of max, 0–100, as in <see cref="WindResultPayload.Percent"/>. Set
+    /// only by the doll's own client, only for a partner allowed to wind her, and never on vacation; null otherwise (and
+    /// from older clients or the relay's own answer). Never a time.
+    /// </summary>
+    [JsonPropertyName("percent")]
+    public int? Percent { get; set; }
+
+    /// <summary>With <see cref="Percent"/>: the doll has player overwind.</summary>
+    [JsonPropertyName("overwound")]
+    public bool? Overwound { get; set; }
+
+    /// <summary>With <see cref="Percent"/>: the doll is broken.</summary>
+    [JsonPropertyName("broken")]
+    public bool? Broken { get; set; }
+
+    /// <summary>
+    /// 0.2.12.0: set by the partner's own client once its pair list is synced: whether this asker may see her wind at all.
+    /// True with no <see cref="Percent"/> means "not again so soon" (keep what was seen); false means forget it (she is no
+    /// doll, on vacation, or the asker may not wind her). Null from older clients and the relay.
+    /// </summary>
+    [JsonPropertyName("windShared")]
+    public bool? WindShared { get; set; }
 }
 
 /// <summary>Doll designates the recipient as an owner.</summary>

@@ -29,12 +29,22 @@ public sealed class SafewordWindow : Window
 
     public override void OnClose() => _typed = string.Empty;
 
+    /// <summary>With tabs, this is drawn as the main window's Safeword tab, never as its own window too.</summary>
+    public override bool DrawConditions() => !_config.TabbedMainWindow;
+
     public override void Draw()
     {
         if (RoleGate.Blocks(_config))
             return;
 
-        if (!_config.IsDoll)
+        var preview = RoleGate.BeginPreview(_config);
+        DrawSafeword();
+        RoleGate.EndPreview(preview);
+    }
+
+    private void DrawSafeword()
+    {
+        if (!_config.ShowsAsDoll)
         {
             ImGui.TextWrapped("The safeword is for dolls.");
             return;

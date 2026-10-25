@@ -120,6 +120,8 @@ public static class WireLimits
 
     public static bool IsValid(SpringGiftPayload p) => FitsShort(p.RequestId) && IsOptionalKey(p.From) && IsKey(p.To);
 
+    public static bool IsValid(DebugSpringGrantPayload p) => FitsShort(p.RequestId);
+
     /// <summary>Finite, non-negative hours with short stamps (the relay stores layers as they are).</summary>
     public static bool IsValid(WindLayersWire? p) =>
         p is null
@@ -212,6 +214,7 @@ public static class WireLimits
             MessageTypes.Repair => Check<RepairPayload>(payload, IsValid),
             MessageTypes.SpringGrant => Check<SpringGrantPayload>(payload, IsValid),
             MessageTypes.SpringGift => Check<SpringGiftPayload>(payload, IsValid),
+            MessageTypes.DebugSpringGrant => Check<DebugSpringGrantPayload>(payload, IsValid),
             _ => true,
         };
     }

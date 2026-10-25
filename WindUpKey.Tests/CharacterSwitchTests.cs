@@ -307,7 +307,7 @@ public sealed class CharacterSwitchTests
         var draw = ProfileSettingsTests.MethodBody(pairs, "    public override void Draw()");
         Assert.True(
             draw.IndexOf("_host.DropStaleConfirms();", StringComparison.Ordinal) is >= 0 and var drop
-            && draw.IndexOf("_host.DrawPairsContent();", StringComparison.Ordinal) > drop);
+            && draw.IndexOf("_host.DrawPairsContent(", StringComparison.Ordinal) > drop);
     }
 
     // ---------- 06-A9: a queued message from a superseded connection ----------

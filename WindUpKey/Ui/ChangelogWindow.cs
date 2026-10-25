@@ -12,6 +12,15 @@ public sealed class ChangelogWindow : Window
     private static readonly ChangelogEntry[] Entries =
     [
         new(
+            "0.2.12.0 — Quick wind and tabs",
+            [
+                "Quick wind: the main window lists up to 4 paired dolls under 75% wind, lowest first. Click a name to wind them with one spring.",
+                "Dolls now share their wind, as a percentage and never a time, with partners allowed to wind them, so it shows in the Wind window and quick wind. Not while on vacation or paused by the safeword.",
+                "New Interface settings: the main window can use icon tabs instead of pop-out windows, and your spare springs can show in the server info bar (click it to open Wind-Up Key).",
+                "Discord is now an icon at the top of the main window. Vacation and the changelog are in Settings, and the Safeword button is hidden in Hardcore.",
+                "The Wind window says when a doll's wind was last seen, and an unwound doll's bar shows at 0%.",
+            ]),
+        new(
             "0.2.11.0 — New main window",
             [
                 "A new main window (/windup): your springs and connection, your wind Moodles, partners online, and buttons that open each part in its own window.",

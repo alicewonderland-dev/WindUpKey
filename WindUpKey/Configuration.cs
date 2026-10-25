@@ -140,6 +140,18 @@ public class Configuration : IPluginConfiguration
     public bool DiscordPromptShown { get; set; }
 
     /// <summary>
+    /// The main window holds icon tabs (Home, Wind, Pairs, Quests, Safeword, Settings) instead of buttons that open each
+    /// as its own window (for every character on this PC). Off by default: the pop-out windows.
+    /// </summary>
+    public bool TabbedMainWindow { get; set; }
+
+    /// <summary>
+    /// The spare springs show on Dalamud's server info bar, and clicking them opens the main window (for every character
+    /// on this PC). Off by default.
+    /// </summary>
+    public bool ShowSpringsInServerInfoBar { get; set; }
+
+    /// <summary>
     /// When true, re-run Moodles' own automation after each area change. Moodles only runs it
     /// on login and job change, so automation moodles removed by hand otherwise stay off.
     /// </summary>
@@ -224,6 +236,24 @@ public class Configuration : IPluginConfiguration
     /// <summary>A doll on vacation (<see cref="VacationSinceUtc"/>): winders never are.</summary>
     public bool IsOnVacation => IsDoll && VacationSinceUtc is not null;
     public bool HasChosenRole => Role is PlayerRole.Doll or PlayerRole.Winder;
+
+    /// <summary>
+    /// Debug: show the other role's UI, view only (see <see cref="ShowsAsDoll"/>). In memory only: never saved, and it
+    /// does nothing outside debug mode, so a reload or another character ends it.
+    /// </summary>
+    [Newtonsoft.Json.JsonIgnore]
+    public bool DebugPreviewOtherRole { get; set; }
+
+    /// <summary>The UI is previewing the other role: windows draw as that role and act on nothing.</summary>
+    [Newtonsoft.Json.JsonIgnore]
+    public bool IsPreviewingOtherRole => IsDebugEnabled && DebugPreviewOtherRole && HasChosenRole;
+
+    /// <summary>
+    /// Whether the UI draws as a doll: the real role, or the other one while previewing. For what is shown only; every
+    /// action and rule keeps <see cref="IsDoll"/>.
+    /// </summary>
+    [Newtonsoft.Json.JsonIgnore]
+    public bool ShowsAsDoll => IsPreviewingOtherRole ? !IsDoll : IsDoll;
 
     public static string FormatContentId(ulong contentId) => contentId.ToString("X16");
 
@@ -396,6 +426,8 @@ public class Configuration : IPluginConfiguration
 
     public void ApplyProfile(CharacterProfile profile)
     {
+        // A debug role preview belongs to the character it was turned on for.
+        DebugPreviewOtherRole = false;
         PairingKey = profile.PairingKey ?? string.Empty;
         LastKnownIdentity = profile.LastKnownIdentity ?? string.Empty;
         PairedPartners = profile.PairedPartners ?? [];

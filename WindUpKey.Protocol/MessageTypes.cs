@@ -60,13 +60,18 @@ public static class MessageTypes
     public const string SpringGift = "springGift";
     /// <summary>Relay → client: the spring balance, after register and after every change.</summary>
     public const string SpringBalance = "springBalance";
+    /// <summary>
+    /// Client → relay: add spare springs, for testing. The relay grants them only to the pairing keys its own config lists
+    /// (<c>Relay:DebugSpringKeys</c>); anyone else is refused.
+    /// </summary>
+    public const string DebugSpringGrant = "debugSpringGrant";
 
     private static readonly HashSet<string> Known = new(StringComparer.Ordinal)
     {
         Register, Wind, WindResult, WindRequest, Unwind, Error, Ping, Pong, PairSubmit, PairCancel, PairEstablished,
         PairRemove, PresenceQuery, PresenceResult, OwnerGrant, OwnerRevoked, OwnerSettingsQuery, OwnerSettingsResult,
         OwnerSettingsUpdate, OwnerSettingsAck, Call, CallAck, CallResult, PairSync, DollStatePush, DeliveryQueued,
-        DeliveryDelivered, UnwindQuote, Repair, SpringGrant, SpringGift, SpringBalance,
+        DeliveryDelivered, UnwindQuote, Repair, SpringGrant, SpringGift, SpringBalance, DebugSpringGrant,
     };
 
     /// <summary>True when <paramref name="type"/> is one of the constants above.</summary>

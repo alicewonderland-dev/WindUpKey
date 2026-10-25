@@ -14,9 +14,10 @@ using WindUpKey.Services;
 namespace WindUpKey.Ui;
 
 /// <summary>
-/// The main window (GagSpeak-style): springs and connection, who this character is, the doll's wind Moodles as icons,
-/// notices, partners online, and a grid of buttons that open each feature's window. A doll never sees a time or a
-/// percentage of their own wind here: only the Moodles they have.
+/// The main window (GagSpeak-style): springs, the Discord icon and connection, who this character is, the doll's wind
+/// Moodles as icons, notices, partners online and quick wind, then either a grid of buttons that open each feature's
+/// window or (Settings, Interface) icon tabs holding the same drawing. A doll never sees a time or a percentage of their
+/// own wind here: only the Moodles they have.
 /// </summary>
 public sealed class MainWindow : Window
 {
@@ -38,7 +39,6 @@ public sealed class MainWindow : Window
     private readonly PairsWindow _pairs;
     private readonly QuestsWindow _quests;
     private readonly SafewordWindow _safeword;
-    private readonly ChangelogWindow _changelog;
 
     public MainWindow(
         Configuration config,
@@ -51,7 +51,6 @@ public sealed class MainWindow : Window
         PairsWindow pairs,
         QuestsWindow quests,
         SafewordWindow safeword,
-        ChangelogWindow changelog,
         string pluginVersion)
         : base($"Wind-Up Key {pluginVersion}###WindUpKeyMain")
     {
@@ -65,13 +64,27 @@ public sealed class MainWindow : Window
         _pairs = pairs;
         _quests = quests;
         _safeword = safeword;
-        _changelog = changelog;
         Size = new Vector2(330, 420);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
 
+    /// <summary>With tabs the window needs room for Settings' sidebar and the Wind window's two panes.</summary>
+    private static readonly Vector2 TabbedMinimumSize = new(560, 420);
+
+    /// <summary>With buttons, room for the header's springs, Discord icon and connection side by side.</summary>
+    private static readonly Vector2 ButtonsMinimumSize = new(280, 200);
+
+    public override void PreDraw()
+    {
+        SizeConstraints = new WindowSizeConstraints { MinimumSize = _config.TabbedMainWindow ? TabbedMinimumSize : ButtonsMinimumSize };
+    }
+
     public override void Draw()
     {
+        // Expanded once by Show; from here the player may collapse it again.
+        Collapsed = null;
+        _lastDrawnFrame = ImGui.GetFrameCount();
+
         if (!_config.HasChosenRole)
         {
             _settings.DrawRoleSetup();
@@ -80,17 +93,198 @@ public sealed class MainWindow : Window
 
         DrawHeader();
         ImGui.Separator();
+        if (_config.TabbedMainWindow)
+        {
+            DrawTabs();
+            return;
+        }
+
         ImGui.Spacing();
-        DrawProfile();
-        ImGui.Spacing();
-        DrawNotices();
+        DrawHome();
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
         DrawModules();
     }
 
-    /// <summary>Spare springs on the left, the connection on the right (click for its status and Reconnect).</summary>
+    /// <summary>
+    /// Who this character is, their wind Moodles, notices and quick wind: under the header with buttons, or the Home tab.
+    /// A debug role preview shows the other role here (its banner first).
+    /// </summary>
+    private void DrawHome()
+    {
+        RoleGate.DrawPreviewBanner(_config);
+        DrawProfile();
+        ImGui.Spacing();
+        DrawNotices();
+    }
+
+    private enum MainTab
+    {
+        Home,
+        Wind,
+        Pairs,
+        Quests,
+        Safeword,
+        Settings,
+    }
+
+    /// <summary>The tab to select on the next draw (a request to open its window, in tabs mode).</summary>
+    private MainTab? _selectTab;
+
+    /// <summary>The tab last drawn, so leaving it can do what closing its window does.</summary>
+    private MainTab _activeTab = MainTab.Home;
+
+    /// <summary>The tabs this character sees: as the buttons, Safeword only for a doll outside Hardcore.</summary>
+    private IEnumerable<MainTab> VisibleTabs()
+    {
+        yield return MainTab.Home;
+        yield return MainTab.Wind;
+        yield return MainTab.Pairs;
+        yield return MainTab.Quests;
+        if (_config.ShowsAsDoll && !_config.HardcoreMode)
+            yield return MainTab.Safeword;
+        yield return MainTab.Settings;
+    }
+
+    private static FontAwesomeIcon TabIcon(MainTab tab) => tab switch
+    {
+        MainTab.Home => FontAwesomeIcon.Home,
+        MainTab.Wind => FontAwesomeIcon.Key,
+        MainTab.Pairs => FontAwesomeIcon.UserFriends,
+        MainTab.Quests => FontAwesomeIcon.ThLarge,
+        MainTab.Safeword => FontAwesomeIcon.ShieldAlt,
+        _ => FontAwesomeIcon.Cog,
+    };
+
+    /// <summary>Icon tabs, each named when hovered, holding what the matching pop-out window would.</summary>
+    private void DrawTabs()
+    {
+        if (!ImGui.BeginTabBar("##main_tabs"))
+            return;
+
+        foreach (var tab in VisibleTabs())
+        {
+            var flags = _selectTab == tab ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+            ImGui.PushFont(UiBuilder.IconFont);
+            var open = ImGui.BeginTabItem($"{TabIcon(tab).ToIconString()}##tab_{tab}", flags);
+            ImGui.PopFont();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(tab.ToString());
+            if (!open)
+                continue;
+
+            EnterTab(tab);
+            if (ImGui.BeginChild($"##tab_body_{tab}", Vector2.Zero, false))
+                DrawTab(tab);
+            ImGui.EndChild();
+            ImGui.EndTabItem();
+        }
+
+        _selectTab = null;
+        ImGui.EndTabBar();
+    }
+
+    /// <summary>The same drawing as each pop-out window (which doesn't draw itself in tabs mode).</summary>
+    private void DrawTab(MainTab tab)
+    {
+        switch (tab)
+        {
+            case MainTab.Home:
+                DrawHome();
+                break;
+            case MainTab.Wind:
+                _wind.Draw();
+                break;
+            case MainTab.Pairs:
+                _pairs.Draw();
+                break;
+            case MainTab.Quests:
+                _quests.Draw();
+                break;
+            case MainTab.Safeword:
+                _safeword.Draw();
+                break;
+            case MainTab.Settings:
+                _settings.Draw();
+                break;
+        }
+    }
+
+    private void EnterTab(MainTab tab)
+    {
+        if (tab == _activeTab)
+            return;
+
+        LeaveTab(_activeTab);
+        _activeTab = tab;
+    }
+
+    /// <summary>Leaving a tab (or closing the window on it) does what closing its window does.</summary>
+    private void LeaveTab(MainTab tab)
+    {
+        if (tab == MainTab.Pairs)
+            _pairs.OnClose();
+        else if (tab == MainTab.Safeword)
+            _safeword.OnClose();
+    }
+
+    public override void OnClose()
+    {
+        if (_config.TabbedMainWindow)
+            LeaveTab(_activeTab);
+    }
+
+    /// <summary>
+    /// Every frame, before the windows draw: in tabs mode, a request to open a pop-out window (a link, the plugin
+    /// installer's settings button, a command) opens the main window on that tab instead.
+    /// </summary>
+    public void RouteToTabs()
+    {
+        if (!_config.TabbedMainWindow)
+            return;
+
+        foreach (var (window, tab) in new (Window Window, MainTab Tab)[]
+                 {
+                     (_wind, MainTab.Wind), (_pairs, MainTab.Pairs), (_quests, MainTab.Quests),
+                     (_safeword, MainTab.Safeword), (_settings, MainTab.Settings),
+                 })
+        {
+            if (!window.IsOpen)
+                continue;
+
+            window.IsOpen = false;
+            _selectTab = tab;
+            Show();
+        }
+    }
+
+    /// <summary>Opens the window in front; a collapsed one draws nothing, so it is expanded once (Draw lets it go).</summary>
+    private void Show()
+    {
+        IsOpen = true;
+        Collapsed = false;
+        CollapsedCondition = ImGuiCond.Always;
+        BringToFront();
+    }
+
+    /// <summary>ImGui's frame count when Draw last ran: an open window that isn't drawn is collapsed (or hidden).</summary>
+    private int _lastDrawnFrame = -1;
+
+    /// <summary>
+    /// The server info bar's click: closes the window when it is showing, otherwise opens it (expanding it from
+    /// collapsed) in front.
+    /// </summary>
+    public void ShowOrHide()
+    {
+        var showing = IsOpen && _lastDrawnFrame >= ImGui.GetFrameCount() - 1;
+        if (showing)
+            IsOpen = false;
+        else
+            Show();
+    }
+
+    /// <summary>Spare springs on the left; on the right the Discord icon, then the connection (click for its status and Reconnect).</summary>
     private void DrawHeader()
     {
         ImGui.AlignTextToFramePadding();
@@ -105,7 +299,11 @@ public sealed class MainWindow : Window
         var connected = _relay.IsConnected;
         var label = connected ? "Connected" : "Offline";
         var width = ImGui.CalcTextSize(label).X + ImGui.GetStyle().FramePadding.X * 2;
-        ImGui.SameLine(ImGui.GetContentRegionMax().X - width);
+        var right = ImGui.GetContentRegionMax().X;
+        // The Discord icon sits just left of the connection.
+        ImGui.SameLine(right - width - ImGui.GetStyle().ItemSpacing.X - ImGui.GetFrameHeight());
+        DiscordLink.IconButton(_textures, "##discord_main");
+        ImGui.SameLine(right - width);
         ImGui.PushStyleColor(ImGuiCol.Text, connected ? Green : Red);
         if (ImGui.SmallButton($"{label}##connection"))
             ImGui.OpenPopup("connection_popup");
@@ -121,11 +319,15 @@ public sealed class MainWindow : Window
                 ImGui.PopTextWrapPos();
             }
 
+            // A role preview changes nothing, the connection included.
+            ImGui.BeginDisabled(_config.IsPreviewingOtherRole);
             if (ImGui.Button("Reconnect"))
             {
                 _settings.Reconnect();
                 ImGui.CloseCurrentPopup();
             }
+
+            ImGui.EndDisabled();
 
             ImGui.EndPopup();
         }
@@ -139,7 +341,7 @@ public sealed class MainWindow : Window
         ImGui.SetWindowFontScale(1f);
         ImGui.TextDisabled(RoleLine());
 
-        if (_config.IsDoll)
+        if (_config.ShowsAsDoll)
             DrawMoodleIcons();
 
         var partners = _config.PairedPartners
@@ -150,6 +352,50 @@ public sealed class MainWindow : Window
             _relay.EnsurePresenceFresh(partner.PartnerKey, RelayClient.IdlePresenceAge);
         var online = partners.Count(p => _relay.GetPartnerPresence(p.PartnerKey) == PartnerPresence.Online);
         ImGui.TextUnformatted(partners.Count == 0 ? "No partners yet" : $"{online} of {partners.Count} partners online");
+
+        DrawQuickWind(partners);
+    }
+
+    /// <summary>Dolls under this percentage of their wind are offered for a quick wind.</summary>
+    private const int QuickWindBelowPercent = 75;
+
+    private const int QuickWindMax = 4;
+
+    /// <summary>
+    /// Up to four paired dolls lowest on wind (under 75%, as last seen; not broken or on vacation), each with their
+    /// percentage. Clicking one winds them with a single spring, as the Wind window's "1 spring" does.
+    /// </summary>
+    private void DrawQuickWind(List<PairedPartner> partners)
+    {
+        var low = partners
+            .Select(p => (Partner: p, Key: PairingKeyUtil.Normalize(p.PartnerKey)))
+            .Select(p => (p.Partner, p.Key, Wind: _relay.LastKnownWind(p.Key)))
+            .Where(p => p.Wind is { Broken: false } wind && wind.Percent < QuickWindBelowPercent && !_relay.IsPartnerOnVacation(p.Key))
+            .OrderBy(p => p.Wind!.Value.Percent)
+            .Take(QuickWindMax)
+            .ToList();
+        if (low.Count == 0)
+            return;
+
+        ImGui.Spacing();
+        ImGui.TextDisabled("Low on wind");
+        var canWind = _relay.IsConnected && _relay.SpringBalance is not 0 && !_config.IsPreviewingOtherRole;
+        if (!canWind)
+            ImGui.BeginDisabled();
+        foreach (var (partner, key, wind) in low)
+        {
+            var percent = wind!.Value.Percent;
+            var status = $"{percent}%";
+            if (ImGui.Selectable($"{partner.GetChosenName()}##quick_{key}"))
+                _relay.Forget(_relay.SendWindByKeyAsync(key, 1), "quick wind");
+            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                ImGui.SetTooltip(canWind ? "Wind with 1 spring." : _config.IsPreviewingOtherRole ? "View only while previewing." : "You need a spare spring and a connection to wind.");
+            ImGui.SameLine(ImGui.GetContentRegionMax().X - ImGui.CalcTextSize(status).X);
+            ImGui.TextColored(percent < 25 ? Amber : Green, status);
+        }
+
+        if (!canWind)
+            ImGui.EndDisabled();
     }
 
     private string CharacterName()
@@ -163,7 +409,7 @@ public sealed class MainWindow : Window
 
     private string RoleLine()
     {
-        if (!_config.IsDoll)
+        if (!_config.ShowsAsDoll)
             return "Winder";
 
         var owners = _config.PairedPartners.Where(p => p.IsOwner).Select(p => p.GetChosenName()).ToList();
@@ -207,15 +453,15 @@ public sealed class MainWindow : Window
     /// <summary>What changes how the plugin behaves for this character right now.</summary>
     private void DrawNotices()
     {
-        if (_timer.IsOnVacation)
+        if (_config.ShowsAsDoll && _timer.IsOnVacation)
             ImGui.TextColored(Blue, "On vacation: your wind is frozen.");
-        if (_config.IsDoll && _timer.SafewordPauseEndsAt is { } pauseEnd)
+        if (_config.ShowsAsDoll && _timer.SafewordPauseEndsAt is { } pauseEnd)
             ImGui.TextColored(Green, $"Remote control paused until {pauseEnd.ToLocalTime():g}.");
-        if (_config.HardcoreMode)
+        if (_config.ShowsAsDoll && _config.HardcoreMode)
             ImGui.TextColored(Amber, "Hardcore is on.");
     }
 
-    /// <summary>Two columns of buttons, each opening its window. Winders see no Safeword or Vacation.</summary>
+    /// <summary>Two columns of buttons, each opening its window. Only a doll outside Hardcore sees Safeword.</summary>
     private void DrawModules()
     {
         var modules = new List<(FontAwesomeIcon Icon, string Label, Action Open)>
@@ -224,15 +470,11 @@ public sealed class MainWindow : Window
             (FontAwesomeIcon.UserFriends, "Pairs", () => Toggle(_pairs)),
             (FontAwesomeIcon.ThLarge, "Quests", () => Toggle(_quests)),
         };
-        if (_config.IsDoll)
-        {
+        // Hardcore has no safeword. Vacation and the changelog are in Settings (its Vacation section and header link).
+        if (_config.ShowsAsDoll && !_config.HardcoreMode)
             modules.Add((FontAwesomeIcon.ShieldAlt, "Safeword", () => Toggle(_safeword)));
-            modules.Add((FontAwesomeIcon.UmbrellaBeach, "Vacation", () => _settings.Open(SettingsSection.Vacation)));
-        }
 
         modules.Add((FontAwesomeIcon.Cog, "Settings", () => Toggle(_settings)));
-        modules.Add((FontAwesomeIcon.FileAlt, "Changelog", () => Toggle(_changelog)));
-        modules.Add((FontAwesomeIcon.Comments, "Discord", () => Dalamud.Utility.Util.OpenLink(DiscordLink.Invite)));
 
         var spacing = ImGui.GetStyle().ItemSpacing.X;
         var width = (ImGui.GetContentRegionAvail().X - spacing) / 2;

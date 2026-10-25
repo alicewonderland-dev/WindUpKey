@@ -12,11 +12,13 @@ namespace WindUpKey.Ui;
 public sealed class UnwindConfirmWindow : Window
 {
     private readonly RelayClient _relay;
+    private readonly Configuration _config;
 
-    public UnwindConfirmWindow(RelayClient relay)
+    public UnwindConfirmWindow(RelayClient relay, Configuration config)
         : base("Unwind###WindUpKeyUnwindConfirm", ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoCollapse)
     {
         _relay = relay;
+        _config = config;
         IsOpen = false;
     }
 
@@ -63,8 +65,13 @@ public sealed class UnwindConfirmWindow : Window
         if (!affordable)
             ImGui.TextColored(new Vector4(1f, 0.55f, 0.2f, 1f), "You don't have enough spare springs to unwind them.");
 
+        // A quote asked for before a debug role preview began can't be paid during it: the preview changes nothing.
+        var previewing = _config.IsPreviewingOtherRole;
+        if (previewing)
+            ImGui.TextDisabled("View only while previewing the other role.");
+
         ImGui.Spacing();
-        var canConfirm = (quote.Free || quote.Springs > 0) && affordable;
+        var canConfirm = (quote.Free || quote.Springs > 0) && affordable && !previewing;
         if (!canConfirm)
             ImGui.BeginDisabled();
         if (ImGui.Button("Unwind", new Vector2(120, 0)))

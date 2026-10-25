@@ -22,6 +22,9 @@ public sealed class PairsWindow : Window
         SizeCondition = ImGuiCond.FirstUseEver;
     }
 
+    /// <summary>With tabs, this is drawn as the main window's Pairs tab, never as its own window too.</summary>
+    public override bool DrawConditions() => !_config.TabbedMainWindow;
+
     public override void Draw()
     {
         _host.DropStaleConfirms();
@@ -29,7 +32,9 @@ public sealed class PairsWindow : Window
             return;
 
         _host.SyncDebugSelfOwnership();
-        _host.DrawPairsContent();
+        // A role preview can open headers and the Labels/Permissions/Owner windows, but changes nothing.
+        RoleGate.DrawPreviewBanner(_config);
+        _host.DrawPairsContent(viewOnly: _config.IsPreviewingOtherRole);
     }
 
     /// <summary>06-A12: closing the window dismisses the ownership confirm's refusal.</summary>

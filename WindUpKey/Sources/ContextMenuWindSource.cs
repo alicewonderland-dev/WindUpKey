@@ -53,8 +53,8 @@ public sealed class ContextMenuWindSource : IWindUpSource
 
     private void OnMenuOpened(IMenuOpenedArgs args)
     {
-        // Winders and dolls can wind others (doll-to-doll included).
-        if (!_config.HasChosenRole)
+        // Winders and dolls can wind others (doll-to-doll included). A debug role preview offers nothing: it changes nothing.
+        if (!_config.HasChosenRole || _config.IsPreviewingOtherRole)
             return;
 
         if (args.MenuType != ContextMenuType.Default)

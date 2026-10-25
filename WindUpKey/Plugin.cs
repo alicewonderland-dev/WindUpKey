@@ -42,6 +42,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IDutyState DutyState { get; private set; } = null!;
     [PluginService] internal static IPlayerState PlayerState { get; private set; } = null!;
     [PluginService] internal static ITextureProvider Textures { get; private set; } = null!;
+    [PluginService] internal static IDtrBar DtrBar { get; private set; } = null!;
 #if WINDUP_TESTING
     /// <summary>04-D8: the self-test resolves hook signatures with it, without installing a hook.</summary>
     [PluginService] internal static ISigScanner SigScanner { get; private set; } = null!;
@@ -51,6 +52,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly WindowSystem _windowSystem = new("WindUpKey");
     private readonly ConfigWindow _configWindow;
     private readonly MainWindow _mainWindow;
+    private readonly ServerInfoBarService _serverInfoBar;
     private readonly ChangelogWindow _changelogWindow;
     private readonly InputDiagnosticLog _inputDiagnostics;
     private readonly LockController _lockController;
@@ -186,22 +188,23 @@ public sealed class Plugin : IDalamudPlugin
             Textures,
             version);
         _windowSystem.AddWindow(_configWindow);
-        // The main window and the pop-outs it opens (GagSpeak-style); Settings is the window above.
-        var windWindow = new WindWindow(Configuration, _relay, _configWindow);
+        // The main window and the pop-outs it opens (GagSpeak-style), or holds as tabs; Settings is the window above.
+        var windWindow = new WindWindow(Configuration, _relay, _timer, _configWindow);
         var pairsWindow = new PairsWindow(Configuration, _configWindow);
         var questsWindow = new QuestsWindow(Configuration, quests, Textures);
         var safewordWindow = new SafewordWindow(Configuration, _configWindow, UseSafeword);
         _mainWindow = new MainWindow(
             Configuration, _relay, _timer, _moodlesStatus, Textures, _configWindow,
-            windWindow, pairsWindow, questsWindow, safewordWindow, _changelogWindow, version);
+            windWindow, pairsWindow, questsWindow, safewordWindow, version);
         _windowSystem.AddWindow(_mainWindow);
+        _serverInfoBar = new ServerInfoBarService(DtrBar, Configuration, _relay, ToggleMain);
         _windowSystem.AddWindow(windWindow);
         _windowSystem.AddWindow(pairsWindow);
         _windowSystem.AddWindow(questsWindow);
         _windowSystem.AddWindow(safewordWindow);
         _windowSystem.AddWindow(_changelogWindow);
         _windowSystem.AddWindow(_callPrompt);
-        _unwindConfirm = new UnwindConfirmWindow(_relay);
+        _unwindConfirm = new UnwindConfirmWindow(_relay, Configuration);
         _windowSystem.AddWindow(_unwindConfirm);
         _discordPrompt = new DiscordPromptWindow(Configuration, Textures);
         _windowSystem.AddWindow(_discordPrompt);
@@ -229,7 +232,7 @@ public sealed class Plugin : IDalamudPlugin
                 ,
         });
 
-        PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
+        PluginInterface.UiBuilder.Draw += DrawUi;
         PluginInterface.UiBuilder.OpenConfigUi += OpenConfig;
         PluginInterface.UiBuilder.OpenMainUi += OpenMain;
 
@@ -257,7 +260,7 @@ public sealed class Plugin : IDalamudPlugin
         ClientState.Login -= OnLogin;
         ClientState.Logout -= OnLogout;
         _relay.ProfileActivated -= OnProfileActivated;
-        PluginInterface.UiBuilder.Draw -= _windowSystem.Draw;
+        PluginInterface.UiBuilder.Draw -= DrawUi;
         PluginInterface.UiBuilder.OpenConfigUi -= OpenConfig;
         PluginInterface.UiBuilder.OpenMainUi -= OpenMain;
         CommandManager.RemoveHandler(CommandName);
@@ -276,13 +279,27 @@ public sealed class Plugin : IDalamudPlugin
         _sounds.Dispose();
         _lockController.Dispose();
         _inputDiagnostics.Dispose();
+        _serverInfoBar.Dispose();
         _windowSystem.RemoveAllWindows();
         _configWindow.Dispose();
+    }
+
+    /// <summary>
+    /// With tabs, a pop-out window asked to open since the last frame opens as the main window's tab instead; then every
+    /// window draws.
+    /// </summary>
+    private void DrawUi()
+    {
+        _mainWindow.RouteToTabs();
+        _windowSystem.Draw();
     }
 
     private void OpenConfig() => _configWindow.IsOpen = true;
 
     private void OpenMain() => _mainWindow.IsOpen = true;
+
+    /// <summary>The server info bar's click: opens the main window (in front, expanded), or closes it.</summary>
+    private void ToggleMain() => _mainWindow.ShowOrHide();
 
     private bool _pendingLoginServices;
     private bool _wasBetweenAreas;
@@ -311,6 +328,7 @@ public sealed class Plugin : IDalamudPlugin
         phaseStart = Stopwatch.GetTimestamp();
         _relay.TickCallTravel();
         _unwindConfirm.Sync();
+        _serverInfoBar.Update();
         // After the role is chosen, so it never sits on top of the first-time setup.
         _discordPrompt.Sync(ClientState.IsLoggedIn && Configuration.HasChosenRole);
         RecordSlowestPhase("call-travel", phaseStart, ref slowestPhase, ref slowestPhaseMilliseconds);

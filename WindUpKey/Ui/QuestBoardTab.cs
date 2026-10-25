@@ -56,10 +56,20 @@ public sealed class QuestBoardTab
     /// <summary>The Information pop-out is open.</summary>
     private bool _infoOpen;
 
-    public QuestBoardTab(QuestBoardService quests, ITextureProvider textures)
+    /// <summary>Whether the board's text is for a doll: the role, or the debug preview's (display only).</summary>
+    private readonly Func<bool> _showsAsDoll;
+
+    /// <summary>A debug role preview: the board is shown, but rerolls are off.</summary>
+    private readonly Func<bool> _viewOnly;
+
+    /// <param name="showsAsDoll">For the board's text only; null follows the service's role.</param>
+    /// <param name="viewOnly">True while nothing may be changed (a role preview); null never.</param>
+    public QuestBoardTab(QuestBoardService quests, ITextureProvider textures, Func<bool>? showsAsDoll = null, Func<bool>? viewOnly = null)
     {
         _quests = quests;
         _textures = textures;
+        _showsAsDoll = showsAsDoll ?? (() => quests.ForDoll);
+        _viewOnly = viewOnly ?? (() => false);
     }
 
     public void Draw()
@@ -73,7 +83,7 @@ public sealed class QuestBoardTab
         ImGui.Separator();
         ImGui.Spacing();
 
-        if (_quests.OnVacation)
+        if (_quests.OnVacation && _showsAsDoll())
         {
             ImGui.TextColored(NoticeColor, "You're on vacation: the board is paused until you're back.");
             ImGui.Spacing();
@@ -283,7 +293,7 @@ public sealed class QuestBoardTab
     {
         var stickers = QuestRewardRules.StickersFor(slot.Difficulty);
         var noun = stickers == 1 ? "sticker" : "stickers";
-        if (!_quests.ForDoll)
+        if (!_showsAsDoll())
             return $"({stickers} {noun})";
         return $"({stickers} {noun}, {QuestRewardRules.Turns(QuestRewardRules.BaseHoursFor(slot.Difficulty))})";
     }
@@ -292,7 +302,8 @@ public sealed class QuestBoardTab
     {
         ImGui.SameLine();
         var used = QuestRollRules.IsRerollUsed(_quests.Board, difficulty, DateTimeOffset.UtcNow);
-        var can = _quests.CanReroll(difficulty);
+        // A role preview shows the board and its Information, but can't reroll.
+        var can = _quests.CanReroll(difficulty) && !_viewOnly();
         if (!can)
             ImGui.BeginDisabled();
         if (ImGui.SmallButton($"Reroll##reroll{difficulty}"))
@@ -312,6 +323,13 @@ public sealed class QuestBoardTab
     {
         if (_rerollConfirm is not { } pending)
             return;
+
+        // A confirm left open when a role preview starts is dropped: the preview changes nothing.
+        if (_viewOnly())
+        {
+            _rerollConfirm = null;
+            return;
+        }
 
         ImGui.OpenPopup("RerollQuests###WindUpKeyRerollConfirm");
         var open = true;
@@ -343,7 +361,7 @@ public sealed class QuestBoardTab
     }
 
     /// <summary>
-    /// The Information pop-out: how the board works, in turns. Drawn every frame by the Quests window, so it stays open
+    /// The Information pop-out: how the board works, in turns. Drawn every frame by the Quests window or tab, so it stays open
     /// beside the board while the player looks around (and comes back with it). It never explains the hidden bonuses, the unsynced rules or the picks.
     /// </summary>
     public void DrawInfoWindow()
@@ -355,7 +373,7 @@ public sealed class QuestBoardTab
         if (ImGui.Begin("Quest Board Information###WindUpKeyQuestInfo", ref _infoOpen, ImGuiWindowFlags.AlwaysAutoResize))
         {
             ImGui.PushTextWrapPos(ImGui.GetFontSize() * 30);
-            var doll = _quests.ForDoll;
+            var doll = _showsAsDoll();
             ImGui.TextUnformatted("The board");
             ImGui.Separator();
             ImGui.TextWrapped(doll

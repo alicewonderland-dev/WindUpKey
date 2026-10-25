@@ -1258,6 +1258,34 @@ public sealed class RelayClient : IDisposable
         await SendOrTellAsync(MessageTypes.SpringGift, payload, "spring gift").ConfigureAwait(false);
     }
 
+    /// <summary>Debug grants sent and not yet answered, so a refusal can say what it was for.</summary>
+    private readonly HashSet<string> _pendingDebugGrants = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Debug mode only: asks the relay to add <paramref name="springs"/> spare springs to this character (up to the cap).
+    /// The relay honours it only for the keys its config lists, whatever this client says.
+    /// </summary>
+    public async Task SendDebugSpringGrantAsync(int springs)
+    {
+        if (!_config.IsDebugEnabled)
+            return;
+
+        if (!IsConnected || !PairingKeyUtil.IsValid(_config.PairingKey))
+        {
+            PluginChat.PrintError(_chat, "Debug springs: not connected.");
+            return;
+        }
+
+        var payload = new DebugSpringGrantPayload
+        {
+            RequestId = Guid.NewGuid().ToString("N"),
+            Springs = Math.Clamp(springs, 1, SpringRules.WinderCap),
+        };
+        lock (_pendingWindLock)
+            _pendingDebugGrants.Add(payload.RequestId);
+        await SendOrTellAsync(MessageTypes.DebugSpringGrant, payload, "debug spring grant").ConfigureAwait(false);
+    }
+
     /// <summary>The relay answered a quest spring grant (its requestId), on the framework thread; set by the plugin.</summary>
     public Action<string?>? SpringGrantSettled { get; set; }
 
@@ -2907,8 +2935,10 @@ public sealed class RelayClient : IDisposable
         var percent = Math.Clamp(payload.PercentRemaining, 0, 100);
         // A request carries only the percentage, which says nothing either way about overwind or breaking (a raised max
         // lowers a broken doll's percentage; a recovered one can still read 100%). So it is remembered as the percentage
-        // alone: "broken" is only ever shown from a wind result, which carries it, and Repair is always offered.
-        RememberPartnerWind(fromKey, percent, overwound: false, broken: false);
+        // alone, except over a "broken" learned from a wind result or presence answer: that stays, with its own age, so
+        // quick wind never offers a doll last seen broken on the strength of a request.
+        if (LastKnownWind(fromKey) is not { Broken: true })
+            RememberPartnerWind(fromKey, percent, overwound: false, broken: false);
         var label = GetPairMessageLabel(fromKey);
         PluginChat.Print(
             _chat,
@@ -3007,6 +3037,16 @@ public sealed class RelayClient : IDisposable
                     $"You gave {Math.Abs(payload.Delta)} spare {plural} to {GetPairMessageLabel(PairingKeyUtil.Normalize(payload.PeerKey))}.",
                     PluginChat.Green);
                 break;
+            case SpringReasons.Debug:
+                lock (_pendingWindLock)
+                    _pendingDebugGrants.Remove(payload.RequestId ?? string.Empty);
+                PluginChat.Print(
+                    _chat,
+                    payload.Delta > 0
+                        ? $"Debug: {payload.Delta} spare {plural} added ({SpringBalance} of {SpringCap})."
+                        : $"Debug: no springs added; you're at the cap ({SpringBalance} of {SpringCap}).",
+                    PluginChat.Grey);
+                break;
         }
     }
 
@@ -3054,6 +3094,16 @@ public sealed class RelayClient : IDisposable
                 return;
             lock (_pendingWindLock)
             {
+                if (_pendingDebugGrants.Remove(payload.RequestId))
+                {
+                    PluginChat.PrintError(
+                        _chat,
+                        payload.Code == ErrorCodes.NotAllowed
+                            ? "Debug springs: the relay doesn't allow them for this character's key."
+                            : "Debug springs: the relay refused the request.");
+                    return;
+                }
+
                 if (_pendingWindRequestIds.Remove(payload.RequestId))
                 {
                     var message = queueFull
@@ -3424,8 +3474,9 @@ public sealed class RelayClient : IDisposable
     }
 
     /// <summary>
-    /// Each partner doll's wind as last heard (a wind or repair result, or their wind request): a percentage and flags,
-    /// never a time. In memory only, for the Wind window; it is as old as <see cref="PartnerWindView.SeenAt"/> says.
+    /// Each partner doll's wind as last seen (a wind or repair result, her wind request, or her presence answer): a
+    /// percentage and flags, never a time. In memory only, for the Wind window and quick wind; it is as old as
+    /// <see cref="PartnerWindView.SeenAt"/> says.
     /// </summary>
     private readonly Dictionary<string, PartnerWindView> _partnerWind = new(StringComparer.Ordinal);
 
@@ -3441,6 +3492,12 @@ public sealed class RelayClient : IDisposable
             return;
         lock (_presenceLock)
             _partnerWind[peerKey] = new PartnerWindView(Math.Clamp(percent, 0, 100), overwound, broken, DateTimeOffset.UtcNow);
+    }
+
+    private void ForgetPartnerWind(string peerKey)
+    {
+        lock (_presenceLock)
+            _partnerWind.Remove(peerKey);
     }
 
     /// <summary>Partners last known to be dolls on vacation (from presence answers; in memory only).</summary>
@@ -3717,10 +3774,16 @@ public sealed class RelayClient : IDisposable
         var fromKey = PairingKeyUtil.Normalize(payload.From);
         var paired = _consent.IsPairedByKey(fromKey);
 
-        // Unpaired senders get stillPaired:false and nothing else, so a half-unpair heals on their side.
+        // Unpaired senders get stillPaired:false (and windShared:false, the same for any of them), so a half-unpair heals
+        // on their side.
         if (!RelaySyncRules.TryAnswerPresence(fromKey, _config.PairingKey, _config.IsDebugEnabled, paired, out var stillPaired))
             return;
 
+        // A doll tells a partner who may wind her how wound she is, as a wind result does: a percentage, never a time. Not
+        // until the pair list is synced (08-D15: the local permissions may be stale), and at most once per asker every
+        // WindShareInterval, so presence is no free way to read her wind again and again (as an unmended repair isn't).
+        bool? windShared = _registerAccepted ? PresenceSharesWind(fromKey, stillPaired) : null;
+        var shareWind = windShared == true && TakeWindShare(fromKey);
         await SendEnvelopeAsync(Envelope.Create(MessageTypes.PresenceResult, new PresenceResultPayload
         {
             RequestId = payload.RequestId,
@@ -3730,8 +3793,47 @@ public sealed class RelayClient : IDisposable
             // 08-D15: unset until this connection's pairSync arrived; the local list may not be loaded from it yet.
             StillPaired = RelaySyncRules.PresenceStillPairedAnswer(stillPaired, _registerAccepted),
             Vacation = _config.IsDoll ? _config.IsOnVacation : null,
+            Percent = shareWind ? _timer.PercentForWinder : null,
+            Overwound = shareWind ? _timer.IsOverwound : null,
+            Broken = shareWind ? _timer.IsBroken : null,
+            WindShared = windShared,
         }), ct).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// How often one partner's presence queries may carry this doll's wind: a little under the main window's 2 minutes
+    /// (<see cref="IdlePresenceAge"/>), so relay latency never makes its next query arrive "too soon" and miss.
+    /// </summary>
+    private static readonly TimeSpan WindShareInterval = TimeSpan.FromSeconds(105);
+
+    /// <summary>When each partner was last sent this doll's wind in a presence answer (in memory only).</summary>
+    private readonly Dictionary<string, DateTime> _windSharedAt = new(StringComparer.Ordinal);
+
+    /// <summary>True (and starts the interval) when this partner may be sent the wind again now.</summary>
+    private bool TakeWindShare(string partnerKey)
+    {
+        var now = DateTime.UtcNow;
+        lock (_presenceLock)
+        {
+            if (_windSharedAt.TryGetValue(partnerKey, out var last) && now - last < WindShareInterval)
+                return false;
+            _windSharedAt[partnerKey] = now;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// A presence answer carries this doll's wind only to a partner still paired and allowed to wind her (who would
+    /// see it in a wind result anyway), and never on vacation (her wind is frozen and can't be wound), while her safeword
+    /// pauses remote control (winds are refused then), or to herself.
+    /// </summary>
+    private bool PresenceSharesWind(string fromKey, bool stillPaired) =>
+        _config.IsDoll
+        && !_config.IsOnVacation
+        && !_timer.IsRemoteControlPaused
+        && stillPaired
+        && !string.Equals(fromKey, _config.PairingKey, StringComparison.Ordinal)
+        && _consent.CanReceiveWindFromKey(fromKey);
 
     private void HandlePresenceResult(Envelope envelope)
     {
@@ -3746,6 +3848,14 @@ public sealed class RelayClient : IDisposable
         SetPresence(peerKey, payload.Online ? PartnerPresence.Online : PartnerPresence.Offline);
         if (payload.Vacation is { } onVacation)
             SetPartnerVacation(peerKey, onVacation);
+
+        // A doll's own answer may carry her wind (0.2.12.0 clients through an updated relay): what the Wind window and
+        // the main window's quick wind show, as last seen. When she says it isn't shared with us (no longer a doll, on
+        // vacation, or we may not wind her), what was seen is forgotten, so quick wind stops offering her.
+        if (payload.Online && payload.Percent is { } percent && payload.StillPaired != false && _consent.IsPairedByKey(peerKey))
+            RememberPartnerWind(peerKey, percent, payload.Overwound ?? false, payload.Broken ?? false);
+        else if (payload.Online && payload.WindShared == false)
+            ForgetPartnerWind(peerKey);
 
         // 08-D19: removed here only; the relay keeps the pair, so the next pairSync brings the partner back until their own
         // queued unpair lands. Never an unpair on the relay: released clients (0.1.2.0 to 0.2.0.1) never sync their pair
@@ -4252,6 +4362,7 @@ public sealed class RelayClient : IDisposable
             _presenceLastQueryUtc.Remove(peerKey);
             _partnerWind.Remove(peerKey);
             _partnersOnVacation.Remove(peerKey);
+            _windSharedAt.Remove(peerKey);
         }
     }
 
@@ -4264,6 +4375,7 @@ public sealed class RelayClient : IDisposable
             // Another character's partners: their wind and vacation as last heard aren't this one's.
             _partnerWind.Clear();
             _partnersOnVacation.Clear();
+            _windSharedAt.Clear();
         }
     }
 
@@ -4471,5 +4583,5 @@ public sealed class RelayClient : IDisposable
 /// <summary>A doll's unwind quote, for the confirm popup: who, their label, the cost, and whether it is free (owner).</summary>
 public sealed record UnwindQuoteView(string DollKey, string Label, int Springs, bool Free);
 
-/// <summary>A partner doll's wind as last heard: a percentage of normal wind (overwind reads 100), the flags, and when.</summary>
+/// <summary>A partner doll's wind as last seen: a percentage of normal wind (overwind reads 100), the flags, and when.</summary>
 public readonly record struct PartnerWindView(int Percent, bool Overwound, bool Broken, DateTimeOffset SeenAt);
